@@ -8,45 +8,45 @@
 
 ## Now (In Progress)
 
-### T0002: UX Principles & Design System
+### T0003: Wireframes (6 Key Screens)
 **Owner:** Loki  
-**Status:** Queued (spawning subagent)  
-**Scope:** Document Ive-level design system, visual language, typography, spacing, component principles  
+**Status:** Queued (spawning subagent for night work)  
+**Scope:** Text-spec wireframes for 6 key screens using UX principles  
 **Risks:** None (documentation)  
-**Files:** `docs/ux_principles.md`  
-**Verification:** Design system documented, ready for UI implementation  
-**Branch:** `docs/ux-principles`  
-**Next Action:** Spawn Loki to create UX principles doc
+**Files:** `docs/wireframes.md`  
+**Verification:** Wireframes complete, ready for implementation  
+**Branch:** `docs/wireframes`  
+**Next Action:** Spawn Loki for wireframes
 
-### T0006: Token Strategy & QMD Pipeline
-**Owner:** Jarvis (main)  
-**Status:** Queued  
-**Scope:** Document QMD pipeline, memory budgets, caching strategy, compaction triggers, delta prompting  
+### T0004: UI Microcopy
+**Owner:** Loki  
+**Status:** Queued (spawning subagent for night work)  
+**Scope:** Write UI copy for all screens (buttons, labels, errors, help text)  
 **Risks:** None (documentation)  
-**Files:** `docs/token_strategy.md`  
-**Verification:** QMD pipeline fully documented, implementation-ready  
-**Branch:** `docs/token-strategy`  
-**Next Action:** Create token strategy doc
+**Files:** `docs/microcopy.md`  
+**Verification:** Microcopy complete, tone matches UX principles  
+**Branch:** `docs/microcopy`  
+**Next Action:** Spawn Loki for microcopy
 
-### T0007: Tauri App Scaffold
-**Owner:** Friday  
-**Status:** Queued (spawning subagent)  
-**Scope:** Bootstrap Tauri desktop app with React frontend, basic IPC, build config  
-**Risks:** Tauri version conflicts, Rust toolchain issues  
-**Files:** `src-tauri/`, `src/`, `package.json`, `Cargo.toml`  
-**Verification:** App builds and runs, shows basic window  
-**Branch:** `feat/tauri-scaffold`  
-**Next Action:** Spawn Friday to create Tauri scaffold
+### T0005: Threat Model
+**Owner:** Fury  
+**Status:** Queued (spawning subagent for night work)  
+**Scope:** Security analysis, threat scenarios, mitigations, permission model validation  
+**Risks:** None (documentation)  
+**Files:** `docs/threat_model.md`  
+**Verification:** Threats documented, mitigations proposed  
+**Branch:** `docs/threat-model`  
+**Next Action:** Spawn Fury for threat modeling
 
-### T0011: Mission Control Dashboard UI
+### T0012: LLM Provider Registry Design
 **Owner:** Jarvis (main)  
-**Status:** Queued  
-**Scope:** Build internal Mission Control dashboard (read-only) - shows tasks, status, branches, commits  
-**Risks:** None (internal tooling)  
-**Files:** `src/mission-control/`, integration with Tauri scaffold  
-**Verification:** Dashboard accessible at localhost:PORT, renders mission_control.md data  
-**Branch:** `feat/mission-control-ui`  
-**Next Action:** Create simple web dashboard that reads mission_control.md
+**Status:** Queued (night work)  
+**Scope:** Design multi-provider interface (OpenAI, Anthropic, extensible)  
+**Risks:** None (documentation)  
+**Files:** `docs/provider_registry.md`  
+**Verification:** Provider interface documented, extensibility clear  
+**Branch:** `docs/provider-registry`  
+**Next Action:** Create provider registry design doc
 
 ---
 
@@ -61,6 +61,35 @@
 ---
 
 ## Shipped (Done)
+
+### T0007: Tauri App Scaffold ✓
+**Completed:** 2026-02-10 22:13 SGT  
+**Owner:** Friday  
+**Output:** Tauri + React + TypeScript scaffold, working IPC, builds successfully  
+**Branch:** `feat/tauri-scaffold`  
+**Run:** `npm run tauri:dev`  
+**Commit:** "feat: add Tauri app scaffold with React frontend"
+
+### T0011: Mission Control Dashboard UI ✓
+**Completed:** 2026-02-10 22:07 SGT  
+**Owner:** Jarvis (main)  
+**Output:** Live dashboard at http://localhost:3334, auto-refresh, task tracking  
+**Branch:** `feat/mission-control-ui`  
+**Commit:** `bfd200f` - "feat: add Mission Control dashboard UI (internal dev tool)"
+
+### T0006: Token Strategy & QMD Pipeline ✓
+**Completed:** 2026-02-10 22:05 SGT  
+**Owner:** Jarvis (main)  
+**Output:** QMD pipeline documented (memory budgets, caching, delta prompting)  
+**Branch:** `docs/token-strategy`  
+**Commit:** `e2afa0e` - "docs: add token strategy and QMD pipeline specification"
+
+### T0002: UX Principles & Design System ✓
+**Completed:** 2026-02-10 22:07 SGT  
+**Owner:** Loki  
+**Output:** Ive-level design system (12.5KB) - typography, colors, components, accessibility  
+**Branch:** `docs/ux-principles`  
+**Commit:** `4e2f831` - "docs: add UX principles and design system"
 
 ### T0001: Repo Skeleton + Mission Control Setup ✓
 **Completed:** 2026-02-10 19:10 SGT  
@@ -128,11 +157,11 @@
 
 ## Quick Stats
 
-- **Total Tasks Defined:** 11
-- **In Progress:** 4 (T0002, T0006, T0007, T0011)
-- **Queued:** 3 (T0003, T0004, T0005)
+- **Total Tasks Defined:** 12
+- **In Progress:** 4 (T0003, T0004, T0005, T0012) - Night Mode
+- **Queued:** 3 (T0008, T0009, T0010) - Awaiting Vir
 - **Blocked:** 0
-- **Shipped:** 2 (Phase A, T0001)
+- **Shipped:** 6 (Phase A, T0001, T0002, T0006, T0007, T0011)
 
 ---
 
