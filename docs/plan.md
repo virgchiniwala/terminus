@@ -18,24 +18,27 @@
 
 ### In Scope (MVP Features)
 - 3 Starter Automations (time-to-first-magic <3min):
-  1. Monitor website → summarize changes → post to Slack
+  1. Monitor website → summarize changes → email draft (approval required)
   2. Research topic → structured summary → save to file
-  3. Inbox triage (Slack) → draft responses → require approval before sending
+  3. Inbox triage (email) → draft responses → require approval before sending
 - Custom automation wizard (time-to-first-custom <15min)
-- Safe Mode defaults: read-only + drafts-only for outbound comms
+- Safe Mode defaults: read-only + drafts-only for outbound comms (email = draft mode unless explicitly opted in)
+- Multi-provider LLM support: OpenAI + Anthropic out of box, extensible provider registry
 - Per-run token budget (25k soft, 40k hard) + daily spend cap ($10 default)
 - Activity log (user-facing, JSON export)
 - QMD pipeline: compact at 12-15k tokens, cache distilled artifacts, delta prompting
 - macOS desktop app (Tauri) + local runner
+- Mission Control dashboard (internal, for Vir/dev visibility)
 
 ### Out of Scope (Phase 2+)
 - Multi-user/profiles
-- Gmail/Calendar/Notion integrations (start with Slack OR email, not both)
+- Slack/Calendar/Notion integrations (email-first for MVP)
 - Import existing OpenClaw workspaces
 - Visual workflow editor (drag-drop graph)
 - Mobile app
 - Cloud execution
 - Marketplace/sharing
+- OAuth provider flows (API keys only for MVP)
 
 ---
 
@@ -93,7 +96,11 @@
 │  │   ├─ memory.md (strict budget)  │
 │  │   ├─ Delta prompting            │
 │  │   └─ Cache (goal, plan, tools)  │
-│  ├─ LLM Client (OpenAI OR Anthropic)│
+│  ├─ LLM Provider Registry          │
+│  │   ├─ Common adapter interface   │
+│  │   ├─ OpenAI provider            │
+│  │   ├─ Anthropic provider         │
+│  │   └─ Extensible (drop-in config)│
 │  ├─ Secrets (macOS Keychain)       │
 │  └─ Audit Log (JSON, user-visible) │
 └──────────┬──────────────────────────┘
