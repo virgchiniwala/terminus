@@ -1,50 +1,60 @@
 # Morning Handoff — Personal AI OS
 
-**Date:** 2026-02-10 19:10 SGT  
-**Mode:** Day (initial setup)
+**Date:** 2026-02-10 21:40 SGT  
+**Mode:** Day (active development)
 
 ---
 
 ## What Shipped
 
 **Commits:**
-- None yet (repo just initialized)
+- `cef68f3` (main) - "chore: initialize repo skeleton with Mission Control"
 
 **Branches:**
-- `main` (initialized, clean)
+- `main` - initial skeleton
+- `feat/corrections-and-mc-ui` - current work (corrections + docs updates)
 
 ---
 
 ## What's Pending
 
-**T0001: Repo Skeleton + Mission Control Setup**
-- Status: In progress
-- Next: Define first 10 tasks, create task files, commit skeleton
-- Blocked on: Nothing
-- ETA: This session
+**Now (In Progress):**
+- T0002: UX Principles (Loki) - spawning subagent
+- T0006: Token Strategy / QMD Pipeline (Jarvis) - creating doc
+- T0007: Tauri App Scaffold (Friday) - spawning subagent
+- T0011: Mission Control Dashboard UI (Jarvis) - creating simple web UI
+
+**Next (Queued):**
+- T0003: Wireframes (6 key screens)
+- T0004: UI Microcopy
+- T0005: Threat Model
 
 ---
 
 ## What I Need from Vir
 
-1. **Approval to proceed** with first 10 tasks after I define them
-2. **Decision: Slack vs Email** for MVP notification integration (pick one to keep scope tight)
-3. **LLM provider preference:** OpenAI (GPT-4o/GPT-4o-mini) or Anthropic (Claude 3.5 Sonnet/Haiku)?
+**Decisions Made (Thank you!):**
+- ✅ Email-first for MVP (draft mode by default)
+- ✅ Multi-provider LLM (OpenAI + Anthropic out of box)
+- ✅ Mission Control must be actual dashboard UI
+- ✅ Day Mode path: Hybrid (T0002 + T0006 + T0007)
+
+**Still Need:**
+- None at the moment
 
 ---
 
-## Suggested Next 3 Tasks (After Skeleton)
+## Suggested Next Steps (After Current 4 Tasks)
 
-1. **UX Principles Doc** (Loki) — Design system, visual language, typography, spacing rules
-2. **Wireframes** (Jarvis + Loki) — Text-spec wireframes for 6 key screens
-3. **Threat Model** (Fury) — Security risks, mitigations, permission model validation
+1. **Wireframes** (Jarvis + Loki) — 6 key screens with UX principles applied
+2. **Threat Model** (Fury) — Security risks, permission model, audit requirements
+3. **Provider Registry Design** (Jarvis) — Extensible LLM provider interface
 
 ---
 
 ## Notes
 
-- Execution model upgraded to Mission Control workflow
-- All work now happens in local git repo
-- Day/night modes established
-- Subagent roster defined
-- Ready to break down first 10 tasks and begin implementation
+- Updated plan.md to reflect email-first and multi-provider design
+- Created T0011 for Mission Control dashboard (you're right — markdown isn't a dashboard)
+- About to spawn Loki (T0002), Friday (T0007), and build T0006 + T0011 myself
+- All work on feature branches, no push until approved

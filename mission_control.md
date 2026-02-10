@@ -8,21 +8,49 @@
 
 ## Now (In Progress)
 
-*No tasks in progress yet. First 10 tasks are being defined.*
+### T0002: UX Principles & Design System
+**Owner:** Loki  
+**Status:** Queued (spawning subagent)  
+**Scope:** Document Ive-level design system, visual language, typography, spacing, component principles  
+**Risks:** None (documentation)  
+**Files:** `docs/ux_principles.md`  
+**Verification:** Design system documented, ready for UI implementation  
+**Branch:** `docs/ux-principles`  
+**Next Action:** Spawn Loki to create UX principles doc
+
+### T0006: Token Strategy & QMD Pipeline
+**Owner:** Jarvis (main)  
+**Status:** Queued  
+**Scope:** Document QMD pipeline, memory budgets, caching strategy, compaction triggers, delta prompting  
+**Risks:** None (documentation)  
+**Files:** `docs/token_strategy.md`  
+**Verification:** QMD pipeline fully documented, implementation-ready  
+**Branch:** `docs/token-strategy`  
+**Next Action:** Create token strategy doc
+
+### T0007: Tauri App Scaffold
+**Owner:** Friday  
+**Status:** Queued (spawning subagent)  
+**Scope:** Bootstrap Tauri desktop app with React frontend, basic IPC, build config  
+**Risks:** Tauri version conflicts, Rust toolchain issues  
+**Files:** `src-tauri/`, `src/`, `package.json`, `Cargo.toml`  
+**Verification:** App builds and runs, shows basic window  
+**Branch:** `feat/tauri-scaffold`  
+**Next Action:** Spawn Friday to create Tauri scaffold
+
+### T0011: Mission Control Dashboard UI
+**Owner:** Jarvis (main)  
+**Status:** Queued  
+**Scope:** Build internal Mission Control dashboard (read-only) - shows tasks, status, branches, commits  
+**Risks:** None (internal tooling)  
+**Files:** `src/mission-control/`, integration with Tauri scaffold  
+**Verification:** Dashboard accessible at localhost:PORT, renders mission_control.md data  
+**Branch:** `feat/mission-control-ui`  
+**Next Action:** Create simple web dashboard that reads mission_control.md
 
 ---
 
 ## Next (Queued)
-
-### T0001: Repo Skeleton + Mission Control Setup
-**Owner:** Jarvis (main)  
-**Status:** Queued  
-**Scope:** Initialize git repo, create Mission Control files, define first 10 tasks  
-**Risks:** None (documentation only)  
-**Files:** `mission_control.md`, `handoff.md`, `tasks/`, `docs/plan.md`, `.gitignore`, `README.md`  
-**Verification:** Repo structure exists, Mission Control populated, first 10 tasks defined  
-**Branch:** `main`  
-**Next Action:** Create repo skeleton and task breakdown
 
 ---
 
@@ -33,6 +61,13 @@
 ---
 
 ## Shipped (Done)
+
+### T0001: Repo Skeleton + Mission Control Setup ✓
+**Completed:** 2026-02-10 19:10 SGT  
+**Owner:** Jarvis (main)  
+**Output:** Git repo initialized, Mission Control files created, task breakdown defined  
+**Branch:** `main`  
+**Commit:** `cef68f3` - "chore: initialize repo skeleton with Mission Control"
 
 ### Phase A: Requirements Gathering ✓
 **Completed:** 2026-02-10  
@@ -93,8 +128,17 @@
 
 ## Quick Stats
 
-- **Total Tasks Defined:** 0
-- **In Progress:** 0
-- **Queued:** 1
+- **Total Tasks Defined:** 11
+- **In Progress:** 4 (T0002, T0006, T0007, T0011)
+- **Queued:** 3 (T0003, T0004, T0005)
 - **Blocked:** 0
-- **Shipped:** 1 (Phase A)
+- **Shipped:** 2 (Phase A, T0001)
+
+---
+
+## Key Decisions (2026-02-10)
+
+**MVP Notification Channel:** Email-first (draft mode by default, explicit opt-in for send)  
+**LLM Providers:** Multi-provider by design (OpenAI + Anthropic out of box, extensible registry)  
+**Mission Control:** Must be actual dashboard UI, not just markdown  
+**Day Mode Path:** Hybrid (T0002 UX + T0006 Token + T0007 Tauri scaffold)
