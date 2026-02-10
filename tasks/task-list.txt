@@ -1,0 +1,8 @@
+T0003: Wireframes (6 key screens)
+T0004: UI Microcopy
+T0005: Threat Model
+T0006: Token Strategy (QMD pipeline)
+T0007: Tauri App Scaffold
+T0008: Rust Workflow Engine
+T0009: QMD Pipeline Implementation
+T0010: First LLM Provider Integration
