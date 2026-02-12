@@ -1,6 +1,6 @@
-# Personal AI OS
+# Terminus
 
-**Automate anything safely in minutes. Get addicted to the feeling of leverage.**
+**Automate anything safely in minutes.**
 
 ---
 
@@ -51,9 +51,7 @@ See `mission_control.md` for current task status.
 
 ## Workflow
 
-**Day Mode:** Propose 1-3 tasks → Vir prioritizes → execute with checkpoints  
+**Day Mode:** Propose 1-3 tasks → prioritizes → execute with checkpoints  
 **Night Mode:** Safe, unblocked tasks only (docs, refactors, tests, polish)
 
 ---
-
-**Built by Jarvis for Vir**
