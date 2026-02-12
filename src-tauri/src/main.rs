@@ -1,9 +1,11 @@
 mod db;
 mod primitives;
+mod providers;
 mod runner;
 mod schema;
+mod transport;
 
-use runner::{ApprovalRecord, RunRecord, RunnerEngine};
+use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
 use schema::{AutopilotPlan, ProviderId, RecipeKind};
 use std::path::PathBuf;
 use tauri::Manager;
@@ -104,6 +106,15 @@ fn get_run(state: tauri::State<AppState>, run_id: String) -> Result<RunRecord, S
     RunnerEngine::get_run(&connection, &run_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_terminal_receipt(
+    state: tauri::State<AppState>,
+    run_id: String,
+) -> Result<Option<RunReceipt>, String> {
+    let connection = open_connection(&state)?;
+    RunnerEngine::get_terminal_receipt(&connection, &run_id).map_err(|e| e.to_string())
+}
+
 fn parse_recipe(value: &str) -> Result<RecipeKind, String> {
     match value {
         "website_monitor" => Ok(RecipeKind::WebsiteMonitor),
@@ -141,7 +152,8 @@ fn main() {
             approve_run_approval,
             reject_run_approval,
             list_pending_approvals,
-            get_run
+            get_run,
+            get_terminal_receipt
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Terminus app");
