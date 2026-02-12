@@ -115,10 +115,11 @@ export function App() {
         ))}
       </section>
 
-      <section className="runner-banner" aria-label="Runner status">
-        <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
-        <p>{snapshot.runner.statusLine}</p>
-      </section>
-    </main>
+        <section className="runner-banner" aria-label="Runner status">
+          <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
+          <p>{snapshot.runner.statusLine}</p>
+        </section>
+      </main>
+    </>
   );
 }

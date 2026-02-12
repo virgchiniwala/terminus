@@ -3,6 +3,40 @@
   font-family: "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
   background: radial-gradient(circle at 10% 10%, #f4f8ff, #f7f7f2 45%, #f2f4f8 100%);
   color: #1f2733;
+  
+  /* Design tokens (light mode) */
+  --color-bg-primary: #f7f7f2;
+  --color-bg-secondary: rgba(255, 255, 255, 0.88);
+  --color-text-primary: #1f2733;
+  --color-text-secondary: #526176;
+  --color-text-tertiary: #708096;
+  --color-border: #d9e0ea;
+  --color-surface-hover: rgba(255, 255, 255, 0.95);
+  --color-accent: #5f7faa;
+  --color-error-bg: #fff6f4;
+  --color-error-border: #ffd4cc;
+  --color-error-text: #8a3324;
+}
+
+/* Dark mode foundation (not activated yet, but ready) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    background: radial-gradient(circle at 10% 10%, #1a1d23, #14171c 45%, #0f1116 100%);
+    color: #e5e7eb;
+    
+    --color-bg-primary: #14171c;
+    --color-bg-secondary: rgba(30, 34, 42, 0.88);
+    --color-text-primary: #e5e7eb;
+    --color-text-secondary: #9ca3af;
+    --color-text-tertiary: #6b7280;
+    --color-border: #2d3340;
+    --color-surface-hover: rgba(40, 44, 52, 0.95);
+    --color-accent: #7a9fd4;
+    --color-error-bg: #2a1a19;
+    --color-error-border: #4a2d2a;
+    --color-error-text: #f8a898;
+  }
 }
 
 * {
@@ -12,6 +46,8 @@
 body {
   margin: 0;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .app-shell {
