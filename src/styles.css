@@ -1,0 +1,108 @@
+:root {
+  color-scheme: light;
+  font-family: "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  background: radial-gradient(circle at 10% 10%, #f4f8ff, #f7f7f2 45%, #f2f4f8 100%);
+  color: #1f2733;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.app-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 40px 20px 56px;
+}
+
+.hero h1 {
+  margin: 8px 0;
+  font-size: clamp(2rem, 5vw, 3rem);
+  letter-spacing: -0.04em;
+}
+
+.kicker {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  color: #5f6f86;
+}
+
+.subhead {
+  margin-top: 0;
+  color: #4e5d72;
+}
+
+.surface-grid {
+  margin-top: 28px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.surface-card {
+  padding: 18px;
+  border-radius: 14px;
+  border: 1px solid #d9e0ea;
+  background: rgba(255, 255, 255, 0.88);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 190px;
+}
+
+.surface-card h2 {
+  margin: 0;
+  font-size: 1.28rem;
+}
+
+.surface-card p {
+  margin-top: 10px;
+  color: #526176;
+}
+
+.surface-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.surface-footer span {
+  font-size: 0.87rem;
+  color: #708096;
+}
+
+button {
+  border: 1px solid #c6d0de;
+  background: #f8fbff;
+  color: #1f2733;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 0.84rem;
+}
+
+.runner-banner {
+  margin-top: 22px;
+  border: 1px solid #d9e0ea;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 14px 16px;
+}
+
+.runner-banner p {
+  margin: 8px 0 0;
+  color: #526176;
+}
+
+@media (max-width: 760px) {
+  .surface-grid {
+    grid-template-columns: 1fr;
+  }
+}

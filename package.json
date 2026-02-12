@@ -1,0 +1,38 @@
+{
+  "name": "terminus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Calm personal AI OS",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/virgchiniwala/terminus.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/virgchiniwala/terminus/issues"
+  },
+  "homepage": "https://github.com/virgchiniwala/terminus#readme",
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  }
+}

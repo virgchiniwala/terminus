@@ -1,5 +1,48 @@
 # Morning Handoff — Personal AI OS
 
+## Day Handoff Update (2026-02-12 12:28 SGT)
+
+### Completed This Session
+1. **T1001 (Friday)**: Built codebase shell for Tauri + React + Rust and object-first Home UI.
+2. **T1001 (Friday)**: Added SQLite bootstrap and `get_home_snapshot` command for Home surface counts.
+3. **T1002 (Friday)**: Implemented shared `AutopilotPlan` schema and recipe constructor for A/B/C presets.
+4. **T1003 (Fury)**: Added deny-by-default primitive guard with human-readable error on denied actions.
+5. Captured Home UI screenshots (desktop + mobile) under `output/playwright/`.
+
+### Verification Run
+- Frontend build: `npm run build` (pass)
+- Rust tests: `cargo test` (pass, 3 tests)
+
+### Notes
+- Gemini is represented as `experimental` in provider metadata and examples.
+- Guard failures return user-facing message, not stack traces.
+
+### Ready For Vir Review
+- Home screenshots and empty states
+- Unified schema + A/B/C examples
+- Primitive allowlist and denied-action test proof
+
+---
+
+## Day Handoff Update (2026-02-12 12:44 SGT)
+
+### Completed This Session
+1. Implemented T1004 persisted runner state machine in SQLite (`runs`, `activities`, `approvals`, `outcomes`).
+2. Added atomic run transitions with activity writes in one DB transaction.
+3. Added idempotency key handling for runs and unique side-effect protection for outcomes.
+4. Added bounded retry with exponential backoff metadata and retryable/non-retryable branching.
+5. Added approval-required pause/resume/terminate flow with approve/reject commands.
+
+### Verification Run
+- Rust tests: `cargo test` (pass, 7 tests)
+- Frontend build: `npm run build` (pass)
+
+### Notes
+- Compose-only behavior is enforced in runner: draft steps can run, send step returns human-readable deny reason.
+- No scheduling/daemon/provider connection work added in this step.
+
+---
+
 **Date:** 2026-02-11 00:40 SGT  
 **Mode:** Night (Autonomous work complete, awaiting morning review)
 

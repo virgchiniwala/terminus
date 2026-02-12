@@ -1,8 +1,86 @@
 # Mission Control — Personal AI OS
 
-**Last Updated:** 2026-02-10 19:10 SGT  
+**Last Updated:** 2026-02-12 12:28 SGT  
 **Current Mode:** Day (Vir active)  
 **Branch:** main
+
+---
+
+## Workflow Enforcement (Aligned to AGENTS)
+
+- One owner per task by default (`Friday`, `Fury`, `Jarvis`, `Loki`).
+- Day Mode: execute max 1-3 tasks at once.
+- Every runtime task must include:
+  - explicit action boundary
+  - idempotency key strategy
+  - bounded retry policy (retryable vs non-retryable)
+  - atomic state transition + activity receipt
+  - user-facing failure reason (no stack traces in UX fields)
+- End-user surfaces stay object-first (`Autopilots/Outcomes/Approvals/Activity`), never chat-first.
+- Provider guarantee policy:
+  - Supported (CI-blocking): OpenAI, Anthropic
+  - Experimental (non-CI-blocking): Gemini
+
+---
+
+## Task Card Contract (Required Fields)
+
+For every new task card in `Now`, `Next`, or `Blocked`, include all fields below:
+
+- `Task ID + Title`
+- `Owner` (single owner unless explicitly co-owned)
+- `Status`
+- `Scope` (what is changing)
+- `Non-goals` (what must not change)
+- `Files`
+- `Risks`
+- `Acceptance Criteria`
+- `Verification`
+- `Rollback/Containment` (how to disable or revert safely)
+
+---
+
+## Definition-of-Done Gate
+
+A task is only marked `Shipped` when all are true:
+
+- Tests for happy path and failure path are passing.
+- State/persistence changes are verified against SQLite.
+- Approval and permission behavior is verified (if applicable).
+- Human-readable failure reasons are present for user-visible errors.
+- Handoff includes exact reproduction/verification commands.
+
+---
+
+## Day Update (2026-02-12)
+
+### T1004: Persisted Runner State Machine + Approval Gate
+**Owner:** Friday + Fury  
+**Status:** Shipped  
+**Scope:** Persisted `runs/activities/approvals/outcomes`, transactional run state transitions, bounded retry, idempotency keys, approve/reject resume flow  
+**Files:** `src-tauri/src/db.rs`, `src-tauri/src/runner.rs`, `src-tauri/src/main.rs`  
+**Verification:** `cargo test` passes (7 tests) including idempotency, bounded retry, and atomic transition
+
+### T1001: App Shell + SQLite Bootstrap
+**Owner:** Friday  
+**Status:** Shipped  
+**Scope:** Tauri + React + Rust shell with object-based Home and SQLite bootstrap for `Autopilots/Outcomes/Approvals/Activity`  
+**Files:** `index.html`, `src/App.tsx`, `src/styles.css`, `src-tauri/src/main.rs`, `src-tauri/src/db.rs`  
+**Verification:** `npm run build` passes; Tauri command `get_home_snapshot` reads counts from SQLite
+
+### T1002: Shared Plan Schema (Intent -> Plan Object)
+**Owner:** Friday  
+**Status:** Shipped  
+**Scope:** One schema for all three presets (website monitor, inbox triage, daily brief) with provider/risk metadata and primitive allowlist  
+**Files:** `src-tauri/src/schema.rs`, `docs/plan_schema_examples.json`  
+**Verification:** `cargo test` includes shared-schema test across A/B/C recipes
+
+### T1003: Runtime Primitive Guard (Deny by Default)
+**Owner:** Fury  
+**Status:** Shipped  
+**Scope:** Guard that blocks non-allowlisted primitives with user-friendly error messaging  
+**Files:** `src-tauri/src/primitives.rs`  
+**Verification:** `cargo test` includes denied-action test asserting message: \"This action isn't allowed in Terminus yet.\"
 
 ---
 
