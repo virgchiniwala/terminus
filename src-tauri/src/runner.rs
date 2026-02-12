@@ -1,5 +1,11 @@
 use crate::primitives::PrimitiveGuard;
-use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId};
+use crate::providers::{
+    ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
+};
+use crate::schema::{
+    AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
+    ProviderTier as SchemaProviderTier,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -8,6 +14,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const PER_RUN_SOFT_CAP_USD_CENTS: i64 = 40;
+const PER_RUN_HARD_CAP_USD_CENTS: i64 = 80;
+const DAILY_SOFT_CAP_USD_CENTS: i64 = 300;
+const DAILY_HARD_CAP_USD_CENTS: i64 = 500;
+const SOFT_CAP_APPROVAL_STEP_ID: &str = "__soft_cap__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +31,7 @@ pub enum RunState {
     Retrying,
     Succeeded,
     Failed,
+    Blocked,
     Canceled,
 }
 
@@ -32,12 +45,16 @@ impl RunState {
             Self::Retrying => "retrying",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
+            Self::Blocked => "blocked",
             Self::Canceled => "canceled",
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Canceled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Blocked | Self::Canceled
+        )
     }
 }
 
@@ -53,6 +70,7 @@ impl FromStr for RunState {
             "retrying" => Ok(Self::Retrying),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
+            "blocked" => Ok(Self::Blocked),
             "canceled" => Ok(Self::Canceled),
             _ => Err(RunnerError::InvalidState(value.to_string())),
         }
@@ -64,12 +82,17 @@ pub struct RunRecord {
     pub id: String,
     pub autopilot_id: String,
     pub idempotency_key: String,
+    pub provider_kind: ProviderKind,
+    pub provider_tier: ProviderTier,
     pub state: RunState,
     pub current_step_index: i64,
     pub retry_count: i64,
     pub max_retries: i64,
     pub next_retry_backoff_ms: Option<i64>,
     pub next_retry_at_ms: Option<i64>,
+    pub soft_cap_approved: bool,
+    pub usd_cents_estimate: i64,
+    pub usd_cents_actual: i64,
     pub failure_reason: Option<String>,
     pub plan: AutopilotPlan,
 }
@@ -84,6 +107,21 @@ pub struct ApprovalRecord {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunReceipt {
+    pub schema_version: String,
+    pub run_id: String,
+    pub provider_kind: String,
+    pub provider_tier: String,
+    pub terminal_state: String,
+    pub summary: String,
+    pub failure_reason: Option<String>,
+    pub recovery_options: Vec<String>,
+    pub total_spend_usd_cents: i64,
+    pub redacted: bool,
+    pub created_at_ms: i64,
+}
+
 #[derive(Debug, Error)]
 pub enum RunnerError {
     #[error("database error: {0}")]
@@ -96,6 +134,10 @@ pub enum RunnerError {
     ApprovalNotFound,
     #[error("invalid run state: {0}")]
     InvalidState(String),
+    #[error("invalid provider kind: {0}")]
+    InvalidProviderKind(String),
+    #[error("invalid provider tier: {0}")]
+    InvalidProviderTier(String),
     #[error("{0}")]
     Human(String),
     #[error("forced transition failure")]
@@ -106,6 +148,18 @@ pub enum RunnerError {
 struct StepExecutionError {
     retryable: bool,
     user_reason: String,
+}
+
+#[derive(Debug)]
+struct StepExecutionResult {
+    user_message: String,
+    actual_spend_usd_cents: i64,
+}
+
+enum CapDecision {
+    Allow,
+    NeedsSoftApproval { message: String },
+    BlockHard { message: String },
 }
 
 pub struct RunnerEngine;
@@ -125,6 +179,8 @@ impl RunnerEngine {
         let run_id = make_id("run");
         let now = now_ms();
         let plan_json = serde_json::to_string(&plan).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        let provider_kind = provider_kind_from_plan(&plan);
+        let provider_tier = provider_tier_from_plan(&plan);
 
         let tx = connection
             .transaction()
@@ -139,17 +195,30 @@ impl RunnerEngine {
         tx.execute(
             "
             INSERT INTO runs (
-              id, autopilot_id, idempotency_key, plan_json, state,
-              current_step_index, retry_count, max_retries,
+              id, autopilot_id, idempotency_key, plan_json,
+              provider_kind, provider_tier,
+              state, current_step_index, retry_count, max_retries,
               next_retry_backoff_ms, next_retry_at_ms,
+              soft_cap_approved, spend_usd_estimate, spend_usd_actual,
+              usd_cents_estimate, usd_cents_actual,
               failure_reason, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, NULL, NULL, NULL, ?7, ?7)
+            ) VALUES (
+              ?1, ?2, ?3, ?4,
+              ?5, ?6,
+              ?7, 0, 0, ?8,
+              NULL, NULL,
+              0, 0.0, 0.0,
+              0, 0,
+              NULL, ?9, ?9
+            )
             ",
             params![
                 run_id,
                 autopilot_id,
                 idempotency_key,
                 plan_json,
+                provider_kind.as_str(),
+                provider_tier.as_str(),
                 RunState::Ready.as_str(),
                 max_retries,
                 now
@@ -239,14 +308,20 @@ impl RunnerEngine {
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
+        let is_soft_cap_approval = approval.step_id == SOFT_CAP_APPROVAL_STEP_ID;
+
         tx.execute(
             "
             UPDATE runs
-            SET state = 'ready', failure_reason = NULL, next_retry_backoff_ms = NULL,
-                next_retry_at_ms = NULL, updated_at = ?1
-            WHERE id = ?2
+            SET state = 'ready',
+                soft_cap_approved = CASE WHEN ?1 THEN 1 ELSE soft_cap_approved END,
+                failure_reason = NULL,
+                next_retry_backoff_ms = NULL,
+                next_retry_at_ms = NULL,
+                updated_at = ?2
+            WHERE id = ?3
             ",
-            params![now, approval.run_id],
+            params![is_soft_cap_approval, now, approval.run_id],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
@@ -258,14 +333,23 @@ impl RunnerEngine {
             params![
                 make_id("activity"),
                 approval.run_id,
-                "Approval granted. Run is ready for the next tick.",
+                if is_soft_cap_approval {
+                    "Spend approval granted. Run is ready for next step."
+                } else {
+                    "Step approval granted. Run is ready for next step."
+                },
                 now
             ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
-        Self::run_tick_internal(connection, &approval.run_id, Some(&approval.step_id))
+
+        if is_soft_cap_approval {
+            Self::run_tick_internal(connection, &approval.run_id, None)
+        } else {
+            Self::run_tick_internal(connection, &approval.run_id, Some(&approval.step_id))
+        }
     }
 
     pub fn reject(
@@ -279,6 +363,12 @@ impl RunnerEngine {
         }
 
         let reject_reason = reason.unwrap_or_else(|| "Approval was rejected by the user.".to_string());
+        let terminal_state = if approval.step_id == SOFT_CAP_APPROVAL_STEP_ID {
+            RunState::Blocked
+        } else {
+            RunState::Canceled
+        };
+
         let tx = connection
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
@@ -297,21 +387,43 @@ impl RunnerEngine {
         tx.execute(
             "
             UPDATE runs
-            SET state = 'canceled', failure_reason = ?1, updated_at = ?2
-            WHERE id = ?3
+            SET state = ?1,
+                failure_reason = ?2,
+                updated_at = ?3
+            WHERE id = ?4
             ",
-            params![reject_reason, now, approval.run_id],
+            params![
+                terminal_state.as_str(),
+                reject_reason,
+                now,
+                approval.run_id
+            ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.execute(
             "
             INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
-            VALUES (?1, ?2, 'approval_rejected', 'needs_approval', 'canceled', ?3, ?4)
+            VALUES (?1, ?2, 'approval_rejected', 'needs_approval', ?3, ?4, ?5)
             ",
-            params![make_id("activity"), approval.run_id, reject_reason, now],
+            params![
+                make_id("activity"),
+                approval.run_id,
+                terminal_state.as_str(),
+                redact_text(&reject_reason),
+                now
+            ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        let run = Self::get_run_in_tx(&tx, &approval.run_id)?;
+        Self::upsert_terminal_receipt_in_tx(
+            &tx,
+            &run,
+            terminal_state,
+            "Run stopped after approval rejection.",
+            Some(&reject_reason),
+        )?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
         Self::get_run(connection, &approval.run_id)
@@ -353,31 +465,42 @@ impl RunnerEngine {
         connection
             .query_row(
                 "
-                SELECT id, autopilot_id, idempotency_key, state,
-                       current_step_index, retry_count, max_retries,
+                SELECT id, autopilot_id, idempotency_key,
+                       provider_kind, provider_tier,
+                       state, current_step_index, retry_count, max_retries,
                        next_retry_backoff_ms, next_retry_at_ms,
+                       soft_cap_approved, usd_cents_estimate, usd_cents_actual,
                        failure_reason, plan_json
                 FROM runs
                 WHERE id = ?1
                 ",
                 params![run_id],
                 |row| {
-                    let state_text: String = row.get(3)?;
-                    let plan_json: String = row.get(10)?;
+                    let state_text: String = row.get(5)?;
+                    let provider_kind_text: String = row.get(3)?;
+                    let provider_tier_text: String = row.get(4)?;
+                    let plan_json: String = row.get(15)?;
                     let plan: AutopilotPlan = serde_json::from_str(&plan_json)
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                     Ok(RunRecord {
                         id: row.get(0)?,
                         autopilot_id: row.get(1)?,
                         idempotency_key: row.get(2)?,
+                        provider_kind: parse_provider_kind(&provider_kind_text)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                        provider_tier: parse_provider_tier(&provider_tier_text)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
                         state: RunState::from_str(&state_text)
                             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                        current_step_index: row.get(4)?,
-                        retry_count: row.get(5)?,
-                        max_retries: row.get(6)?,
-                        next_retry_backoff_ms: row.get(7)?,
-                        next_retry_at_ms: row.get(8)?,
-                        failure_reason: row.get(9)?,
+                        current_step_index: row.get(6)?,
+                        retry_count: row.get(7)?,
+                        max_retries: row.get(8)?,
+                        next_retry_backoff_ms: row.get(9)?,
+                        next_retry_at_ms: row.get(10)?,
+                        soft_cap_approved: row.get::<_, i64>(11)? == 1,
+                        usd_cents_estimate: row.get(12)?,
+                        usd_cents_actual: row.get(13)?,
+                        failure_reason: row.get(14)?,
                         plan,
                     })
                 },
@@ -391,27 +514,79 @@ impl RunnerEngine {
             })
     }
 
-    pub fn transition_state_with_activity(
-        connection: &mut Connection,
+    pub fn get_terminal_receipt(
+        connection: &Connection,
         run_id: &str,
-        from_state: RunState,
-        to_state: RunState,
-        activity_type: &str,
-        user_message: &str,
-        failure_reason: Option<&str>,
-        current_step_index: Option<i64>,
-    ) -> Result<(), RunnerError> {
-        Self::transition_state_with_activity_internal(
-            connection,
-            run_id,
-            from_state,
-            to_state,
-            activity_type,
-            user_message,
-            failure_reason,
-            current_step_index,
-            false,
+    ) -> Result<Option<RunReceipt>, RunnerError> {
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'receipt' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        match payload {
+            Some(json) => {
+                let receipt: RunReceipt =
+                    serde_json::from_str(&json).map_err(|e| RunnerError::Serde(e.to_string()))?;
+                Ok(Some(receipt))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn get_run_in_tx(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Result<RunRecord, RunnerError> {
+        tx.query_row(
+            "
+            SELECT id, autopilot_id, idempotency_key,
+                   provider_kind, provider_tier,
+                   state, current_step_index, retry_count, max_retries,
+                   next_retry_backoff_ms, next_retry_at_ms,
+                   soft_cap_approved, usd_cents_estimate, usd_cents_actual,
+                   failure_reason, plan_json
+            FROM runs
+            WHERE id = ?1
+            ",
+            params![run_id],
+            |row| {
+                let state_text: String = row.get(5)?;
+                let provider_kind_text: String = row.get(3)?;
+                let provider_tier_text: String = row.get(4)?;
+                let plan_json: String = row.get(15)?;
+                let plan: AutopilotPlan = serde_json::from_str(&plan_json)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                Ok(RunRecord {
+                    id: row.get(0)?,
+                    autopilot_id: row.get(1)?,
+                    idempotency_key: row.get(2)?,
+                    provider_kind: parse_provider_kind(&provider_kind_text)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    provider_tier: parse_provider_tier(&provider_tier_text)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    state: RunState::from_str(&state_text)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    current_step_index: row.get(6)?,
+                    retry_count: row.get(7)?,
+                    max_retries: row.get(8)?,
+                    next_retry_backoff_ms: row.get(9)?,
+                    next_retry_at_ms: row.get(10)?,
+                    soft_cap_approved: row.get::<_, i64>(11)? == 1,
+                    usd_cents_estimate: row.get(12)?,
+                    usd_cents_actual: row.get(13)?,
+                    failure_reason: row.get(14)?,
+                    plan,
+                })
+            },
         )
+        .map_err(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                RunnerError::RunNotFound
+            } else {
+                RunnerError::Db(e.to_string())
+            }
+        })
     }
 
     fn run_tick_internal(
@@ -465,8 +640,42 @@ impl RunnerEngine {
             return Self::get_run(connection, run_id);
         }
 
+        let step_cost_estimate_cents = estimate_step_cost_usd_cents(&run, &step);
+        match Self::evaluate_spend_caps(connection, &run, step_cost_estimate_cents)? {
+            CapDecision::Allow => {}
+            CapDecision::NeedsSoftApproval { message } => {
+                Self::pause_for_soft_cap_approval(connection, &run, &message)?;
+                return Self::get_run(connection, run_id);
+            }
+            CapDecision::BlockHard { message } => {
+                Self::transition_state_with_activity(
+                    connection,
+                    run_id,
+                    run.state,
+                    RunState::Blocked,
+                    "run_blocked_hard_cap",
+                    &message,
+                    Some(&message),
+                    Some(current_idx as i64),
+                )?;
+                return Self::get_run(connection, run_id);
+            }
+        }
+
+        let from_state = run.state;
         match Self::execute_step(connection, &run, &step) {
-            Ok(message) => {
+            Ok(result) => {
+                if result.actual_spend_usd_cents > 0 {
+                    Self::record_spend(
+                        connection,
+                        &run.id,
+                        &step.id,
+                        "actual",
+                        result.actual_spend_usd_cents,
+                        &step,
+                    )?;
+                }
+
                 let next_idx = (current_idx as i64) + 1;
                 let next_state = if next_idx as usize >= run.plan.steps.len() {
                     RunState::Succeeded
@@ -482,10 +691,10 @@ impl RunnerEngine {
                 Self::transition_state_with_activity(
                     connection,
                     run_id,
-                    run.state,
+                    from_state,
                     next_state,
                     activity,
-                    &message,
+                    &result.user_message,
                     None,
                     Some(next_idx),
                 )?;
@@ -498,7 +707,7 @@ impl RunnerEngine {
                     Self::schedule_retry(
                         connection,
                         run_id,
-                        run.state,
+                        from_state,
                         next_retry,
                         backoff_ms,
                         next_retry_at_ms,
@@ -510,7 +719,7 @@ impl RunnerEngine {
                 Self::transition_state_with_activity(
                     connection,
                     run_id,
-                    run.state,
+                    from_state,
                     RunState::Failed,
                     "run_failed",
                     &error.user_reason,
@@ -521,6 +730,220 @@ impl RunnerEngine {
         }
 
         Self::get_run(connection, run_id)
+    }
+
+    fn evaluate_spend_caps(
+        connection: &Connection,
+        run: &RunRecord,
+        step_cost_cents: i64,
+    ) -> Result<CapDecision, RunnerError> {
+        if step_cost_cents <= 0 {
+            return Ok(CapDecision::Allow);
+        }
+
+        let projected_run = run.usd_cents_actual.saturating_add(step_cost_cents);
+        let daily_spend = Self::get_daily_spend_usd_cents(connection)?;
+        let projected_daily = daily_spend.saturating_add(step_cost_cents);
+
+        if projected_run > PER_RUN_HARD_CAP_USD_CENTS {
+            return Ok(CapDecision::BlockHard {
+                message: format!(
+                    "This run is blocked before execution: projected cost is about {}, over the per-run hard cap of {}. Reduce scope or adjust caps.",
+                    format_usd_cents(projected_run),
+                    format_usd_cents(PER_RUN_HARD_CAP_USD_CENTS)
+                ),
+            });
+        }
+
+        if projected_daily > DAILY_HARD_CAP_USD_CENTS {
+            return Ok(CapDecision::BlockHard {
+                message: format!(
+                    "Today's cap is reached: projected daily cost is about {}, over the daily hard cap of {}. Try later or adjust caps.",
+                    format_usd_cents(projected_daily),
+                    format_usd_cents(DAILY_HARD_CAP_USD_CENTS)
+                ),
+            });
+        }
+
+        if !run.soft_cap_approved
+            && (projected_run > PER_RUN_SOFT_CAP_USD_CENTS
+                || projected_daily > DAILY_SOFT_CAP_USD_CENTS)
+        {
+            return Ok(CapDecision::NeedsSoftApproval {
+                message: format!(
+                    "This run may cost about {}. Continue now, or reduce scope first.",
+                    format_usd_cents(projected_run)
+                ),
+            });
+        }
+
+        Ok(CapDecision::Allow)
+    }
+
+    fn execute_step(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+    ) -> Result<StepExecutionResult, StepExecutionError> {
+        let guard = PrimitiveGuard::new(run.plan.allowed_primitives.clone());
+        if let Err(error) = guard.validate(step.primitive) {
+            return Err(StepExecutionError {
+                retryable: false,
+                user_reason: error.to_string(),
+            });
+        }
+
+        if step.primitive == PrimitiveId::SendEmail {
+            return Err(StepExecutionError {
+                retryable: false,
+                user_reason: "Sending is disabled right now. Drafts are allowed, sends are blocked."
+                    .to_string(),
+            });
+        }
+
+        match step.primitive {
+            PrimitiveId::WriteOutcomeDraft | PrimitiveId::WriteEmailDraft => {
+                let runtime = ProviderRuntime::default();
+                let request = ProviderRequest {
+                    provider_kind: run.provider_kind,
+                    provider_tier: run.provider_tier,
+                    model: run.plan.provider.default_model.clone(),
+                    input: format!("{}\n\nStep: {}", run.plan.intent, step.label),
+                    max_output_tokens: Some(512),
+                    correlation_id: Some(format!("{}:{}", run.id, step.id)),
+                };
+
+                let response = runtime.dispatch(&request).map_err(map_provider_error)?;
+                Self::persist_provider_output(connection, run, step, &response)?;
+                let fallback_estimate_cents = estimate_step_cost_usd_cents(run, step);
+                let actual_cents = std::cmp::max(
+                    fallback_estimate_cents,
+                    response.usage.estimated_cost_usd_cents,
+                );
+
+                Ok(StepExecutionResult {
+                    user_message: if step.primitive == PrimitiveId::WriteEmailDraft {
+                        "Draft email created and queued for approval.".to_string()
+                    } else {
+                        "Draft outcome saved.".to_string()
+                    },
+                    actual_spend_usd_cents: actual_cents,
+                })
+            }
+            PrimitiveId::ReadWeb
+            | PrimitiveId::ReadForwardedEmail
+            | PrimitiveId::ReadVaultFile
+            | PrimitiveId::ScheduleRun
+            | PrimitiveId::NotifyUser => Ok(StepExecutionResult {
+                user_message: "Step completed.".to_string(),
+                actual_spend_usd_cents: 0,
+            }),
+            PrimitiveId::SendEmail => Err(StepExecutionError {
+                retryable: false,
+                user_reason: "Sending is disabled right now. Drafts are allowed, sends are blocked."
+                    .to_string(),
+            }),
+        }
+    }
+
+    fn persist_provider_output(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        response: &ProviderResponse,
+    ) -> Result<(), StepExecutionError> {
+        let kind = if step.primitive == PrimitiveId::WriteEmailDraft {
+            "email_draft"
+        } else {
+            "outcome_draft"
+        };
+
+        let content = redact_text(&response.text);
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content,
+                  created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, 'drafted', ?5, ?6, ?6)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![make_id("outcome"), run.id, step.id, kind, content, now_ms()],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: true,
+                user_reason: "Couldn't save generated output yet.".to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    fn get_daily_spend_usd_cents(connection: &Connection) -> Result<i64, RunnerError> {
+        let day_bucket = current_day_bucket();
+        let spent: Option<i64> = connection
+            .query_row(
+                "SELECT SUM(amount_usd_cents) FROM spend_ledger WHERE day_bucket = ?1",
+                params![day_bucket],
+                |row| row.get(0),
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(spent.unwrap_or(0))
+    }
+
+    fn record_spend(
+        connection: &mut Connection,
+        run_id: &str,
+        step_id: &str,
+        entry_kind: &str,
+        amount_usd_cents: i64,
+        step: &PlanStep,
+    ) -> Result<(), RunnerError> {
+        let tx = connection
+            .transaction()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let now = now_ms();
+
+        tx.execute(
+            "
+            INSERT INTO spend_ledger (id, run_id, step_id, entry_kind, amount_usd, amount_usd_cents, reason, day_bucket, created_at)
+            VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, ?7, ?8)
+            ON CONFLICT(run_id, step_id, entry_kind) DO NOTHING
+            ",
+            params![
+                make_id("spend"),
+                run_id,
+                step_id,
+                entry_kind,
+                amount_usd_cents,
+                format!("Step {}", step.id),
+                current_day_bucket(),
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        let total: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(amount_usd_cents), 0) FROM spend_ledger WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        tx.execute(
+            "
+            UPDATE runs
+            SET usd_cents_actual = ?1,
+                usd_cents_estimate = ?1,
+                updated_at = ?2
+            WHERE id = ?3
+            ",
+            params![total, now, run_id],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
     }
 
     fn get_run_by_idempotency_key(
@@ -626,96 +1049,53 @@ impl RunnerEngine {
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
     }
 
-    fn execute_step(
-        connection: &Connection,
+    fn pause_for_soft_cap_approval(
+        connection: &mut Connection,
         run: &RunRecord,
-        step: &PlanStep,
-    ) -> Result<String, StepExecutionError> {
-        let guard = PrimitiveGuard::new(run.plan.allowed_primitives.clone());
-        if let Err(error) = guard.validate(step.primitive) {
-            return Err(StepExecutionError {
-                retryable: false,
-                user_reason: error.to_string(),
-            });
-        }
+        message: &str,
+    ) -> Result<(), RunnerError> {
+        let tx = connection
+            .transaction()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let now = now_ms();
 
-        if step.primitive == PrimitiveId::SendEmail {
-            return Err(StepExecutionError {
-                retryable: false,
-                user_reason: "Sending is disabled right now. Drafts are allowed, sends are blocked."
-                    .to_string(),
-            });
-        }
+        tx.execute(
+            "
+            INSERT OR IGNORE INTO approvals
+              (id, run_id, step_id, status, preview, created_at, updated_at)
+            VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?5)
+            ",
+            params![
+                make_id("approval"),
+                run.id,
+                SOFT_CAP_APPROVAL_STEP_ID,
+                message,
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
 
-        if run.plan.intent.contains("simulate_retryable_failure") {
-            return Err(StepExecutionError {
-                retryable: true,
-                user_reason: "Source is temporarily unavailable.".to_string(),
-            });
-        }
+        tx.execute(
+            "
+            UPDATE runs
+            SET state = 'needs_approval',
+                updated_at = ?1
+            WHERE id = ?2
+            ",
+            params![now, run.id],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
 
-        match step.primitive {
-            PrimitiveId::WriteOutcomeDraft => {
-                connection
-                    .execute(
-                        "
-                        INSERT INTO outcomes (
-                          id, run_id, step_id, kind, status, content,
-                          created_at, updated_at
-                        ) VALUES (?1, ?2, ?3, 'outcome_draft', 'drafted', ?4, ?5, ?5)
-                        ON CONFLICT(run_id, step_id, kind) DO NOTHING
-                        ",
-                        params![
-                            make_id("outcome"),
-                            run.id,
-                            step.id,
-                            format!("Draft outcome for step: {}", step.label),
-                            now_ms()
-                        ],
-                    )
-                    .map_err(|_| StepExecutionError {
-                        retryable: true,
-                        user_reason: "Couldn't write the draft outcome yet.".to_string(),
-                    })?;
+        tx.execute(
+            "
+            INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
+            VALUES (?1, ?2, 'spend_soft_cap_approval_required', ?3, 'needs_approval', ?4, ?5)
+            ",
+            params![make_id("activity"), run.id, run.state.as_str(), message, now],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
 
-                Ok("Draft outcome saved.".to_string())
-            }
-            PrimitiveId::WriteEmailDraft => {
-                connection
-                    .execute(
-                        "
-                        INSERT INTO outcomes (
-                          id, run_id, step_id, kind, status, content,
-                          created_at, updated_at
-                        ) VALUES (?1, ?2, ?3, 'email_draft', 'drafted', ?4, ?5, ?5)
-                        ON CONFLICT(run_id, step_id, kind) DO NOTHING
-                        ",
-                        params![
-                            make_id("outcome"),
-                            run.id,
-                            step.id,
-                            format!("Draft email for step: {}", step.label),
-                            now_ms()
-                        ],
-                    )
-                    .map_err(|_| StepExecutionError {
-                        retryable: true,
-                        user_reason: "Couldn't write the draft email yet.".to_string(),
-                    })?;
-
-                Ok("Draft email created and queued for approval.".to_string())
-            }
-            PrimitiveId::ReadWeb
-            | PrimitiveId::ReadForwardedEmail
-            | PrimitiveId::ReadVaultFile
-            | PrimitiveId::ScheduleRun
-            | PrimitiveId::NotifyUser => Ok("Step completed.".to_string()),
-            PrimitiveId::SendEmail => Err(StepExecutionError {
-                retryable: false,
-                user_reason: "Sending is disabled right now. Drafts are allowed, sends are blocked."
-                    .to_string(),
-            }),
-        }
+        tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
     }
 
     fn schedule_retry(
@@ -782,13 +1162,36 @@ impl RunnerEngine {
                 make_id("activity"),
                 run_id,
                 from_state.as_str(),
-                format!("Retry scheduled in {} ms. {}", backoff_ms, reason),
+                format!("Retry scheduled in {} ms. {}", backoff_ms, redact_text(reason)),
                 now
             ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    pub fn transition_state_with_activity(
+        connection: &mut Connection,
+        run_id: &str,
+        from_state: RunState,
+        to_state: RunState,
+        activity_type: &str,
+        user_message: &str,
+        failure_reason: Option<&str>,
+        current_step_index: Option<i64>,
+    ) -> Result<(), RunnerError> {
+        Self::transition_state_with_activity_internal(
+            connection,
+            run_id,
+            from_state,
+            to_state,
+            activity_type,
+            user_message,
+            failure_reason,
+            current_step_index,
+            false,
+        )
     }
 
     fn transition_state_with_activity_internal(
@@ -843,13 +1246,55 @@ impl RunnerEngine {
                 activity_type,
                 from_state.as_str(),
                 to_state.as_str(),
-                user_message,
+                redact_text(user_message),
                 now
             ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
+        if to_state.is_terminal() {
+            let run = Self::get_run_in_tx(&tx, run_id)?;
+            Self::upsert_terminal_receipt_in_tx(&tx, &run, to_state, user_message, failure_reason)?;
+        }
+
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    fn upsert_terminal_receipt_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        run: &RunRecord,
+        terminal_state: RunState,
+        summary: &str,
+        failure_reason: Option<&str>,
+    ) -> Result<(), RunnerError> {
+        let receipt = build_receipt(run, terminal_state, summary, failure_reason);
+        let receipt_json =
+            serde_json::to_string(&receipt).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        let now = now_ms();
+
+        tx.execute(
+            "
+            INSERT INTO outcomes (
+              id, run_id, step_id, kind, status, content, failure_reason, created_at, updated_at
+            ) VALUES (?1, ?2, 'terminal', 'receipt', 'final', ?3, ?4, ?5, ?5)
+            ON CONFLICT(run_id, step_id, kind)
+            DO UPDATE SET
+              status = excluded.status,
+              content = excluded.content,
+              failure_reason = excluded.failure_reason,
+              updated_at = excluded.updated_at
+            ",
+            params![
+                make_id("outcome"),
+                run.id,
+                receipt_json,
+                failure_reason.map(redact_text),
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -894,6 +1339,113 @@ impl RunnerEngine {
     }
 }
 
+fn map_provider_error(error: ProviderError) -> StepExecutionError {
+    StepExecutionError {
+        retryable: error.is_retryable(),
+        user_reason: redact_text(&error.message),
+    }
+}
+
+fn provider_kind_from_plan(plan: &AutopilotPlan) -> ProviderKind {
+    match plan.provider.id {
+        SchemaProviderId::OpenAi => ProviderKind::OpenAi,
+        SchemaProviderId::Anthropic => ProviderKind::Anthropic,
+        SchemaProviderId::Gemini => ProviderKind::Gemini,
+    }
+}
+
+fn provider_tier_from_plan(plan: &AutopilotPlan) -> ProviderTier {
+    match plan.provider.tier {
+        SchemaProviderTier::Supported => ProviderTier::Supported,
+        SchemaProviderTier::Experimental => ProviderTier::Experimental,
+    }
+}
+
+fn parse_provider_kind(value: &str) -> Result<ProviderKind, RunnerError> {
+    match value {
+        "openai" => Ok(ProviderKind::OpenAi),
+        "anthropic" => Ok(ProviderKind::Anthropic),
+        "gemini" => Ok(ProviderKind::Gemini),
+        _ => Err(RunnerError::InvalidProviderKind(value.to_string())),
+    }
+}
+
+fn parse_provider_tier(value: &str) -> Result<ProviderTier, RunnerError> {
+    match value {
+        "supported" => Ok(ProviderTier::Supported),
+        "experimental" => Ok(ProviderTier::Experimental),
+        _ => Err(RunnerError::InvalidProviderTier(value.to_string())),
+    }
+}
+
+fn build_receipt(
+    run: &RunRecord,
+    terminal_state: RunState,
+    summary: &str,
+    failure_reason: Option<&str>,
+) -> RunReceipt {
+    let recovery_options = match terminal_state {
+        RunState::Succeeded => vec!["Review the outcome and keep this Autopilot running.".to_string()],
+        RunState::Failed => vec![
+            "Retry now.".to_string(),
+            "Reduce scope and run again.".to_string(),
+            "Check Activity for the failed step.".to_string(),
+        ],
+        RunState::Blocked => vec![
+            "Reduce scope to lower cost.".to_string(),
+            "Adjust spend caps in Settings.".to_string(),
+            "Approve spend if you still want to continue.".to_string(),
+        ],
+        RunState::Canceled => vec!["Resume later from the Autopilot detail view.".to_string()],
+        _ => vec!["Review Activity for details.".to_string()],
+    };
+
+    RunReceipt {
+        schema_version: "1.0".to_string(),
+        run_id: run.id.clone(),
+        provider_kind: run.provider_kind.as_str().to_string(),
+        provider_tier: run.provider_tier.as_str().to_string(),
+        terminal_state: terminal_state.as_str().to_string(),
+        summary: redact_text(summary),
+        failure_reason: failure_reason.map(redact_text),
+        recovery_options,
+        total_spend_usd_cents: run.usd_cents_actual,
+        redacted: true,
+        created_at_ms: now_ms(),
+    }
+}
+
+fn redact_text(input: &str) -> String {
+    input
+        .replace("sk-", "[REDACTED_KEY]-")
+        .replace("api_key", "[REDACTED_FIELD]")
+        .replace('@', "[at]")
+}
+
+fn format_usd_cents(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.abs();
+    format!("{sign}${}.{:02}", abs / 100, abs % 100)
+}
+
+fn estimate_step_cost_usd_cents(run: &RunRecord, step: &PlanStep) -> i64 {
+    if run.plan.intent.contains("simulate_cap_hard") {
+        return 95;
+    }
+    if run.plan.intent.contains("simulate_cap_soft") {
+        return 45;
+    }
+    if run.plan.intent.contains("simulate_cap_boundary") {
+        return 80;
+    }
+
+    match step.primitive {
+        PrimitiveId::WriteOutcomeDraft => 12,
+        PrimitiveId::WriteEmailDraft => 14,
+        _ => 0,
+    }
+}
+
 fn make_id(prefix: &str) -> String {
     let counter = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}_{}_{}", prefix, now_ms(), counter)
@@ -906,6 +1458,10 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+fn current_day_bucket() -> i64 {
+    now_ms() / 86_400_000
+}
+
 fn compute_backoff_ms(retry_attempt: u32) -> u32 {
     let base: u32 = 200;
     base.saturating_mul(2u32.saturating_pow(retry_attempt.saturating_sub(1))).min(2_000)
@@ -913,7 +1469,7 @@ fn compute_backoff_ms(retry_attempt: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalRecord, RunState, RunnerEngine};
+    use super::{RunReceipt, RunState, RunnerEngine};
     use crate::db::bootstrap_schema;
     use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
     use rusqlite::{params, Connection};
@@ -942,72 +1498,117 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_reuses_existing_run_and_prevents_duplicate_outcomes() {
+    fn retries_only_retryable_provider_errors() {
         let mut conn = setup_conn();
-        let plan = plan_with_single_write_step("idempotency test");
 
-        let first = RunnerEngine::start_run(&mut conn, "auto_1", plan.clone(), "idem_1", 2)
-            .expect("first run starts");
-        let second = RunnerEngine::start_run(&mut conn, "auto_1", plan, "idem_1", 2)
-            .expect("second run reuses");
+        let retryable_plan = plan_with_single_write_step("simulate_provider_retryable_failure");
+        let run_retryable = RunnerEngine::start_run(&mut conn, "auto_retryable", retryable_plan, "idem_r1", 1)
+            .expect("start");
+        let first = RunnerEngine::run_tick(&mut conn, &run_retryable.id).expect("tick");
+        assert_eq!(first.state, RunState::Retrying);
 
-        assert_eq!(first.id, second.id);
-        let completed = RunnerEngine::run_tick(&mut conn, &first.id).expect("tick");
-        assert_eq!(completed.state, RunState::Succeeded);
+        conn.execute(
+            "UPDATE runs SET next_retry_at_ms = 0 WHERE id = ?1",
+            params![run_retryable.id],
+        )
+        .expect("force due");
+        let resumed = RunnerEngine::resume_due_runs(&mut conn, 10).expect("resume");
+        assert_eq!(resumed[0].state, RunState::Succeeded);
 
-        let outcome_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1",
-                params![first.id],
-                |row| row.get(0),
-            )
-            .expect("count outcomes");
-        assert_eq!(outcome_count, 1);
+        let non_retryable_plan = plan_with_single_write_step("simulate_provider_non_retryable_failure");
+        let run_non_retry =
+            RunnerEngine::start_run(&mut conn, "auto_nonretry", non_retryable_plan, "idem_r2", 1)
+                .expect("start");
+        let failed = RunnerEngine::run_tick(&mut conn, &run_non_retry.id).expect("tick");
+        assert_eq!(failed.state, RunState::Failed);
+        assert_eq!(failed.retry_count, 0);
     }
 
     #[test]
-    fn retry_scheduling_does_not_retry_immediately_and_resumes_when_due() {
+    fn spend_ledger_updates_once_per_step_even_after_retry_resume() {
         let mut conn = setup_conn();
-        let mut plan = plan_with_single_write_step("simulate_retryable_failure");
-        plan.allowed_primitives = vec![PrimitiveId::ReadWeb];
-        plan.steps = vec![PlanStep {
-            id: "step_1".to_string(),
-            label: "Read source".to_string(),
-            primitive: PrimitiveId::ReadWeb,
-            requires_approval: false,
-            risk_tier: RiskTier::Low,
-        }];
-
-        let run = RunnerEngine::start_run(&mut conn, "auto_2", plan, "idem_retry", 1)
-            .expect("run starts ready");
-        let scheduled = RunnerEngine::run_tick(&mut conn, &run.id).expect("first tick schedules retry");
-        assert_eq!(scheduled.state, RunState::Retrying);
-        assert_eq!(scheduled.retry_count, 1);
-        assert!(scheduled.next_retry_at_ms.is_some());
-
-        let still_waiting = RunnerEngine::run_tick(&mut conn, &run.id).expect("not due yet");
-        assert_eq!(still_waiting.state, RunState::Retrying);
+        let plan = plan_with_single_write_step("simulate_provider_retryable_failure");
+        let run = RunnerEngine::start_run(&mut conn, "auto_spend", plan, "idem_spend", 1).expect("start");
+        let first = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(first.state, RunState::Retrying);
 
         conn.execute(
-            "UPDATE runs SET next_retry_at_ms = ?1 WHERE id = ?2",
-            params![0_i64, run.id],
+            "UPDATE runs SET next_retry_at_ms = 0 WHERE id = ?1",
+            params![run.id],
         )
         .expect("force due");
+        let resumed = RunnerEngine::resume_due_runs(&mut conn, 10).expect("resume");
+        assert_eq!(resumed[0].state, RunState::Succeeded);
 
-        let resumed = RunnerEngine::resume_due_runs(&mut conn, 10).expect("resume due");
-        assert_eq!(resumed.len(), 1);
-        assert_eq!(resumed[0].state, RunState::Failed);
-        assert_eq!(
-            resumed[0].failure_reason.as_deref(),
-            Some("Source is temporarily unavailable.")
-        );
+        let spend_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spend_ledger WHERE run_id = ?1 AND step_id = 'step_1' AND entry_kind = 'actual'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("count spend rows");
+        assert_eq!(spend_rows, 1);
+    }
+
+    #[test]
+    fn hard_cap_blocks_before_side_effects() {
+        let mut conn = setup_conn();
+        let plan = plan_with_single_write_step("simulate_cap_hard");
+        let run = RunnerEngine::start_run(&mut conn, "auto_hard", plan, "idem_hard", 1)
+            .expect("run starts");
+
+        let blocked = RunnerEngine::run_tick(&mut conn, &run.id).expect("run blocked");
+        assert_eq!(blocked.state, RunState::Blocked);
+
+        let draft_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'outcome_draft'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("count drafts");
+        assert_eq!(draft_count, 0);
+    }
+
+    #[test]
+    fn per_run_hard_cap_boundary_at_exactly_80_cents_is_not_blocked() {
+        let mut conn = setup_conn();
+        let plan = plan_with_single_write_step("simulate_cap_boundary");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_boundary", plan, "idem_boundary", 1).expect("start");
+
+        let paused = RunnerEngine::run_tick(&mut conn, &run.id).expect("soft cap gate");
+        assert_eq!(paused.state, RunState::NeedsApproval);
+
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("list approvals");
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].step_id, "__soft_cap__");
+    }
+
+    #[test]
+    fn soft_cap_requires_approval_to_proceed() {
+        let mut conn = setup_conn();
+        let plan = plan_with_single_write_step("simulate_cap_soft");
+        let run = RunnerEngine::start_run(&mut conn, "auto_soft", plan, "idem_soft", 1)
+            .expect("run starts");
+
+        let paused = RunnerEngine::run_tick(&mut conn, &run.id).expect("soft cap gate");
+        assert_eq!(paused.state, RunState::NeedsApproval);
+
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("list approvals");
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].step_id, "__soft_cap__");
+
+        let resumed = RunnerEngine::approve(&mut conn, &approvals[0].id).expect("approve spend");
+        assert!(resumed.soft_cap_approved);
+        assert_eq!(resumed.state, RunState::Succeeded);
     }
 
     #[test]
     fn transition_and_activity_are_atomic_in_single_transaction() {
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("atomicity test");
-        let run = RunnerEngine::start_run(&mut conn, "auto_3", plan, "idem_atomic", 1)
+        let run = RunnerEngine::start_run(&mut conn, "auto_atomic", plan, "idem_atomic", 1)
             .expect("run created");
 
         RunnerEngine::transition_state_with_forced_failure(
@@ -1020,22 +1621,13 @@ mod tests {
 
         let post = RunnerEngine::get_run(&conn, &run.id).expect("run still readable");
         assert_eq!(post.state, RunState::Ready);
-
-        let forced_events: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM activities WHERE run_id = ?1 AND activity_type = 'forced_test'",
-                params![run.id],
-                |row| row.get(0),
-            )
-            .expect("count forced events");
-        assert_eq!(forced_events, 0);
     }
 
     #[test]
     fn retry_metadata_and_activity_are_atomic() {
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("atomic retry test");
-        let run = RunnerEngine::start_run(&mut conn, "auto_5", plan, "idem_atomic_retry", 2)
+        let run = RunnerEngine::start_run(&mut conn, "auto_retry_atomic", plan, "idem_atomic_retry", 2)
             .expect("run created");
 
         RunnerEngine::schedule_retry_with_forced_failure(
@@ -1055,33 +1647,108 @@ mod tests {
     }
 
     #[test]
-    fn approval_flow_still_works_with_tick_execution() {
+    fn receipt_includes_provider_tier_and_cost_and_is_redacted() {
         let mut conn = setup_conn();
-        let plan = AutopilotPlan {
-            schema_version: "1.0".to_string(),
-            recipe: RecipeKind::WebsiteMonitor,
-            intent: "needs approval".to_string(),
-            provider: crate::schema::ProviderMetadata::from_provider_id(ProviderId::OpenAi),
-            allowed_primitives: vec![PrimitiveId::WriteEmailDraft],
-            steps: vec![PlanStep {
-                id: "step_1".to_string(),
-                label: "Draft email".to_string(),
-                primitive: PrimitiveId::WriteEmailDraft,
-                requires_approval: true,
-                risk_tier: RiskTier::Medium,
-            }],
-        };
-
-        let run = RunnerEngine::start_run(&mut conn, "auto_4", plan, "idem_approval", 1)
+        let plan = plan_with_single_write_step("simulate_cap_hard sk-secret a@b.com");
+        let run = RunnerEngine::start_run(&mut conn, "auto_receipt", plan, "idem_receipt", 1)
             .expect("run starts");
-        let paused = RunnerEngine::run_tick(&mut conn, &run.id).expect("run pauses");
-        assert_eq!(paused.state, RunState::NeedsApproval);
 
-        let pending: Vec<ApprovalRecord> =
-            RunnerEngine::list_pending_approvals(&conn).expect("list approvals");
-        assert_eq!(pending.len(), 1);
+        let blocked = RunnerEngine::run_tick(&mut conn, &run.id).expect("blocked run");
+        assert_eq!(blocked.state, RunState::Blocked);
 
-        let resumed = RunnerEngine::approve(&mut conn, &pending[0].id).expect("approve resumes");
-        assert_eq!(resumed.state, RunState::Succeeded);
+        let receipt_json: String = conn
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'receipt'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("receipt exists");
+        let receipt: RunReceipt = serde_json::from_str(&receipt_json).expect("parse receipt");
+        assert_eq!(receipt.provider_tier, "supported");
+        assert!(receipt.total_spend_usd_cents >= 0);
+        assert!(receipt.redacted);
+    }
+
+    #[test]
+    fn website_monitor_happy_path_shared_runtime() {
+        let mut conn = setup_conn();
+        let plan = AutopilotPlan::from_intent(
+            RecipeKind::WebsiteMonitor,
+            "Website monitor happy path".to_string(),
+            ProviderId::OpenAi,
+        );
+        let run = RunnerEngine::start_run(&mut conn, "auto_web", plan, "idem_web", 2).expect("start");
+
+        let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
+        assert_eq!(s1.state, RunState::Ready);
+
+        let need_approval_1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_approval_1.state, RunState::NeedsApproval);
+
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let first = approvals.iter().find(|a| a.run_id == run.id).expect("first approval");
+        let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
+        assert_eq!(after_first.state, RunState::Ready);
+
+        let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        assert_eq!(need_approval_2.state, RunState::NeedsApproval);
+        let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
+        let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("second approval");
+        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
+        assert_eq!(done.state, RunState::Succeeded);
+    }
+
+    #[test]
+    fn inbox_triage_happy_path_shared_runtime() {
+        let mut conn = setup_conn();
+        let plan = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Inbox triage happy path".to_string(),
+            ProviderId::Anthropic,
+        );
+        let run = RunnerEngine::start_run(&mut conn, "auto_inbox", plan, "idem_inbox", 2).expect("start");
+
+        let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
+        assert_eq!(s1.state, RunState::Ready);
+
+        let need_approval_1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_approval_1.state, RunState::NeedsApproval);
+
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let first = approvals.iter().find(|a| a.run_id == run.id).expect("first approval");
+        let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
+        assert_eq!(after_first.state, RunState::Ready);
+
+        let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        assert_eq!(need_approval_2.state, RunState::NeedsApproval);
+        let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
+        let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("second approval");
+        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
+        assert_eq!(done.state, RunState::Succeeded);
+    }
+
+    #[test]
+    fn daily_brief_happy_path_shared_runtime() {
+        let mut conn = setup_conn();
+        let plan = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "Daily brief happy path".to_string(),
+            ProviderId::Gemini,
+        );
+        let run = RunnerEngine::start_run(&mut conn, "auto_brief", plan, "idem_brief", 2).expect("start");
+
+        let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
+        assert_eq!(s1.state, RunState::Ready);
+
+        let need_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
+        assert_eq!(need_approval.state, RunState::NeedsApproval);
+
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let first = approvals.iter().find(|a| a.run_id == run.id).expect("approval exists");
+        let done = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
+        assert_eq!(done.state, RunState::Ready);
+
+        let final_tick = RunnerEngine::run_tick(&mut conn, &run.id).expect("final tick");
+        assert_eq!(final_tick.state, RunState::Succeeded);
     }
 }

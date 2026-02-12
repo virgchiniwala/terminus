@@ -1,5 +1,62 @@
 # Morning Handoff — Personal AI OS
 
+## Day Handoff Update (2026-02-12 13:20 SGT)
+
+### Completed This Session
+1. Added Provider + Transport seams:
+   - `providers/` module with `ProviderKind`, `ProviderTier`, request/response types, retryable error classification, Keychain retrieval.
+   - `transport/` module with `ExecutionTransport`, `MockTransport`, and `LocalHttpTransport` (real OpenAI/Anthropic behind env flag).
+2. Wired runner to provider transport abstraction without provider string branching in runner logic.
+3. Persisted provider metadata on run records (`provider_kind`, `provider_tier`).
+4. Made spend accounting billing-safe by switching runtime accounting to integer cents (`usd_cents_*`, `amount_usd_cents`), no float money math.
+5. Tightened spend ledger idempotency to `(run_id, step_id, entry_kind)` to prevent duplicates across retries/resumes.
+6. Added standardized terminal receipt payload with provider tier + total cost and redaction defaults.
+7. Added deterministic tests for retryable/non-retryable provider errors and shared-runtime happy paths for all 3 presets.
+
+### Verification Run
+- Rust tests: `cargo test` (pass, 13 tests)
+- Frontend build: `npm run build` (pass)
+
+### Quick Verification Commands
+- `cargo test` (from `src-tauri/`)
+- `npm run build`
+
+### DevTools Snippet (MockTransport default)
+```js
+const invoke = window.__TAURI__.core.invoke;
+const run = await invoke("start_recipe_run", {
+  autopilotId: "auto_web_mock",
+  recipe: "website_monitor",
+  intent: "Website monitor happy path",
+  provider: "openai",
+  idempotencyKey: "verify_web_mock_1",
+  maxRetries: 2
+});
+await invoke("run_tick", { runId: run.id }); // read step
+await invoke("run_tick", { runId: run.id }); // should create approval
+const approvals = await invoke("list_pending_approvals");
+const approval = approvals.find(a => a.run_id === run.id);
+await invoke("approve_run_approval", { approvalId: approval.id }); // executes draft step
+const runAfter = await invoke("get_run", { runId: run.id }); // check usd_cents_actual + provider tier on run
+const receipt = await invoke("get_terminal_receipt", { runId: run.id }); // after terminal state
+({ runAfter, receipt });
+```
+
+### DevTools Snippet (Real OpenAI/Anthropic via Keychain, no UI)
+1) Add keys to Keychain:
+```bash
+security add-generic-password -a Terminus -s terminus.openai.api_key -w "$OPENAI_API_KEY" -U
+security add-generic-password -a Terminus -s terminus.anthropic.api_key -w "$ANTHROPIC_API_KEY" -U
+```
+2) Launch with: `TERMINUS_TRANSPORT=local_http`
+3) Use the same DevTools snippet above, but set `provider: "openai"` or `provider: "anthropic"`.
+
+### Notes
+- Hosted Relay is represented as a future transport lane only; no Relay implementation was added.
+- No provider connection UI, no background daemon/cron, and no secrets persisted in SQLite.
+
+---
+
 ## Day Handoff Update (2026-02-12 12:28 SGT)
 
 ### Completed This Session

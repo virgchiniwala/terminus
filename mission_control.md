@@ -1,6 +1,6 @@
 # Mission Control — Personal AI OS
 
-**Last Updated:** 2026-02-12 12:28 SGT  
+**Last Updated:** 2026-02-12 16:55 SGT  
 **Current Mode:** Day (Vir active)  
 **Branch:** main
 
@@ -20,6 +20,7 @@
 - Provider guarantee policy:
   - Supported (CI-blocking): OpenAI, Anthropic
   - Experimental (non-CI-blocking): Gemini
+  - Future lane: Hosted Terminus Relay transport (not implemented)
 
 ---
 
@@ -54,6 +55,21 @@ A task is only marked `Shipped` when all are true:
 
 ## Day Update (2026-02-12)
 
+### T1005: Provider + Transport Abstraction (Relay-ready seam)
+**Owner:** Friday  
+**Status:** Shipped  
+**Scope:** Provider/transport seam, Local BYOK Keychain retrieval, real LocalHttpTransport for OpenAI/Anthropic (env-flagged), and deterministic tests  
+**Files:** `src-tauri/src/providers/*`, `src-tauri/src/transport/*`, `src-tauri/src/runner.rs`, `src-tauri/src/db.rs`, `src-tauri/src/main.rs`  
+**Verification:** `cargo test` and `npm run build` pass; receipt includes provider tier + spend cents metadata and redaction
+
+### T1006: Billing-Safe Spend Accounting (Cents) + Local BYOK (Real Calls, No UI)
+**Owner:** Friday  
+**Status:** Shipped  
+**Scope:** Replace float USD accounting with integer cents, tighten spend ledger idempotency, and implement real OpenAI/Anthropic execution behind `TERMINUS_TRANSPORT=local_http` (no provider UI)  
+**Non-goals:** No Relay backend, no billing UI, no daemon/cron, do not change tick runner model  
+**Files:** `src-tauri/src/db.rs`, `src-tauri/src/runner.rs`, `src-tauri/src/transport/local_http.rs`, `README.md`, `docs/plan.md`, `handoff.md`  
+**Verification:** `cargo test` (16 tests) + `npm run build` pass; boundary test at exactly $0.80
+
 ### T1004: Persisted Runner State Machine + Approval Gate
 **Owner:** Friday + Fury  
 **Status:** Shipped  
@@ -86,37 +102,7 @@ A task is only marked `Shipped` when all are true:
 
 ## Now (In Progress)
 
-**All night work complete. Awaiting morning review.**
-
-### T0008: Rust Workflow Engine
-**Owner:** Jarvis (main) - awaiting Vir approval  
-**Status:** Blocked (needs architecture review)  
-**Scope:** Core workflow engine (state machine, tool registry, permission gates)  
-**Risks:** Core architecture decisions  
-**Files:** `src-tauri/src/workflow/`  
-**Verification:** Engine runs workflows, enforces permissions, handles errors  
-**Branch:** TBD  
-**Next Action:** Vir approves approach, Jarvis implements
-
-### T0009: QMD Pipeline Implementation
-**Owner:** Jarvis (main) - awaiting Vir approval  
-**Status:** Blocked (needs implementation review)  
-**Scope:** Implement token strategy (memory budget, caching, delta prompting)  
-**Risks:** Performance, correctness  
-**Files:** `src-tauri/src/qmd/`  
-**Verification:** Memory stays under budget, caching works, costs reduced  
-**Branch:** TBD  
-**Next Action:** Vir approves approach, Jarvis implements
-
-### T0010: LLM Provider Integration
-**Owner:** Jarvis (main) - awaiting Vir approval  
-**Status:** Blocked (needs API keys)  
-**Scope:** Implement OpenAI + Anthropic providers (credentials, API calls, streaming)  
-**Risks:** API key management, error handling  
-**Files:** `src-tauri/src/providers/`  
-**Verification:** Both providers work, streaming works, errors handled gracefully  
-**Branch:** TBD  
-**Next Action:** Vir provides API keys for testing, Jarvis implements
+*Nothing in progress right now.*
 
 ---
 

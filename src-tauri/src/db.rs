@@ -53,12 +53,19 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               autopilot_id TEXT NOT NULL,
               idempotency_key TEXT NOT NULL UNIQUE,
               plan_json TEXT NOT NULL,
+              provider_kind TEXT NOT NULL DEFAULT 'openai',
+              provider_tier TEXT NOT NULL DEFAULT 'supported',
               state TEXT NOT NULL,
               current_step_index INTEGER NOT NULL DEFAULT 0,
               retry_count INTEGER NOT NULL DEFAULT 0,
               max_retries INTEGER NOT NULL DEFAULT 2,
               next_retry_backoff_ms INTEGER,
               next_retry_at_ms INTEGER,
+              soft_cap_approved INTEGER NOT NULL DEFAULT 0,
+              spend_usd_estimate REAL NOT NULL DEFAULT 0.0,
+              spend_usd_actual REAL NOT NULL DEFAULT 0.0,
+              usd_cents_estimate INTEGER NOT NULL DEFAULT 0,
+              usd_cents_actual INTEGER NOT NULL DEFAULT 0,
               failure_reason TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
@@ -104,6 +111,19 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (run_id) REFERENCES runs(id)
             );
 
+            CREATE TABLE IF NOT EXISTS spend_ledger (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              step_id TEXT NOT NULL DEFAULT '',
+              entry_kind TEXT NOT NULL DEFAULT 'actual',
+              amount_usd REAL NOT NULL,
+              amount_usd_cents INTEGER NOT NULL DEFAULT 0,
+              reason TEXT NOT NULL,
+              day_bucket INTEGER NOT NULL,
+              created_at INTEGER NOT NULL,
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
@@ -116,6 +136,53 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to bootstrap schema: {e}"))?;
 
     ensure_column(connection, "runs", "next_retry_at_ms", "INTEGER")?;
+    ensure_column(connection, "runs", "provider_kind", "TEXT NOT NULL DEFAULT 'openai'")?;
+    ensure_column(connection, "runs", "provider_tier", "TEXT NOT NULL DEFAULT 'supported'")?;
+    ensure_column(connection, "runs", "soft_cap_approved", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(connection, "runs", "spend_usd_estimate", "REAL NOT NULL DEFAULT 0.0")?;
+    ensure_column(connection, "runs", "spend_usd_actual", "REAL NOT NULL DEFAULT 0.0")?;
+    ensure_column(connection, "runs", "usd_cents_estimate", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(connection, "runs", "usd_cents_actual", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(connection, "spend_ledger", "step_id", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(connection, "spend_ledger", "entry_kind", "TEXT NOT NULL DEFAULT 'actual'")?;
+    ensure_column(connection, "spend_ledger", "amount_usd_cents", "INTEGER NOT NULL DEFAULT 0")?;
+
+    // Best-effort backfill from legacy float columns for existing vaults.
+    connection
+        .execute(
+            "UPDATE runs
+             SET usd_cents_actual = CAST(ROUND(spend_usd_actual * 100.0) AS INTEGER)
+             WHERE usd_cents_actual = 0 AND spend_usd_actual > 0.0",
+            [],
+        )
+        .map_err(|e| format!("Failed to backfill usd_cents_actual: {e}"))?;
+    connection
+        .execute(
+            "UPDATE runs
+             SET usd_cents_estimate = CAST(ROUND(spend_usd_estimate * 100.0) AS INTEGER)
+             WHERE usd_cents_estimate = 0 AND spend_usd_estimate > 0.0",
+            [],
+        )
+        .map_err(|e| format!("Failed to backfill usd_cents_estimate: {e}"))?;
+    connection
+        .execute(
+            "UPDATE spend_ledger
+             SET amount_usd_cents = CAST(ROUND(amount_usd * 100.0) AS INTEGER)
+             WHERE amount_usd_cents = 0 AND amount_usd > 0.0",
+            [],
+        )
+        .map_err(|e| format!("Failed to backfill spend_ledger cents: {e}"))?;
+
+    // Replace legacy uniqueness (run_id, step_id) with (run_id, step_id, entry_kind).
+    connection
+        .execute("DROP INDEX IF EXISTS idx_spend_ledger_run_step", [])
+        .map_err(|e| format!("Failed to drop legacy spend ledger index: {e}"))?;
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_spend_ledger_run_step_kind ON spend_ledger(run_id, step_id, entry_kind)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create spend ledger unique index: {e}"))?;
 
     Ok(())
 }
