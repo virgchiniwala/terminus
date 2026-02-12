@@ -81,7 +81,7 @@ impl ProviderMetadata {
             ProviderId::Anthropic => Self {
                 id,
                 tier: ProviderTier::Supported,
-                default_model: "claude-sonnet-4-5".to_string(),
+                default_model: "claude-3-5-sonnet-latest".to_string(),
             },
             ProviderId::Gemini => Self {
                 id,
