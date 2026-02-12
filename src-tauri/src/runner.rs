@@ -15,11 +15,17 @@ use thiserror::Error;
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+// Spend cap constants (in cents)
 const PER_RUN_SOFT_CAP_USD_CENTS: i64 = 40;
 const PER_RUN_HARD_CAP_USD_CENTS: i64 = 80;
 const DAILY_SOFT_CAP_USD_CENTS: i64 = 300;
 const DAILY_HARD_CAP_USD_CENTS: i64 = 500;
 const SOFT_CAP_APPROVAL_STEP_ID: &str = "__soft_cap__";
+
+// Retry backoff constants
+const RETRY_BACKOFF_BASE_MS: u32 = 200;        // Initial backoff: 200ms
+const RETRY_BACKOFF_MAX_MS: u32 = 2_000;       // Max backoff: 2 seconds
+const MS_PER_DAY: i64 = 86_400_000;            // Milliseconds in 24 hours
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -162,9 +168,29 @@ enum CapDecision {
     BlockHard { message: String },
 }
 
+/// Core state machine for executing autopilot runs.
+/// 
+/// The runner uses a tick-based execution model where each call to `run_tick()`
+/// advances the state machine by exactly one step. This enables bounded execution,
+/// easy pause/resume, and prevents stack overflow.
 pub struct RunnerEngine;
 
 impl RunnerEngine {
+    /// Starts a new autopilot run or returns existing run for duplicate idempotency key.
+    /// 
+    /// # Arguments
+    /// * `connection` - SQLite connection (must be mutable for transactions)
+    /// * `autopilot_id` - ID of the autopilot initiating this run
+    /// * `plan` - The execution plan (recipe + steps + primitives)
+    /// * `idempotency_key` - Unique key to prevent duplicate execution
+    /// * `max_retries` - Maximum retry attempts for retryable failures
+    /// 
+    /// # Idempotency
+    /// If a run with the same `idempotency_key` already exists, returns the existing
+    /// run without creating a new one. This prevents accidental double-execution.
+    /// 
+    /// # Returns
+    /// New or existing `RunRecord` in `Ready` state
     pub fn start_run(
         connection: &mut Connection,
         autopilot_id: &str,
@@ -246,10 +272,45 @@ impl RunnerEngine {
         Self::get_run(connection, &run_id)
     }
 
+    /// Advances the run state machine by exactly one step.
+    /// 
+    /// This is the core execution method. Each call:
+    /// 1. Fetches the current run state
+    /// 2. Executes the next step (if Ready/Running)
+    /// 3. Persists the new state atomically
+    /// 4. Returns the updated run
+    /// 
+    /// # Tick-Based Execution
+    /// Unlike recursive execution, ticking is bounded - each call does exactly
+    /// one step of work and returns. The caller decides when to tick again.
+    /// This enables:
+    /// - Pause/resume at any point
+    /// - Rate limiting / throttling
+    /// - No stack overflow on long runs
+    /// 
+    /// # State Transitions
+    /// - `Ready` → executes next step → `Running` or `NeedsApproval`
+    /// - `Running` → step completes → `Ready`, `Succeeded`, `Retrying`, `Failed`, or `Blocked`
+    /// - `NeedsApproval` → waits for approval (no-op tick)
+    /// - `Retrying` → waits for retry time (use `resume_due_runs`)
+    /// - Terminal states (`Succeeded`, `Failed`, `Blocked`, `Canceled`) → no-op
+    /// 
+    /// # Returns
+    /// Updated `RunRecord` after the tick
     pub fn run_tick(connection: &mut Connection, run_id: &str) -> Result<RunRecord, RunnerError> {
         Self::run_tick_internal(connection, run_id, None)
     }
 
+    /// Resumes runs that are in `Retrying` state and due for retry.
+    /// 
+    /// Finds runs where `next_retry_at_ms <= now()` and ticks them.
+    /// This is typically called by a background scheduler.
+    /// 
+    /// # Arguments
+    /// * `limit` - Maximum number of runs to resume in one call
+    /// 
+    /// # Returns
+    /// Vector of resumed runs (may be empty if none are due)
     pub fn resume_due_runs(
         connection: &mut Connection,
         limit: usize,
@@ -287,6 +348,20 @@ impl RunnerEngine {
         Ok(updated)
     }
 
+    /// Approves a pending approval and resumes execution.
+    /// 
+    /// When a run hits an approval gate (spend cap or primitive approval),
+    /// it pauses in `NeedsApproval` state. This method:
+    /// 1. Marks the approval as approved
+    /// 2. Transitions run to `Ready`
+    /// 3. Automatically ticks to resume execution
+    /// 
+    /// # Special Cases
+    /// - **Spend cap approvals** (`step_id == "__soft_cap__"`): Sets `soft_cap_approved` flag
+    /// - **Step approvals**: Resumes execution at the approved step
+    /// 
+    /// # Returns
+    /// Updated run after resume (may advance multiple states if execution continues)
     pub fn approve(connection: &mut Connection, approval_id: &str) -> Result<RunRecord, RunnerError> {
         let approval = Self::get_approval(connection, approval_id)?;
         if approval.status != "pending" {
@@ -352,6 +427,20 @@ impl RunnerEngine {
         }
     }
 
+    /// Rejects a pending approval and cancels the run.
+    /// 
+    /// When a user rejects an approval:
+    /// 1. Marks the approval as rejected
+    /// 2. Transitions run to `Canceled`
+    /// 3. Records the rejection reason in activity log
+    /// 
+    /// Canceled runs are terminal and cannot be resumed.
+    /// 
+    /// # Arguments
+    /// * `reason` - Optional user-provided reason for rejection
+    /// 
+    /// # Returns
+    /// Canceled run record
     pub fn reject(
         connection: &mut Connection,
         approval_id: &str,
@@ -1458,13 +1547,19 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Returns the current day bucket for daily spend tracking.
+/// Days are calculated from Unix epoch in milliseconds.
 fn current_day_bucket() -> i64 {
-    now_ms() / 86_400_000
+    now_ms() / MS_PER_DAY
 }
 
+/// Calculates exponential backoff duration for retries.
+/// Formula: BASE * 2^(attempt-1), capped at MAX
+/// Example: attempt 1 = 200ms, 2 = 400ms, 3 = 800ms, 4 = 1600ms, 5+ = 2000ms
 fn compute_backoff_ms(retry_attempt: u32) -> u32 {
-    let base: u32 = 200;
-    base.saturating_mul(2u32.saturating_pow(retry_attempt.saturating_sub(1))).min(2_000)
+    RETRY_BACKOFF_BASE_MS
+        .saturating_mul(2u32.saturating_pow(retry_attempt.saturating_sub(1)))
+        .min(RETRY_BACKOFF_MAX_MS)
 }
 
 #[cfg(test)]

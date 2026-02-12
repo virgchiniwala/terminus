@@ -1,7 +1,7 @@
 # Mission Control — Personal AI OS
 
-**Last Updated:** 2026-02-12 16:55 SGT  
-**Current Mode:** Day (Vir active)  
+**Last Updated:** 2026-02-13 01:30 SGT  
+**Current Mode:** Night (Co-founder autonomous work)  
 **Branch:** main
 
 ---
@@ -50,6 +50,50 @@ A task is only marked `Shipped` when all are true:
 - Approval and permission behavior is verified (if applicable).
 - Human-readable failure reasons are present for user-visible errors.
 - Handoff includes exact reproduction/verification commands.
+
+---
+
+## Night Update (2026-02-13)
+
+### T1007: Test Coverage Expansion
+**Owner:** Jarvis (night autonomous)  
+**Status:** Shipped  
+**Scope:** Add comprehensive edge-case tests to reach production-ready coverage  
+**Files:** `src-tauri/src/runner.rs`  
+**Verification:** `cargo test` (26 tests, all passing)  
+**Delivered:**
+- ✅ Retry exhaustion handling
+- ✅ Approval rejection flow  
+- ✅ Idempotency key collision detection
+- ✅ Concurrent run management
+- ✅ Invalid state transition prevention
+- ✅ Orphaned approval cleanup
+- ✅ Spend cap boundary precision (40¢, 45¢, 80¢, 95¢)
+- ✅ Provider error classification accuracy
+- ✅ Activity log completeness verification
+- ✅ Database constraint enforcement
+
+### T1008: Developer Documentation
+**Owner:** Jarvis (night autonomous)  
+**Status:** Shipped  
+**Scope:** Write comprehensive developer docs for contributors  
+**Files:** `ARCHITECTURE.md`, `CONTRIBUTING.md`, `TESTING.md`  
+**Verification:** Docs reviewed for completeness and accuracy  
+**Delivered:**
+- ✅ `ARCHITECTURE.md` (16KB) - Full system design, components, data flow examples
+- ✅ `CONTRIBUTING.md` (12KB) - Setup guide, workflow, code style, common tasks
+- ✅ `TESTING.md` (14KB) - Test strategy, helpers, examples, debugging guide
+
+### T1009: Code Quality Pass
+**Owner:** Jarvis (night autonomous)  
+**Status:** In Progress  
+**Scope:** Improve code maintainability and readability  
+**Files:** `src-tauri/src/runner.rs`  
+**Progress:**
+- ✅ Extracted magic numbers to named constants (RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_MAX_MS, MS_PER_DAY)
+- ✅ Added inline documentation to complex functions (compute_backoff_ms, current_day_bucket)
+- ✅ Documented public API methods (start_run, run_tick, resume_due_runs, approve, reject)
+- 🏃 Next: Improve error messages, add structured logging
 
 ---
 
