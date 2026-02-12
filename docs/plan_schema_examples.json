@@ -1,0 +1,150 @@
+{
+  "schema": {
+    "schema_version": "1.0",
+    "recipe": "website_monitor | inbox_triage | daily_brief",
+    "intent": "string",
+    "provider": {
+      "id": "open_ai | anthropic | gemini",
+      "tier": "supported | experimental",
+      "default_model": "string"
+    },
+    "allowed_primitives": [
+      "read_web",
+      "read_forwarded_email",
+      "write_outcome_draft",
+      "write_email_draft",
+      "notify_user"
+    ],
+    "steps": [
+      {
+        "id": "step_n",
+        "label": "string",
+        "primitive": "primitive_id",
+        "requires_approval": true,
+        "risk_tier": "low | medium | high"
+      }
+    ]
+  },
+  "examples": {
+    "website_monitor": {
+      "schema_version": "1.0",
+      "recipe": "website_monitor",
+      "intent": "Monitor acme.com/blog and draft an update email",
+      "provider": {
+        "id": "open_ai",
+        "tier": "supported",
+        "default_model": "gpt-4o-mini"
+      },
+      "allowed_primitives": [
+        "read_web",
+        "read_forwarded_email",
+        "write_outcome_draft",
+        "write_email_draft",
+        "notify_user"
+      ],
+      "steps": [
+        {
+          "id": "step_1",
+          "label": "Read website content from allowlisted domain",
+          "primitive": "read_web",
+          "requires_approval": false,
+          "risk_tier": "low"
+        },
+        {
+          "id": "step_2",
+          "label": "Create summary outcome draft",
+          "primitive": "write_outcome_draft",
+          "requires_approval": true,
+          "risk_tier": "medium"
+        },
+        {
+          "id": "step_3",
+          "label": "Create email draft for approval queue",
+          "primitive": "write_email_draft",
+          "requires_approval": true,
+          "risk_tier": "medium"
+        }
+      ]
+    },
+    "inbox_triage": {
+      "schema_version": "1.0",
+      "recipe": "inbox_triage",
+      "intent": "Triage a forwarded customer email and draft a response",
+      "provider": {
+        "id": "anthropic",
+        "tier": "supported",
+        "default_model": "claude-sonnet-4-5"
+      },
+      "allowed_primitives": [
+        "read_web",
+        "read_forwarded_email",
+        "write_outcome_draft",
+        "write_email_draft",
+        "notify_user"
+      ],
+      "steps": [
+        {
+          "id": "step_1",
+          "label": "Read forwarded email or pasted message",
+          "primitive": "read_forwarded_email",
+          "requires_approval": false,
+          "risk_tier": "low"
+        },
+        {
+          "id": "step_2",
+          "label": "Draft reply options and triage labels",
+          "primitive": "write_outcome_draft",
+          "requires_approval": true,
+          "risk_tier": "medium"
+        },
+        {
+          "id": "step_3",
+          "label": "Queue email draft for explicit approval",
+          "primitive": "write_email_draft",
+          "requires_approval": true,
+          "risk_tier": "medium"
+        }
+      ]
+    },
+    "daily_brief": {
+      "schema_version": "1.0",
+      "recipe": "daily_brief",
+      "intent": "Create a concise daily brief from my saved sources",
+      "provider": {
+        "id": "gemini",
+        "tier": "experimental",
+        "default_model": "gemini-2.5-flash"
+      },
+      "allowed_primitives": [
+        "read_web",
+        "read_forwarded_email",
+        "write_outcome_draft",
+        "write_email_draft",
+        "notify_user"
+      ],
+      "steps": [
+        {
+          "id": "step_1",
+          "label": "Read configured sources",
+          "primitive": "read_web",
+          "requires_approval": false,
+          "risk_tier": "low"
+        },
+        {
+          "id": "step_2",
+          "label": "Compose a single daily brief outcome card",
+          "primitive": "write_outcome_draft",
+          "requires_approval": true,
+          "risk_tier": "medium"
+        },
+        {
+          "id": "step_3",
+          "label": "Notify user that the brief is ready",
+          "primitive": "notify_user",
+          "requires_approval": false,
+          "risk_tier": "low"
+        }
+      ]
+    }
+  }
+}
