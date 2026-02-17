@@ -10,10 +10,36 @@ Last updated: 2026-02-17
 - Provider/transport abstraction with supported/experimental tiers
 - Local secret handling via OS keychain (no secret persistence in repo/db)
 - Learning Layer (Evaluate -> Adapt -> Memory) integrated at terminal run boundary
+- Learning hardening:
+  - safe `record_decision_event` schema/allowlist/rate-limit/idempotency
+  - adaptation dedupe by hash + no-op suppression
+  - bounded memory-card growth via deterministic upserts
+  - manual `compact_learning_data` command with retention enforcement
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
 - `npm run build` passes
+
+## Learning Storage and Privacy Guardrails
+- Learning stores bounded metadata only (hashes, counts, latencies, reason codes).
+- Learning does not store raw email text, raw website text, provider payload dumps, auth headers, or keys.
+- `record_decision_event` is insert-only and cannot mutate runtime permissions or outbound controls.
+- Retention policy:
+  - decision events: last 500 / 90 days per autopilot
+  - adaptation log: last 200 per autopilot
+  - run evaluations: last 500 / 180 days per autopilot
+  - memory cards: bounded by upsert key and size limits
+
+## DevTools Validation Snippets
+1. Accept bounded decision event:
+   - `record_decision_event({ autopilotId, runId, eventType: "outcome_opened", metadataJson: "{\"reason_code\":\"opened\"}", clientEventId: "evt_1" })`
+2. Reject unsafe decision event:
+   - `record_decision_event({ ..., metadataJson: "{\"reason_code\":\"Authorization: Bearer secret\"}" })`
+   - expected: human-readable validation error
+3. Manual compaction dry run:
+   - `compact_learning_data({ autopilotId, dryRun: true })`
+4. Manual compaction apply:
+   - `compact_learning_data({ autopilotId, dryRun: false })`
 
 ## Operational Truths
 - Local-first runtime

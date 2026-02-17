@@ -9,13 +9,32 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
-const MAX_METADATA_JSON_BYTES: usize = 1200;
+const MAX_METADATA_JSON_BYTES: usize = 2048;
 const MAX_SIGNALS_JSON_BYTES: usize = 2000;
 const MAX_ADAPTATION_JSON_BYTES: usize = 2000;
-const MAX_MEMORY_CARD_CONTENT_BYTES: usize = 1400;
+const MAX_MEMORY_CARD_CONTENT_BYTES: usize = 4096;
+const MAX_MEMORY_CARD_TITLE_CHARS: usize = 80;
 const MAX_MEMORY_CONTEXT_CARDS: usize = 5;
 const MAX_MEMORY_CONTEXT_CHARS: usize = 1500;
+const DECISION_EVENTS_RATE_LIMIT_PER_MINUTE: i64 = 30;
+const DECISION_EVENTS_RETENTION_MAX_PER_AUTOPILOT: i64 = 500;
+const ADAPTATION_LOG_RETENTION_MAX_PER_AUTOPILOT: i64 = 200;
+const RUN_EVALUATIONS_RETENTION_MAX_PER_AUTOPILOT: i64 = 500;
+const DECISION_EVENTS_RETENTION_DAYS: i64 = 90;
+const RUN_EVALUATIONS_RETENTION_DAYS: i64 = 180;
+const PROTECTED_RECENT_RUNS_FOR_ADAPTATION: i64 = 10;
+const COMPACTION_TRIGGER_EVENT_INTERVAL: i64 = 25;
+const COMPACTION_DELETE_CHUNK: i64 = 200;
 static LEARNING_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+const REDACTION_FORBIDDEN_SUBSTRINGS: [&str; 6] = [
+    "bearer ",
+    "sk-",
+    "api_key",
+    "authorization",
+    "x-api-key",
+    "openai_api_key",
+];
 
 #[derive(Debug, Error)]
 pub enum LearningError {
@@ -165,6 +184,15 @@ pub struct MemoryContext {
     pub prompt_block: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct LearningCompactionSummary {
+    pub autopilot_id: Option<String>,
+    pub dry_run: bool,
+    pub decision_events_deleted: i64,
+    pub adaptation_log_deleted: i64,
+    pub run_evaluations_deleted: i64,
+}
+
 #[derive(Debug, Clone)]
 struct DecisionEventRow {
     run_id: String,
@@ -205,11 +233,17 @@ pub fn record_decision_event(
     step_id: Option<&str>,
     event_type: DecisionEventType,
     metadata: DecisionEventMetadata,
+    client_event_id: Option<&str>,
 ) -> Result<(), LearningError> {
-    let metadata_json =
-        serialize_bounded_json(&sanitize_metadata(metadata), MAX_METADATA_JSON_BYTES)?;
+    enforce_decision_event_rate_limit(connection, autopilot_id)?;
+    let metadata_json = serialize_bounded_json(
+        &validate_and_sanitize_metadata(event_type, metadata)?,
+        MAX_METADATA_JSON_BYTES,
+    )?;
+    let sanitized_client_event_id = sanitize_client_event_id(client_event_id)?;
     let payload = DecisionEventInsert {
         event_id: make_learning_id("decision"),
+        client_event_id: sanitized_client_event_id,
         autopilot_id: autopilot_id.to_string(),
         run_id: run_id.to_string(),
         step_id: step_id.map(|v| v.to_string()),
@@ -217,7 +251,11 @@ pub fn record_decision_event(
         metadata_json,
         created_at_ms: now_ms(),
     };
-    db::insert_decision_event(connection, &payload).map_err(LearningError::Db)
+    let inserted = db::insert_decision_event(connection, &payload).map_err(LearningError::Db)?;
+    if inserted {
+        maybe_compact_after_event_insert(connection, autopilot_id)?;
+    }
+    Ok(())
 }
 
 pub fn record_decision_event_from_json(
@@ -227,6 +265,7 @@ pub fn record_decision_event_from_json(
     step_id: Option<&str>,
     event_type: &str,
     metadata_json: Option<&str>,
+    client_event_id: Option<&str>,
 ) -> Result<(), LearningError> {
     let parsed_event = DecisionEventType::parse(event_type).ok_or_else(|| {
         LearningError::Invalid(format!("Unsupported decision event type: {event_type}"))
@@ -236,7 +275,7 @@ pub fn record_decision_event_from_json(
             let value: Value = serde_json::from_str(raw).map_err(|e| {
                 LearningError::Invalid(format!("metadata_json must be valid JSON: {e}"))
             })?;
-            parse_and_validate_metadata_value(value)?
+            parse_and_validate_metadata_value(parsed_event, value)?
         }
         _ => DecisionEventMetadata::default(),
     };
@@ -247,6 +286,7 @@ pub fn record_decision_event_from_json(
         step_id,
         parsed_event,
         metadata,
+        client_event_id,
     )
 }
 
@@ -564,8 +604,15 @@ pub fn adapt_autopilot(
         }
     }
 
+    if changed_fields.is_empty() {
+        return Ok(AdaptationSummary {
+            applied: false,
+            rationale_codes,
+            changed_fields,
+        });
+    }
+
     sanitize_profile(&mut profile, recipe);
-    persist_profile(connection, &profile)?;
 
     let change_patch = json!({
         "mode": profile.mode.as_str(),
@@ -573,6 +620,20 @@ pub fn adapt_autopilot(
         "suppression": profile.suppression,
         "changed_fields": changed_fields,
     });
+    let adaptation_hash = fnv1a_64_hex(
+        &serde_json::to_string(&change_patch).map_err(|e| LearningError::Serde(e.to_string()))?,
+    );
+    if let Some(last_hash) = latest_adaptation_hash(connection, autopilot_id)? {
+        if last_hash == adaptation_hash {
+            return Ok(AdaptationSummary {
+                applied: false,
+                rationale_codes,
+                changed_fields,
+            });
+        }
+    }
+
+    persist_profile(connection, &profile)?;
     let changes_json = serialize_bounded_json(&change_patch, MAX_ADAPTATION_JSON_BYTES)?;
     let rationale_json = serialize_bounded_json(&rationale_codes, 800)?;
     let inserted = db::insert_adaptation_log(
@@ -581,6 +642,7 @@ pub fn adapt_autopilot(
             id: make_learning_id("adapt"),
             autopilot_id: autopilot_id.to_string(),
             run_id: run_id.to_string(),
+            adaptation_hash,
             changes_json,
             rationale_codes_json: rationale_json,
             created_at_ms: now,
@@ -885,6 +947,239 @@ pub fn persist_memory_usage(
     Ok(())
 }
 
+fn compact_decision_events_for_autopilot(
+    connection: &Connection,
+    autopilot_id: &str,
+    protected_runs: &[String],
+    dry_run: bool,
+) -> Result<i64, LearningError> {
+    let cutoff = now_ms() - DECISION_EVENTS_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT event_id, run_id, created_at_ms
+            FROM decision_events
+            WHERE autopilot_id = ?1
+            ORDER BY created_at_ms DESC
+            ",
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![autopilot_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let protected: std::collections::HashSet<String> = protected_runs.iter().cloned().collect();
+    let mut to_delete = Vec::new();
+    for (idx, row) in rows.enumerate() {
+        let (event_id, run_id, created_at_ms) =
+            row.map_err(|e| LearningError::Db(e.to_string()))?;
+        let rank = idx as i64 + 1;
+        let keep_by_rank = rank <= DECISION_EVENTS_RETENTION_MAX_PER_AUTOPILOT;
+        let keep_by_age = created_at_ms >= cutoff;
+        let keep_by_protection = protected.contains(&run_id);
+        if !(keep_by_rank && keep_by_age) && !keep_by_protection {
+            to_delete.push(event_id);
+        }
+    }
+    delete_ids_chunked(
+        connection,
+        "decision_events",
+        "event_id",
+        &to_delete,
+        dry_run,
+    )
+}
+
+fn compact_adaptation_log_for_autopilot(
+    connection: &Connection,
+    autopilot_id: &str,
+    dry_run: bool,
+) -> Result<i64, LearningError> {
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT id
+            FROM adaptation_log
+            WHERE autopilot_id = ?1
+            ORDER BY created_at_ms DESC
+            ",
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![autopilot_id], |row| row.get::<_, String>(0))
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let mut to_delete = Vec::new();
+    for (idx, row) in rows.enumerate() {
+        let id = row.map_err(|e| LearningError::Db(e.to_string()))?;
+        if idx as i64 >= ADAPTATION_LOG_RETENTION_MAX_PER_AUTOPILOT {
+            to_delete.push(id);
+        }
+    }
+    delete_ids_chunked(connection, "adaptation_log", "id", &to_delete, dry_run)
+}
+
+fn compact_run_evaluations_for_autopilot(
+    connection: &Connection,
+    autopilot_id: &str,
+    protected_runs: &[String],
+    dry_run: bool,
+) -> Result<i64, LearningError> {
+    let cutoff = now_ms() - RUN_EVALUATIONS_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT run_id, created_at_ms
+            FROM run_evaluations
+            WHERE autopilot_id = ?1
+            ORDER BY created_at_ms DESC
+            ",
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![autopilot_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let protected: std::collections::HashSet<String> = protected_runs.iter().cloned().collect();
+    let mut to_delete = Vec::new();
+    for (idx, row) in rows.enumerate() {
+        let (run_id, created_at_ms) = row.map_err(|e| LearningError::Db(e.to_string()))?;
+        let rank = idx as i64 + 1;
+        let keep_by_rank = rank <= RUN_EVALUATIONS_RETENTION_MAX_PER_AUTOPILOT;
+        let keep_by_age = created_at_ms >= cutoff;
+        let keep_by_protection = protected.contains(&run_id);
+        if !(keep_by_rank && keep_by_age) && !keep_by_protection {
+            to_delete.push(run_id);
+        }
+    }
+    delete_ids_chunked(connection, "run_evaluations", "run_id", &to_delete, dry_run)
+}
+
+fn recent_terminal_run_ids(
+    connection: &Connection,
+    autopilot_id: &str,
+    limit: i64,
+) -> Result<Vec<String>, LearningError> {
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT id FROM runs
+            WHERE autopilot_id = ?1
+              AND state IN ('succeeded','failed','blocked','canceled')
+            ORDER BY updated_at DESC
+            LIMIT ?2
+            ",
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![autopilot_id, limit], |row| row.get::<_, String>(0))
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| LearningError::Db(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+fn write_compaction_activity(
+    connection: &Connection,
+    autopilot_id: Option<&str>,
+    summary: &LearningCompactionSummary,
+) -> Result<(), LearningError> {
+    let event = format!(
+        "learning_compaction: decision_events_deleted={}, adaptation_log_deleted={}, run_evaluations_deleted={}",
+        summary.decision_events_deleted, summary.adaptation_log_deleted, summary.run_evaluations_deleted
+    );
+    connection
+        .execute(
+            "INSERT INTO activity (id, autopilot_id, event, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                make_learning_id("learning_compact"),
+                autopilot_id,
+                event,
+                now_ms()
+            ],
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    Ok(())
+}
+fn delete_ids_chunked(
+    connection: &Connection,
+    table: &str,
+    id_col: &str,
+    ids: &[String],
+    dry_run: bool,
+) -> Result<i64, LearningError> {
+    if dry_run || ids.is_empty() {
+        return Ok(ids.len() as i64);
+    }
+    let mut deleted_total = 0_i64;
+    for chunk in ids.chunks(COMPACTION_DELETE_CHUNK as usize) {
+        let placeholders = (0..chunk.len())
+            .map(|_| "?")
+            .collect::<Vec<&str>>()
+            .join(",");
+        let sql = format!("DELETE FROM {table} WHERE {id_col} IN ({placeholders})");
+        connection
+            .execute(
+                &sql,
+                rusqlite::params_from_iter(chunk.iter().cloned().map(rusqlite::types::Value::from)),
+            )
+            .map_err(|e| LearningError::Db(e.to_string()))?;
+        deleted_total += chunk.len() as i64;
+    }
+    Ok(deleted_total)
+}
+
+pub fn compact_learning_data(
+    connection: &Connection,
+    autopilot_id: Option<&str>,
+    dry_run: bool,
+) -> Result<LearningCompactionSummary, LearningError> {
+    let autopilot_ids = if let Some(id) = autopilot_id {
+        vec![id.to_string()]
+    } else {
+        let mut stmt = connection
+            .prepare("SELECT id FROM autopilots ORDER BY created_at DESC")
+            .map_err(|e| LearningError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| LearningError::Db(e.to_string()))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| LearningError::Db(e.to_string()))?);
+        }
+        ids
+    };
+
+    let mut summary = LearningCompactionSummary {
+        autopilot_id: autopilot_id.map(|s| s.to_string()),
+        dry_run,
+        ..Default::default()
+    };
+
+    for id in autopilot_ids {
+        let protected_runs =
+            recent_terminal_run_ids(connection, &id, PROTECTED_RECENT_RUNS_FOR_ADAPTATION)?;
+        summary.decision_events_deleted +=
+            compact_decision_events_for_autopilot(connection, &id, &protected_runs, dry_run)?;
+        summary.adaptation_log_deleted +=
+            compact_adaptation_log_for_autopilot(connection, &id, dry_run)?;
+        summary.run_evaluations_deleted +=
+            compact_run_evaluations_for_autopilot(connection, &id, &protected_runs, dry_run)?;
+    }
+
+    if !dry_run {
+        write_compaction_activity(connection, autopilot_id, &summary)?;
+    }
+    Ok(summary)
+}
+
 fn load_autopilot_profile(
     connection: &Connection,
     autopilot_id: &str,
@@ -1017,6 +1312,11 @@ fn upsert_memory_card_internal(
     created_from_run_id: Option<&str>,
     now: i64,
 ) -> Result<(), LearningError> {
+    if title.chars().count() > MAX_MEMORY_CARD_TITLE_CHARS {
+        return Err(LearningError::Invalid(
+            "memory card title exceeded max length".to_string(),
+        ));
+    }
     let content_json = serialize_bounded_json(content, MAX_MEMORY_CARD_CONTENT_BYTES)?;
     db::upsert_memory_card(
         connection,
@@ -1075,23 +1375,20 @@ fn summarize_card(card_type: &str, content: &Value) -> Result<String, LearningEr
     Ok(text)
 }
 
-fn parse_and_validate_metadata_value(value: Value) -> Result<DecisionEventMetadata, LearningError> {
+fn parse_and_validate_metadata_value(
+    event_type: DecisionEventType,
+    value: Value,
+) -> Result<DecisionEventMetadata, LearningError> {
     let obj = value
         .as_object()
         .ok_or_else(|| LearningError::Invalid("metadata_json must be an object".to_string()))?;
 
-    let allowed = [
-        "latency_ms",
-        "reason_code",
-        "provider_kind",
-        "usd_cents_actual",
-        "diff_score",
-        "content_hash",
-        "content_length",
-        "draft_length",
-    ];
+    let allowed = allowed_metadata_keys_for_event(event_type);
     for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
+        if !allowed
+            .iter()
+            .any(|allowed_key| allowed_key == &key.as_str())
+        {
             return Err(LearningError::Invalid(format!(
                 "Unsupported metadata key: {key}"
             )));
@@ -1100,14 +1397,19 @@ fn parse_and_validate_metadata_value(value: Value) -> Result<DecisionEventMetada
 
     let metadata: DecisionEventMetadata = serde_json::from_value(Value::Object(obj.clone()))
         .map_err(|e| LearningError::Invalid(format!("Invalid metadata shape: {e}")))?;
-    Ok(sanitize_metadata(metadata))
+    validate_and_sanitize_metadata(event_type, metadata)
 }
 
-fn sanitize_metadata(mut metadata: DecisionEventMetadata) -> DecisionEventMetadata {
+fn validate_and_sanitize_metadata(
+    event_type: DecisionEventType,
+    mut metadata: DecisionEventMetadata,
+) -> Result<DecisionEventMetadata, LearningError> {
     if let Some(code) = metadata.reason_code.as_mut() {
+        ensure_text_is_safe(code, "reason_code")?;
         *code = code.chars().take(40).collect::<String>();
     }
     if let Some(kind) = metadata.provider_kind.as_mut() {
+        ensure_text_is_safe(kind, "provider_kind")?;
         *kind = kind
             .chars()
             .take(20)
@@ -1115,6 +1417,7 @@ fn sanitize_metadata(mut metadata: DecisionEventMetadata) -> DecisionEventMetada
             .to_ascii_lowercase();
     }
     if let Some(hash) = metadata.content_hash.as_mut() {
+        ensure_text_is_safe(hash, "content_hash")?;
         *hash = hash.chars().take(32).collect::<String>();
     }
     if let Some(diff) = metadata.diff_score {
@@ -1126,7 +1429,168 @@ fn sanitize_metadata(mut metadata: DecisionEventMetadata) -> DecisionEventMetada
     if let Some(length) = metadata.draft_length {
         metadata.draft_length = Some(length.clamp(0, 20_000));
     }
-    metadata
+    validate_event_metadata_semantics(event_type, &metadata)?;
+    Ok(metadata)
+}
+
+fn allowed_metadata_keys_for_event(event_type: DecisionEventType) -> &'static [&'static str] {
+    match event_type {
+        DecisionEventType::ApprovalApproved | DecisionEventType::ApprovalRejected => &[
+            "latency_ms",
+            "reason_code",
+            "provider_kind",
+            "usd_cents_actual",
+        ],
+        DecisionEventType::ApprovalExpired => &["reason_code"],
+        DecisionEventType::OutcomeOpened => &["reason_code"],
+        DecisionEventType::OutcomeIgnored => &[
+            "reason_code",
+            "diff_score",
+            "content_hash",
+            "content_length",
+        ],
+        DecisionEventType::DraftEdited | DecisionEventType::DraftCopied => &[
+            "reason_code",
+            "content_hash",
+            "content_length",
+            "draft_length",
+        ],
+    }
+}
+
+fn validate_event_metadata_semantics(
+    event_type: DecisionEventType,
+    metadata: &DecisionEventMetadata,
+) -> Result<(), LearningError> {
+    let has_latency = metadata.latency_ms.is_some();
+    let has_provider = metadata.provider_kind.is_some();
+    let has_spend = metadata.usd_cents_actual.is_some();
+    let has_diff = metadata.diff_score.is_some();
+    let has_draft = metadata.draft_length.is_some();
+
+    let allowed = allowed_metadata_keys_for_event(event_type);
+    if !allowed.contains(&"latency_ms") && has_latency {
+        return Err(LearningError::Invalid(
+            "latency_ms is not allowed for this event type".to_string(),
+        ));
+    }
+    if !allowed.contains(&"provider_kind") && has_provider {
+        return Err(LearningError::Invalid(
+            "provider_kind is not allowed for this event type".to_string(),
+        ));
+    }
+    if !allowed.contains(&"usd_cents_actual") && has_spend {
+        return Err(LearningError::Invalid(
+            "usd_cents_actual is not allowed for this event type".to_string(),
+        ));
+    }
+    if !allowed.contains(&"diff_score") && has_diff {
+        return Err(LearningError::Invalid(
+            "diff_score is not allowed for this event type".to_string(),
+        ));
+    }
+    if !allowed.contains(&"draft_length") && has_draft {
+        return Err(LearningError::Invalid(
+            "draft_length is not allowed for this event type".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sanitize_client_event_id(value: Option<&str>) -> Result<Option<String>, LearningError> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 80 {
+        return Err(LearningError::Invalid(
+            "client_event_id must be 80 chars or less".to_string(),
+        ));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':')
+    {
+        return Err(LearningError::Invalid(
+            "client_event_id contains unsupported characters".to_string(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn ensure_text_is_safe(value: &str, field_name: &str) -> Result<(), LearningError> {
+    if value.chars().count() > 256 {
+        return Err(LearningError::Invalid(format!(
+            "{field_name} exceeds max length"
+        )));
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in REDACTION_FORBIDDEN_SUBSTRINGS {
+        if lower.contains(forbidden) {
+            return Err(LearningError::Invalid(format!(
+                "{field_name} contains disallowed secret-like content"
+            )));
+        }
+    }
+    if looks_like_email_dump(value) {
+        return Err(LearningError::Invalid(format!(
+            "{field_name} appears to contain raw message content"
+        )));
+    }
+    Ok(())
+}
+
+fn looks_like_email_dump(value: &str) -> bool {
+    let line_count = value.lines().count();
+    if line_count >= 5 && value.lines().any(|line| line.chars().count() > 200) {
+        return true;
+    }
+    let lower = value.to_ascii_lowercase();
+    let header_hits = ["subject:", "from:", "to:", "cc:", "bcc:", "date:"]
+        .iter()
+        .filter(|h| lower.contains(**h))
+        .count();
+    header_hits >= 3
+}
+
+fn enforce_decision_event_rate_limit(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<(), LearningError> {
+    let cutoff = now_ms() - 60_000;
+    let count_in_window: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM decision_events WHERE autopilot_id = ?1 AND created_at_ms >= ?2",
+            params![autopilot_id, cutoff],
+            |row| row.get(0),
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    if count_in_window >= DECISION_EVENTS_RATE_LIMIT_PER_MINUTE {
+        return Err(LearningError::Invalid(
+            "Too many learning signals in a short window. Try again in a minute.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn maybe_compact_after_event_insert(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<(), LearningError> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM decision_events WHERE autopilot_id = ?1",
+            params![autopilot_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    if count > 0 && count % COMPACTION_TRIGGER_EVENT_INTERVAL == 0 {
+        let _ = compact_learning_data(connection, Some(autopilot_id), false)?;
+    }
+    Ok(())
 }
 
 fn serialize_bounded_json<T: Serialize>(
@@ -1390,6 +1854,29 @@ fn clamp_score(score: i64) -> i64 {
     score.clamp(0, 100)
 }
 
+fn latest_adaptation_hash(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<Option<String>, LearningError> {
+    connection
+        .query_row(
+            "SELECT adaptation_hash FROM adaptation_log WHERE autopilot_id = ?1 ORDER BY created_at_ms DESC LIMIT 1",
+            params![autopilot_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| LearningError::Db(e.to_string()))
+}
+
+fn fnv1a_64_hex(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn make_learning_id(prefix: &str) -> String {
     let n = LEARNING_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}_{}_{}", prefix, now_ms(), n)
@@ -1461,6 +1948,7 @@ mod tests {
             Some("step_1"),
             "outcome_opened",
             Some("{\"raw_text\":\"should fail\"}"),
+            None,
         );
         assert!(result.is_err());
     }
@@ -1479,6 +1967,7 @@ mod tests {
                 latency_ms: Some(1000),
                 ..Default::default()
             },
+            None,
         )
         .expect("event");
 
@@ -1512,6 +2001,7 @@ mod tests {
                 Some("step_2"),
                 DecisionEventType::ApprovalRejected,
                 DecisionEventMetadata::default(),
+                None,
             )
             .expect("event");
             evaluate_run(&connection, &run_id).expect("eval run");
@@ -1550,6 +2040,7 @@ mod tests {
                     draft_length: Some(800),
                     ..Default::default()
                 },
+                None,
             )
             .expect("draft edited event");
         }
@@ -1563,5 +2054,216 @@ mod tests {
         assert!(context.prompt_block.chars().count() <= MAX_MEMORY_CONTEXT_CHARS);
         assert!(context.titles.len() <= MAX_MEMORY_CONTEXT_CARDS);
         assert!(!context.prompt_block.contains("Forwarded email"));
+    }
+
+    #[test]
+    fn decision_event_client_event_id_is_idempotent() {
+        let connection = setup_conn();
+        insert_terminal_run(&connection, "auto_event_dedupe", "run_event_dedupe");
+
+        let payload =
+            Some(r#"{"reason_code":"opened","content_hash":"abc123","content_length":20}"#);
+        record_decision_event_from_json(
+            &connection,
+            "auto_event_dedupe",
+            "run_event_dedupe",
+            Some("step_1"),
+            "outcome_ignored",
+            payload,
+            Some("client_evt_1"),
+        )
+        .expect("first insert");
+        record_decision_event_from_json(
+            &connection,
+            "auto_event_dedupe",
+            "run_event_dedupe",
+            Some("step_1"),
+            "outcome_ignored",
+            payload,
+            Some("client_evt_1"),
+        )
+        .expect("duplicate insert should be ignored");
+
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM decision_events WHERE autopilot_id = 'auto_event_dedupe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn decision_event_rejects_unsafe_or_oversized_metadata() {
+        let connection = setup_conn();
+        insert_terminal_run(&connection, "auto_event_safe", "run_event_safe");
+
+        let unsafe_result = record_decision_event_from_json(
+            &connection,
+            "auto_event_safe",
+            "run_event_safe",
+            Some("step_1"),
+            "approval_approved",
+            Some(r#"{"reason_code":"Authorization: Bearer secret"}"#),
+            Some("unsafe_1"),
+        );
+        assert!(unsafe_result.is_err());
+
+        let too_long = "x".repeat(300);
+        let too_long_result = record_decision_event_from_json(
+            &connection,
+            "auto_event_safe",
+            "run_event_safe",
+            Some("step_1"),
+            "approval_approved",
+            Some(&format!(r#"{{"reason_code":"{too_long}"}}"#)),
+            Some("unsafe_2"),
+        );
+        assert!(too_long_result.is_err());
+    }
+
+    #[test]
+    fn decision_event_rate_limit_is_enforced() {
+        let connection = setup_conn();
+        insert_terminal_run(&connection, "auto_rate", "run_rate");
+
+        for i in 0..DECISION_EVENTS_RATE_LIMIT_PER_MINUTE {
+            record_decision_event(
+                &connection,
+                "auto_rate",
+                "run_rate",
+                Some("step_1"),
+                DecisionEventType::OutcomeOpened,
+                DecisionEventMetadata {
+                    reason_code: Some("opened".to_string()),
+                    ..Default::default()
+                },
+                Some(&format!("rate_evt_{i}")),
+            )
+            .expect("under limit");
+        }
+
+        let blocked = record_decision_event(
+            &connection,
+            "auto_rate",
+            "run_rate",
+            Some("step_1"),
+            DecisionEventType::OutcomeOpened,
+            DecisionEventMetadata {
+                reason_code: Some("opened".to_string()),
+                ..Default::default()
+            },
+            Some("rate_evt_blocked"),
+        );
+        assert!(blocked.is_err());
+    }
+
+    #[test]
+    fn compaction_retains_latest_events_and_respects_limit() {
+        let connection = setup_conn();
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO autopilots (id, name, created_at) VALUES ('auto_compact', 'Compact', 1)",
+                [],
+            )
+            .expect("insert autopilot");
+
+        for run_idx in 0..30_i64 {
+            let run_id = format!("run_compact_{run_idx:02}");
+            insert_terminal_run(&connection, "auto_compact", &run_id);
+            connection
+                .execute(
+                    "UPDATE runs SET updated_at = ?1 WHERE id = ?2",
+                    params![10_000 + run_idx, run_id],
+                )
+                .expect("set updated_at");
+        }
+
+        let mut counter = 0_i64;
+        for run_idx in 0..30_i64 {
+            for _ in 0..20_i64 {
+                let run_id = format!("run_compact_{run_idx:02}");
+                db::insert_decision_event(
+                    &connection,
+                    &DecisionEventInsert {
+                        event_id: format!("evt_compact_{counter}"),
+                        client_event_id: Some(format!("client_evt_compact_{counter}")),
+                        autopilot_id: "auto_compact".to_string(),
+                        run_id,
+                        step_id: Some("step_1".to_string()),
+                        event_type: DecisionEventType::OutcomeOpened.as_str().to_string(),
+                        metadata_json: "{}".to_string(),
+                        created_at_ms: now_ms() + counter,
+                    },
+                )
+                .expect("insert event");
+                counter += 1;
+            }
+        }
+
+        let before: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM decision_events WHERE autopilot_id = 'auto_compact'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count before");
+        assert!(before > DECISION_EVENTS_RETENTION_MAX_PER_AUTOPILOT);
+
+        let summary =
+            compact_learning_data(&connection, Some("auto_compact"), false).expect("compact now");
+        assert!(summary.decision_events_deleted > 0);
+
+        let after: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM decision_events WHERE autopilot_id = 'auto_compact'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count after");
+        assert_eq!(after, DECISION_EVENTS_RETENTION_MAX_PER_AUTOPILOT);
+    }
+
+    #[test]
+    fn repeated_memory_updates_do_not_create_unbounded_cards() {
+        let connection = setup_conn();
+        insert_terminal_run(&connection, "auto_mem_bound", "run_mem_bound");
+
+        for i in 0..8 {
+            record_decision_event(
+                &connection,
+                "auto_mem_bound",
+                "run_mem_bound",
+                Some("step_1"),
+                DecisionEventType::DraftEdited,
+                DecisionEventMetadata {
+                    draft_length: Some(450 + i),
+                    ..Default::default()
+                },
+                Some(&format!("mem_evt_{i}")),
+            )
+            .expect("insert event");
+        }
+
+        evaluate_run(&connection, "run_mem_bound").expect("evaluate");
+        for _ in 0..4 {
+            update_memory_cards(
+                &connection,
+                "auto_mem_bound",
+                "run_mem_bound",
+                RecipeKind::InboxTriage,
+            )
+            .expect("update cards");
+        }
+
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_cards WHERE autopilot_id = 'auto_mem_bound' AND card_type = 'format_preference'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count cards");
+        assert_eq!(count, 1);
     }
 }

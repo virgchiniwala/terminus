@@ -112,6 +112,26 @@ Every terminal run can produce:
 
 Learning never expands capabilities or permissions.
 
+Learning signal ingress:
+- `record_decision_event` remains available for devtools/testing and future UI hooks
+- command is insert-only (cannot mutate profile, primitives, recipients, or sending policy)
+- event metadata is schema-validated per event type, size-bounded, key-allowlisted, and rate-limited per autopilot
+- duplicate client-side events are deduped via `client_event_id`
+
+Learning data privacy:
+- No raw email bodies
+- No raw web page bodies
+- No provider request/response payload dumps
+- No authorization headers or API keys
+- Learning fields store only bounded signals (counts, hashes, lengths, reason codes, timings)
+
+Learning retention/compaction (manual + safe boundaries):
+- `decision_events`: keep last 500 per autopilot (and no older than 90 days), while preserving recent adaptation window runs
+- `adaptation_log`: keep last 200 per autopilot
+- `run_evaluations`: keep last 500 per autopilot (and no older than 180 days), while preserving recent adaptation window runs
+- `memory_cards`: bounded by deterministic upsert keys and content-size limits
+- Compaction is exposed via manual command and may run opportunistically after bounded insert intervals; no daemon/cron loop
+
 See `docs/LEARNING_LAYER.md`.
 
 ## Definition of Done (Pilot)
