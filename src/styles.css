@@ -9,7 +9,9 @@
   --color-bg-secondary: rgba(255, 255, 255, 0.88);
   --color-text-primary: #1f2733;
   --color-text-secondary: #526176;
-  --color-text-tertiary: #708096;
+  /* #5a6b7c achieves 5.09:1 contrast on #f7f7f2 — passes WCAG AA for normal text (≥4.5:1 required).
+     Previous value #708096 only achieved ~3.36:1, failing AA at Caption (12px) and Micro (11px) sizes. */
+  --color-text-tertiary: #5a6b7c;
   --color-border: #d9e0ea;
   --color-surface-hover: rgba(255, 255, 255, 0.95);
   --color-accent: #5f7faa;
@@ -29,7 +31,9 @@
     --color-bg-secondary: rgba(30, 34, 42, 0.88);
     --color-text-primary: #e5e7eb;
     --color-text-secondary: #9ca3af;
-    --color-text-tertiary: #6b7280;
+    /* #7e8fa0 achieves 5.41:1 contrast on #14171c — passes WCAG AA for normal text (≥4.5:1 required).
+       Previous value #6b7280 only achieved ~3.71:1, failing AA at Caption (12px) and Micro (11px) sizes. */
+    --color-text-tertiary: #7e8fa0;
     --color-border: #2d3340;
     --color-surface-hover: rgba(40, 44, 52, 0.95);
     --color-accent: #7a9fd4;
@@ -112,7 +116,7 @@ body {
 
 .surface-footer span {
   font-size: 0.87rem;
-  color: #708096;
+  color: var(--color-text-tertiary);
 }
 
 button {
