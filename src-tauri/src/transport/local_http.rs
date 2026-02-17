@@ -1,4 +1,6 @@
-use crate::providers::types::{ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderUsage};
+use crate::providers::types::{
+    ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderUsage,
+};
 use crate::transport::ExecutionTransport;
 use serde_json::Value;
 use std::io::Write;
@@ -26,11 +28,17 @@ impl LocalHttpTransport {
         // We avoid echoing stderr (it may include network details); only use it for classification.
         let retryable = matches!(status, 5 | 6 | 7 | 28 | 52 | 56);
         if retryable {
-            ProviderError::retryable(format!("{provider} is temporarily unavailable. Try again shortly."))
+            ProviderError::retryable(format!(
+                "{provider} is temporarily unavailable. Try again shortly."
+            ))
         } else if stderr.to_ascii_lowercase().contains("could not resolve") {
-            ProviderError::retryable(format!("{provider} is temporarily unavailable. Try again shortly."))
+            ProviderError::retryable(format!(
+                "{provider} is temporarily unavailable. Try again shortly."
+            ))
         } else {
-            ProviderError::non_retryable(format!("{provider} rejected the request. Update the input and try again."))
+            ProviderError::non_retryable(format!(
+                "{provider} rejected the request. Update the input and try again."
+            ))
         }
     }
 
@@ -119,10 +127,7 @@ impl LocalHttpTransport {
             .rsplit_once(sentinel)
             .ok_or_else(|| ProviderError::retryable("Provider response could not be parsed."))?;
 
-        let http_status: u16 = status_str
-            .trim()
-            .parse()
-            .unwrap_or(0);
+        let http_status: u16 = status_str.trim().parse().unwrap_or(0);
         if !(200..=299).contains(&http_status) {
             return Err(Self::classify_http_status(provider, http_status));
         }
@@ -171,8 +176,11 @@ impl LocalHttpTransport {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
 
-        let estimated_cost_usd_cents =
-            estimate_openai_cost_usd_cents(&request.model, input_tokens as i64, output_tokens as i64);
+        let estimated_cost_usd_cents = estimate_openai_cost_usd_cents(
+            &request.model,
+            input_tokens as i64,
+            output_tokens as i64,
+        );
 
         Ok(ProviderResponse {
             provider_kind: request.provider_kind,
@@ -219,7 +227,9 @@ impl LocalHttpTransport {
                     .iter()
                     .filter_map(|b| {
                         if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            b.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                            b.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
                         } else {
                             None
                         }
@@ -305,7 +315,8 @@ mod tests {
         }
 
         let transport = LocalHttpTransport::new();
-        let key = crate::providers::keychain::get_api_key(ProviderKind::OpenAi).expect("keychain access");
+        let key =
+            crate::providers::keychain::get_api_key(ProviderKind::OpenAi).expect("keychain access");
         let req = ProviderRequest {
             provider_kind: ProviderKind::OpenAi,
             provider_tier: ProviderTier::Supported,
@@ -315,7 +326,9 @@ mod tests {
             correlation_id: Some("live_openai_test".to_string()),
         };
 
-        let resp = transport.dispatch(&req, key.as_deref()).expect("openai response");
+        let resp = transport
+            .dispatch(&req, key.as_deref())
+            .expect("openai response");
         assert!(!resp.text.is_empty());
     }
 
@@ -326,7 +339,8 @@ mod tests {
         }
 
         let transport = LocalHttpTransport::new();
-        let key = crate::providers::keychain::get_api_key(ProviderKind::Anthropic).expect("keychain access");
+        let key = crate::providers::keychain::get_api_key(ProviderKind::Anthropic)
+            .expect("keychain access");
         let req = ProviderRequest {
             provider_kind: ProviderKind::Anthropic,
             provider_tier: ProviderTier::Supported,

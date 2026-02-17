@@ -1,5 +1,101 @@
 # Morning Handoff — Personal AI OS
 
+## Day Handoff Update (2026-02-17 15:40 SGT)
+
+### Completed This Session
+1. Implemented Learning Layer module (`Plan -> Run -> Receipt -> Evaluate -> Adapt`) with local-first SQLite persistence.
+2. Added migration-safe tables:
+   - `decision_events`
+   - `run_evaluations`
+   - `adaptation_log`
+   - `autopilot_profile`
+   - `memory_cards`
+3. Added DB helpers for bounded learning writes:
+   - `insert_decision_event(...)`
+   - `insert_run_evaluation_if_missing(...)`
+   - `upsert_autopilot_profile(...)`
+   - `insert_adaptation_log(...)`
+   - `upsert_memory_card(...)`
+4. Wired runner boundaries:
+   - emits `approval_approved` / `approval_rejected` decision events
+   - terminal hook executes idempotent `evaluate_run -> adapt_autopilot -> update_memory_cards`
+   - terminal receipts now include `evaluation`, `adaptation`, and `memory_titles_used`
+5. Added bounded runtime profile application at tick preflight:
+   - suppression early-exit
+   - website monitor `min_diff_score_to_notify`
+   - daily brief `max_sources` / `max_bullets`
+   - inbox triage `reply_length_hint`
+6. Added bounded memory recall injection to provider prompts (max 5 cards, 1,500 chars) and persisted `memory_usage` titles per run.
+7. Added regression tests for:
+   - approval decision events
+   - evaluation idempotency
+   - suppression early-stop (no drafts/approvals)
+   - receipt enrichment with memory titles
+
+### Verification Run
+- Rust tests: `cd src-tauri && cargo test` (pass, 35 tests)
+- Frontend build: `npm run build` (pass)
+
+### DevTools Snippet (Evaluate + Adapt + Memory)
+```js
+const invoke = window.__TAURI__.core.invoke;
+
+// 1) Run once
+const run1 = await invoke("start_recipe_run", {
+  autopilotId: "auto_learning_demo",
+  recipe: "inbox_triage",
+  intent: "Draft a concise reply to this forwarded note",
+  pastedText: "Subject: Quick update\nCan you send a concise status reply by EOD?",
+  provider: "openai",
+  idempotencyKey: "learn_demo_1",
+  maxRetries: 2
+});
+await invoke("run_tick", { runId: run1.id });
+await invoke("run_tick", { runId: run1.id });
+const p1 = await invoke("list_pending_approvals");
+await invoke("approve_run_approval", { approvalId: p1.find(a => a.run_id === run1.id).id });
+const receipt1 = await invoke("get_terminal_receipt", { runId: run1.id });
+
+// 2) Simulate edit/ignore decisions for learning
+await invoke("record_decision_event", {
+  autopilotId: "auto_learning_demo",
+  runId: run1.id,
+  eventType: "draft_edited",
+  stepId: "step_3",
+  metadataJson: "{\"draft_length\":420}"
+});
+await invoke("record_decision_event", {
+  autopilotId: "auto_learning_demo",
+  runId: run1.id,
+  eventType: "draft_edited",
+  stepId: "step_3",
+  metadataJson: "{\"draft_length\":390}"
+});
+
+// 3) Run again to verify memory titles appear in receipt
+const run2 = await invoke("start_recipe_run", {
+  autopilotId: "auto_learning_demo",
+  recipe: "inbox_triage",
+  intent: "Draft a concise reply to this forwarded note",
+  pastedText: "Subject: Follow-up\nPlease send a short acknowledgement.",
+  provider: "openai",
+  idempotencyKey: "learn_demo_2",
+  maxRetries: 2
+});
+await invoke("run_tick", { runId: run2.id });
+await invoke("run_tick", { runId: run2.id });
+const p2 = await invoke("list_pending_approvals");
+await invoke("approve_run_approval", { approvalId: p2.find(a => a.run_id === run2.id).id });
+const receipt2 = await invoke("get_terminal_receipt", { runId: run2.id });
+
+({ receipt1, receipt2 });
+```
+
+Expected:
+- `receipt1.evaluation` present
+- `receipt1.adaptation` present (may be no-op with empty `changed_fields`)
+- `receipt2.memory_titles_used` includes learned preference card title(s)
+
 ## Day Handoff Update (2026-02-12 13:20 SGT)
 
 ### Completed This Session

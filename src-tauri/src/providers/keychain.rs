@@ -12,7 +12,9 @@ pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, Provid
         .arg("-w")
         .output()
         .map_err(|_| {
-            ProviderError::non_retryable("Could not access Keychain. Check local security settings.")
+            ProviderError::non_retryable(
+                "Could not access Keychain. Check local security settings.",
+            )
         })?;
 
     if output.status.success() {
@@ -24,7 +26,9 @@ pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, Provid
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("could not be found") || stderr.contains("The specified item could not be found") {
+    if stderr.contains("could not be found")
+        || stderr.contains("The specified item could not be found")
+    {
         return Ok(None);
     }
 

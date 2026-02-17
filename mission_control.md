@@ -1,8 +1,8 @@
 # Mission Control — Personal AI OS
 
-**Last Updated:** 2026-02-12 16:55 SGT  
+**Last Updated:** 2026-02-17 15:40 SGT  
 **Current Mode:** Day (Vir active)  
-**Branch:** main
+**Branch:** codex/daily-brief-real-preset
 
 ---
 
@@ -55,6 +55,18 @@ A task is only marked `Shipped` when all are true:
 
 ## Day Update (2026-02-12)
 
+### T1007: Learning Layer (Evaluate -> Adapt -> Memory, Local-First)
+**Owner:** Jarvis + Fury + Friday  
+**Status:** Ready for Review  
+**Scope:** Added deterministic learning layer with `decision_events`, idempotent `run_evaluations`, bounded `autopilot_profile` adaptation rules, compact `memory_cards`, runtime profile preflight (including suppression), and receipt enrichment (`evaluation`, `adaptation`, `memory_titles_used`)  
+**Files:** `src-tauri/src/learning/mod.rs`, `src-tauri/src/runner.rs`, `src-tauri/src/db.rs`, `src-tauri/src/main.rs`  
+**Verification:** `cargo test` (35 tests, pass) + `npm run build` (pass)
+
+### T1007 Guardrails
+- No primitive/domain/recipient capability growth from adaptation logic.
+- No raw source/email/provider payloads in decision events, evaluations, or memory cards.
+- Tick-runner model unchanged (`start_recipe_run` persists and returns; `run_tick` bounded; `resume_due_runs` unchanged).
+
 ### T1005: Provider + Transport Abstraction (Relay-ready seam)
 **Owner:** Friday  
 **Status:** Shipped  
@@ -102,7 +114,16 @@ A task is only marked `Shipped` when all are true:
 
 ## Now (In Progress)
 
-*Nothing in progress right now.*
+### T1007: Learning Layer (Evaluate -> Adapt -> Memory)
+**Owner:** Jarvis + Fury + Friday  
+**Status:** In Review  
+**Scope:** Phase 1-3 learning loop implemented end-to-end and integrated into terminal run hooks  
+**Non-goals:** No provider UI, no Relay, no plugin/harness/chat-first surfaces, no arbitrary code execution  
+**Files:** `src-tauri/src/learning/mod.rs`, `src-tauri/src/runner.rs`, `src-tauri/src/db.rs`, `src-tauri/src/main.rs`  
+**Risks:** Rule tuning may need follow-up based on pilot behavior; current adaptation rules are deterministic and intentionally conservative  
+**Acceptance Criteria:** Decision events/evaluation/adaptation/memory are persisted, bounded, explainable, and idempotent  
+**Verification:** `cd src-tauri && cargo test`; `npm run build`; DevTools commands in `handoff.md`  
+**Rollback/Containment:** Disable profile effects by setting `learning_enabled=0` in `autopilot_profile` for the target autopilot
 
 ---
 

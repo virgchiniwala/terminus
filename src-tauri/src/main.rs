@@ -1,4 +1,5 @@
 mod db;
+mod learning;
 mod primitives;
 mod providers;
 mod runner;
@@ -91,13 +92,19 @@ fn run_tick(state: tauri::State<AppState>, run_id: String) -> Result<RunRecord, 
 }
 
 #[tauri::command]
-fn resume_due_runs(state: tauri::State<AppState>, limit: Option<usize>) -> Result<Vec<RunRecord>, String> {
+fn resume_due_runs(
+    state: tauri::State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<RunRecord>, String> {
     let mut connection = open_connection(&state)?;
     RunnerEngine::resume_due_runs(&mut connection, limit.unwrap_or(20)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn approve_run_approval(state: tauri::State<AppState>, approval_id: String) -> Result<RunRecord, String> {
+fn approve_run_approval(
+    state: tauri::State<AppState>,
+    approval_id: String,
+) -> Result<RunRecord, String> {
     let mut connection = open_connection(&state)?;
     RunnerEngine::approve(&mut connection, &approval_id).map_err(|e| e.to_string())
 }
@@ -131,6 +138,27 @@ fn get_terminal_receipt(
 ) -> Result<Option<RunReceipt>, String> {
     let connection = open_connection(&state)?;
     RunnerEngine::get_terminal_receipt(&connection, &run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn record_decision_event(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+    run_id: String,
+    event_type: String,
+    step_id: Option<String>,
+    metadata_json: Option<String>,
+) -> Result<(), String> {
+    let connection = open_connection(&state)?;
+    learning::record_decision_event_from_json(
+        &connection,
+        &autopilot_id,
+        &run_id,
+        step_id.as_deref(),
+        &event_type,
+        metadata_json.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn parse_recipe(value: &str) -> Result<RecipeKind, String> {
@@ -171,7 +199,8 @@ fn main() {
             reject_run_approval,
             list_pending_approvals,
             get_run,
-            get_terminal_receipt
+            get_terminal_receipt,
+            record_decision_event
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Terminus app");

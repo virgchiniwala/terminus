@@ -1,10 +1,14 @@
+use crate::learning::{
+    self, AdaptationSummary, DecisionEventMetadata, DecisionEventType, RunEvaluationSummary,
+    RuntimeProfile,
+};
 use crate::primitives::PrimitiveGuard;
 use crate::providers::{
     ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
 };
 use crate::schema::{
-    AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId, RecipeKind,
-    ProviderTier as SchemaProviderTier,
+    AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
+    ProviderTier as SchemaProviderTier, RecipeKind,
 };
 use crate::web::{fetch_allowlisted_text, parse_scheme_host, WebFetchError, WebFetchResult};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -123,6 +127,10 @@ pub struct RunReceipt {
     pub recovery_options: Vec<String>,
     pub total_spend_usd_cents: i64,
     pub cost_breakdown: Vec<ReceiptCostLineItem>,
+    pub evaluation: Option<RunEvaluationSummary>,
+    pub adaptation: Option<AdaptationSummary>,
+    #[serde(default)]
+    pub memory_titles_used: Vec<String>,
     pub redacted: bool,
     pub created_at_ms: i64,
 }
@@ -179,6 +187,8 @@ struct WebReadArtifact {
     status_code: u16,
     content_hash: String,
     changed: bool,
+    #[serde(default)]
+    diff_score: f64,
     current_excerpt: String,
     previous_excerpt: Option<String>,
 }
@@ -252,7 +262,8 @@ impl RunnerEngine {
 
         let run_id = make_id("run");
         let now = now_ms();
-        let plan_json = serde_json::to_string(&plan).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        let plan_json =
+            serde_json::to_string(&plan).map_err(|e| RunnerError::Serde(e.to_string()))?;
         let provider_kind = provider_kind_from_plan(&plan);
         let provider_tier = provider_tier_from_plan(&plan);
 
@@ -317,6 +328,8 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
+        learning::ensure_autopilot_profile(connection, autopilot_id)
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
         Self::get_run(connection, &run_id)
     }
 
@@ -361,16 +374,24 @@ impl RunnerEngine {
         Ok(updated)
     }
 
-    pub fn approve(connection: &mut Connection, approval_id: &str) -> Result<RunRecord, RunnerError> {
+    pub fn approve(
+        connection: &mut Connection,
+        approval_id: &str,
+    ) -> Result<RunRecord, RunnerError> {
         let approval = Self::get_approval(connection, approval_id)?;
         if approval.status != "pending" {
-            return Err(RunnerError::Human("Approval is no longer pending.".to_string()));
+            return Err(RunnerError::Human(
+                "Approval is no longer pending.".to_string(),
+            ));
         }
+        let decision_now = now_ms();
+        let latency_ms = Self::get_approval_created_at(connection, approval_id)?
+            .map(|created_at| decision_now.saturating_sub(created_at));
 
         let tx = connection
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
-        let now = now_ms();
+        let now = decision_now;
 
         tx.execute(
             "
@@ -418,6 +439,26 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
+        let run_after_approval = Self::get_run(connection, &approval.run_id)?;
+        learning::record_decision_event(
+            connection,
+            &run_after_approval.autopilot_id,
+            &approval.run_id,
+            Some(&approval.step_id),
+            DecisionEventType::ApprovalApproved,
+            DecisionEventMetadata {
+                latency_ms,
+                reason_code: Some(if is_soft_cap_approval {
+                    "soft_cap".to_string()
+                } else {
+                    "step".to_string()
+                }),
+                provider_kind: Some(run_after_approval.provider_kind.as_str().to_string()),
+                usd_cents_actual: Some(run_after_approval.usd_cents_actual),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         if is_soft_cap_approval {
             Self::run_tick_internal(connection, &approval.run_id, None)
@@ -433,10 +474,16 @@ impl RunnerEngine {
     ) -> Result<RunRecord, RunnerError> {
         let approval = Self::get_approval(connection, approval_id)?;
         if approval.status != "pending" {
-            return Err(RunnerError::Human("Approval is no longer pending.".to_string()));
+            return Err(RunnerError::Human(
+                "Approval is no longer pending.".to_string(),
+            ));
         }
+        let decision_now = now_ms();
+        let latency_ms = Self::get_approval_created_at(connection, approval_id)?
+            .map(|created_at| decision_now.saturating_sub(created_at));
 
-        let reject_reason = reason.unwrap_or_else(|| "Approval was rejected by the user.".to_string());
+        let reject_reason =
+            reason.unwrap_or_else(|| "Approval was rejected by the user.".to_string());
         let terminal_state = if approval.step_id == SOFT_CAP_APPROVAL_STEP_ID {
             RunState::Blocked
         } else {
@@ -446,7 +493,7 @@ impl RunnerEngine {
         let tx = connection
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
-        let now = now_ms();
+        let now = decision_now;
 
         tx.execute(
             "
@@ -466,12 +513,7 @@ impl RunnerEngine {
                 updated_at = ?3
             WHERE id = ?4
             ",
-            params![
-                terminal_state.as_str(),
-                reject_reason,
-                now,
-                approval.run_id
-            ],
+            params![terminal_state.as_str(), reject_reason, now, approval.run_id],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
@@ -500,10 +542,32 @@ impl RunnerEngine {
         )?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
-        Self::get_run(connection, &approval.run_id)
+        let run_after_reject = Self::get_run(connection, &approval.run_id)?;
+        learning::record_decision_event(
+            connection,
+            &run_after_reject.autopilot_id,
+            &approval.run_id,
+            Some(&approval.step_id),
+            DecisionEventType::ApprovalRejected,
+            DecisionEventMetadata {
+                latency_ms,
+                reason_code: Some(if approval.step_id == SOFT_CAP_APPROVAL_STEP_ID {
+                    "soft_cap_rejected".to_string()
+                } else {
+                    "user_rejected".to_string()
+                }),
+                provider_kind: Some(run_after_reject.provider_kind.as_str().to_string()),
+                usd_cents_actual: Some(run_after_reject.usd_cents_actual),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Self::get_run_with_learning(connection, &approval.run_id)
     }
 
-    pub fn list_pending_approvals(connection: &Connection) -> Result<Vec<ApprovalRecord>, RunnerError> {
+    pub fn list_pending_approvals(
+        connection: &Connection,
+    ) -> Result<Vec<ApprovalRecord>, RunnerError> {
         let mut stmt = connection
             .prepare(
                 "
@@ -588,6 +652,18 @@ impl RunnerEngine {
             })
     }
 
+    fn get_run_with_learning(
+        connection: &mut Connection,
+        run_id: &str,
+    ) -> Result<RunRecord, RunnerError> {
+        let run = Self::get_run(connection, run_id)?;
+        if run.state.is_terminal() {
+            Self::run_learning_pipeline(connection, &run)?;
+            return Self::get_run(connection, run_id);
+        }
+        Ok(run)
+    }
+
     pub fn get_terminal_receipt(
         connection: &Connection,
         run_id: &str,
@@ -611,7 +687,10 @@ impl RunnerEngine {
         }
     }
 
-    fn get_run_in_tx(tx: &rusqlite::Transaction<'_>, run_id: &str) -> Result<RunRecord, RunnerError> {
+    fn get_run_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        run_id: &str,
+    ) -> Result<RunRecord, RunnerError> {
         tx.query_row(
             "
             SELECT id, autopilot_id, idempotency_key,
@@ -668,7 +747,7 @@ impl RunnerEngine {
         run_id: &str,
         approved_step_id: Option<&str>,
     ) -> Result<RunRecord, RunnerError> {
-        let run = Self::get_run(connection, run_id)?;
+        let run = Self::get_run_with_learning(connection, run_id)?;
 
         if run.state.is_terminal() || run.state == RunState::NeedsApproval {
             return Ok(run);
@@ -679,6 +758,30 @@ impl RunnerEngine {
             if let Some(next_retry_at) = run.next_retry_at_ms {
                 if next_retry_at > now {
                     return Ok(run);
+                }
+            }
+        }
+
+        let runtime_profile = learning::get_runtime_profile(connection, &run.autopilot_id)
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        if runtime_profile.learning_enabled {
+            if let Some(until) = runtime_profile.suppress_until_ms {
+                if until > now_ms() {
+                    let message = format!(
+                        "This Autopilot is suppressed until {}. No actions were taken.",
+                        until
+                    );
+                    Self::transition_state_with_activity(
+                        connection,
+                        run_id,
+                        run.state,
+                        RunState::Succeeded,
+                        "run_suppressed",
+                        &message,
+                        None,
+                        Some(run.current_step_index),
+                    )?;
+                    return Self::get_run_with_learning(connection, run_id);
                 }
             }
         }
@@ -695,7 +798,7 @@ impl RunnerEngine {
                 None,
                 None,
             )?;
-            return Self::get_run(connection, run_id);
+            return Self::get_run_with_learning(connection, run_id);
         }
 
         let step = run
@@ -711,7 +814,7 @@ impl RunnerEngine {
 
         if step.requires_approval && !is_approved_step {
             Self::pause_for_approval(connection, &run, &step)?;
-            return Self::get_run(connection, run_id);
+            return Self::get_run_with_learning(connection, run_id);
         }
 
         let step_cost_estimate_cents = estimate_step_cost_usd_cents(&run, &step);
@@ -719,7 +822,7 @@ impl RunnerEngine {
             CapDecision::Allow => {}
             CapDecision::NeedsSoftApproval { message } => {
                 Self::pause_for_soft_cap_approval(connection, &run, &message)?;
-                return Self::get_run(connection, run_id);
+                return Self::get_run_with_learning(connection, run_id);
             }
             CapDecision::BlockHard { message } => {
                 Self::transition_state_with_activity(
@@ -732,12 +835,12 @@ impl RunnerEngine {
                     Some(&message),
                     Some(current_idx as i64),
                 )?;
-                return Self::get_run(connection, run_id);
+                return Self::get_run_with_learning(connection, run_id);
             }
         }
 
         let from_state = run.state;
-        match Self::execute_step(connection, &run, &step) {
+        match Self::execute_step(connection, &run, &step, &runtime_profile) {
             Ok(result) => {
                 if result.actual_spend_usd_cents > 0 {
                     Self::record_spend(
@@ -803,7 +906,7 @@ impl RunnerEngine {
                         next_retry_at_ms,
                         &error.user_reason,
                     )?;
-                    return Self::get_run(connection, run_id);
+                    return Self::get_run_with_learning(connection, run_id);
                 }
 
                 Self::transition_state_with_activity(
@@ -819,7 +922,7 @@ impl RunnerEngine {
             }
         }
 
-        Self::get_run(connection, run_id)
+        Self::get_run_with_learning(connection, run_id)
     }
 
     fn evaluate_spend_caps(
@@ -874,6 +977,7 @@ impl RunnerEngine {
         connection: &mut Connection,
         run: &RunRecord,
         step: &PlanStep,
+        runtime_profile: &RuntimeProfile,
     ) -> Result<StepExecutionResult, StepExecutionError> {
         let guard = PrimitiveGuard::new(run.plan.allowed_primitives.clone());
         if let Err(error) = guard.validate(step.primitive) {
@@ -886,20 +990,22 @@ impl RunnerEngine {
         if step.primitive == PrimitiveId::SendEmail {
             return Err(StepExecutionError {
                 retryable: false,
-                user_reason: "Sending is disabled right now. Drafts are allowed, sends are blocked."
-                    .to_string(),
+                user_reason:
+                    "Sending is disabled right now. Drafts are allowed, sends are blocked."
+                        .to_string(),
             });
         }
 
         match step.primitive {
             PrimitiveId::ReadSources => {
+                let max_sources = runtime_profile.max_sources.min(DAILY_SOURCE_MAX_ITEMS);
                 let configured = run
                     .plan
                     .daily_sources
                     .iter()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
-                    .take(DAILY_SOURCE_MAX_ITEMS)
+                    .take(max_sources)
                     .collect::<Vec<String>>();
                 let sources = if configured.is_empty() {
                     vec![
@@ -911,11 +1017,12 @@ impl RunnerEngine {
                     configured
                 };
 
-                Self::upsert_daily_brief_sources(connection, &run.autopilot_id, &sources)
-                    .map_err(|e| StepExecutionError {
+                Self::upsert_daily_brief_sources(connection, &run.autopilot_id, &sources).map_err(
+                    |e| StepExecutionError {
                         retryable: false,
                         user_reason: e.to_string(),
-                    })?;
+                    },
+                )?;
                 let source_results = Self::read_daily_sources(&sources);
                 let sources_hash = compute_daily_sources_hash(&source_results);
                 let artifact = DailySourcesArtifact {
@@ -937,7 +1044,8 @@ impl RunnerEngine {
                 let sources_artifact = Self::get_daily_sources_artifact(connection, &run.id)
                     .map_err(|_| StepExecutionError {
                         retryable: false,
-                        user_reason: "Couldn't load Daily Brief sources for aggregation.".to_string(),
+                        user_reason: "Couldn't load Daily Brief sources for aggregation."
+                            .to_string(),
                     })?
                     .ok_or_else(|| StepExecutionError {
                         retryable: false,
@@ -960,25 +1068,63 @@ impl RunnerEngine {
                 }
 
                 let runtime = ProviderRuntime::default();
+                let memory_context =
+                    learning::build_memory_context(connection, &run.autopilot_id, run.plan.recipe)
+                        .map_err(|e| StepExecutionError {
+                            retryable: false,
+                            user_reason: format!("Couldn't load learning context: {e}"),
+                        })?;
                 let source_context = usable
                     .iter()
                     .map(|s| format!("[{}] {}\n{}", s.source_id, s.url, s.text_excerpt))
                     .collect::<Vec<String>>()
                     .join("\n\n");
+                let mode_hint = match runtime_profile.mode {
+                    learning::LearningMode::MaxSavings => "Mode: Max Savings. Keep output concise.",
+                    learning::LearningMode::BestQuality => {
+                        "Mode: Best Quality. Prioritize fidelity."
+                    }
+                    learning::LearningMode::Balanced => "Mode: Balanced.",
+                };
+                let memory_block = if memory_context.prompt_block.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}\n", memory_context.prompt_block)
+                };
                 let request = ProviderRequest {
                     provider_kind: run.provider_kind,
                     provider_tier: run.provider_tier,
                     model: run.plan.provider.default_model.clone(),
                     input: format!(
-                        "Intent: {}\nTask: Create a cohesive daily brief.\nOutput format:\nTitle: <one line>\n- bullet 1\n- bullet 2\n- bullet 3\n\nSources:\n{}",
+                        "Intent: {}\nTask: Create a cohesive daily brief.\n{}\nOutput format:\nTitle: <one line>\n- bullet 1\n- bullet 2\n- bullet 3\n{}\nSources:\n{}",
                         run.plan.intent,
+                        mode_hint,
+                        memory_block,
                         source_context
                     ),
-                    max_output_tokens: Some(700),
+                    max_output_tokens: Some(match runtime_profile.mode {
+                        learning::LearningMode::MaxSavings => 420,
+                        learning::LearningMode::BestQuality => 780,
+                        learning::LearningMode::Balanced => 700,
+                    }),
                     correlation_id: Some(format!("{}:{}", run.id, step.id)),
                 };
                 let response = runtime.dispatch(&request).map_err(map_provider_error)?;
-                let parsed = parse_daily_summary_output(&response.text, &sources_artifact.sources_hash);
+                let parsed = parse_daily_summary_output(
+                    &response.text,
+                    &sources_artifact.sources_hash,
+                    runtime_profile.max_bullets,
+                );
+                learning::persist_memory_usage(
+                    connection,
+                    &run.id,
+                    &step.id,
+                    &memory_context.titles,
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: false,
+                    user_reason: format!("Couldn't persist learning context usage: {e}"),
+                })?;
                 let seen_before = Self::daily_summary_exists(
                     connection,
                     &run.autopilot_id,
@@ -1004,15 +1150,17 @@ impl RunnerEngine {
                 }
 
                 let fallback_estimate = estimate_step_cost_usd_cents(run, step);
-                let total_cents = std::cmp::max(fallback_estimate, response.usage.estimated_cost_usd_cents);
+                let total_cents =
+                    std::cmp::max(fallback_estimate, response.usage.estimated_cost_usd_cents);
                 if total_cents > 0 {
                     Self::record_spend_by_sources(connection, run, step, &usable, total_cents)?;
                 }
 
                 if seen_before {
                     return Ok(StepExecutionResult {
-                        user_message: "Daily Brief sources are unchanged. No new summary draft created."
-                            .to_string(),
+                        user_message:
+                            "Daily Brief sources are unchanged. No new summary draft created."
+                                .to_string(),
                         actual_spend_usd_cents: 0,
                         next_step_index_override: Some(run.plan.steps.len() as i64),
                         terminal_state_override: Some(RunState::Succeeded),
@@ -1070,6 +1218,10 @@ impl RunnerEngine {
                     .as_ref()
                     .map(|prev| prev.last_hash != fetched.content_hash)
                     .unwrap_or(true);
+                let diff_score = previous
+                    .as_ref()
+                    .map(|prev| compute_diff_score(&prev.last_text_excerpt, &fetched.content_text))
+                    .unwrap_or(1.0);
 
                 let artifact = WebReadArtifact {
                     url: fetched.url.clone(),
@@ -1077,15 +1229,22 @@ impl RunnerEngine {
                     status_code: fetched.status_code,
                     content_hash: fetched.content_hash.clone(),
                     changed,
+                    diff_score,
                     current_excerpt: fetched.content_text.clone(),
                     previous_excerpt: previous.as_ref().map(|p| p.last_text_excerpt.clone()),
                 };
 
-                Self::upsert_web_snapshot(connection, &run.autopilot_id, &fetched, changed, previous.as_ref())
-                    .map_err(|e| StepExecutionError {
-                        retryable: false,
-                        user_reason: e.to_string(),
-                    })?;
+                Self::upsert_web_snapshot(
+                    connection,
+                    &run.autopilot_id,
+                    &fetched,
+                    changed,
+                    previous.as_ref(),
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: false,
+                    user_reason: e.to_string(),
+                })?;
                 Self::persist_web_read_artifact(connection, run, step, &artifact)?;
 
                 if !changed {
@@ -1102,8 +1261,37 @@ impl RunnerEngine {
                     });
                 }
 
+                if diff_score < runtime_profile.min_diff_score_to_notify {
+                    let _ = learning::record_decision_event(
+                        connection,
+                        &run.autopilot_id,
+                        &run.id,
+                        Some(&step.id),
+                        DecisionEventType::OutcomeIgnored,
+                        DecisionEventMetadata {
+                            reason_code: Some("below_diff_threshold".to_string()),
+                            diff_score: Some(diff_score),
+                            content_hash: Some(artifact.content_hash.clone()),
+                            content_length: Some(artifact.current_excerpt.chars().count() as i64),
+                            ..Default::default()
+                        },
+                    );
+                    return Ok(StepExecutionResult {
+                        user_message: "Change was below your notify threshold.".to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: Some(run.plan.steps.len() as i64),
+                        terminal_state_override: Some(RunState::Succeeded),
+                        terminal_summary_override: Some(
+                            "Change detected but suppressed due to your current sensitivity settings."
+                                .to_string(),
+                        ),
+                        failure_reason_override: None,
+                    });
+                }
+
                 Ok(StepExecutionResult {
-                    user_message: "Website change detected. Continuing to draft summary.".to_string(),
+                    user_message: "Website change detected. Continuing to draft summary."
+                        .to_string(),
                     actual_spend_usd_cents: 0,
                     next_step_index_override: None,
                     terminal_state_override: None,
@@ -1113,7 +1301,13 @@ impl RunnerEngine {
             }
             PrimitiveId::WriteOutcomeDraft | PrimitiveId::WriteEmailDraft => {
                 let runtime = ProviderRuntime::default();
-                let model_input = if run.plan.recipe == RecipeKind::WebsiteMonitor {
+                let memory_context =
+                    learning::build_memory_context(connection, &run.autopilot_id, run.plan.recipe)
+                        .map_err(|e| StepExecutionError {
+                            retryable: false,
+                            user_reason: format!("Couldn't load learning context: {e}"),
+                        })?;
+                let mut model_input = if run.plan.recipe == RecipeKind::WebsiteMonitor {
                     Self::build_website_monitor_prompt(connection, run, step)
                         .unwrap_or_else(|_| format!("{}\n\nStep: {}", run.plan.intent, step.label))
                 } else if run.plan.recipe == RecipeKind::InboxTriage {
@@ -1125,16 +1319,39 @@ impl RunnerEngine {
                 } else {
                     format!("{}\n\nStep: {}", run.plan.intent, step.label)
                 };
+                if run.plan.recipe == RecipeKind::InboxTriage {
+                    model_input.push_str(&format!(
+                        "\nReply length preference: {}.",
+                        runtime_profile.reply_length_hint
+                    ));
+                }
+                if !memory_context.prompt_block.is_empty() {
+                    model_input.push_str(&format!("\n\n{}", memory_context.prompt_block));
+                }
                 let request = ProviderRequest {
                     provider_kind: run.provider_kind,
                     provider_tier: run.provider_tier,
                     model: run.plan.provider.default_model.clone(),
                     input: model_input,
-                    max_output_tokens: Some(512),
+                    max_output_tokens: Some(match runtime_profile.mode {
+                        learning::LearningMode::MaxSavings => 320,
+                        learning::LearningMode::BestQuality => 640,
+                        learning::LearningMode::Balanced => 512,
+                    }),
                     correlation_id: Some(format!("{}:{}", run.id, step.id)),
                 };
 
                 let response = runtime.dispatch(&request).map_err(map_provider_error)?;
+                learning::persist_memory_usage(
+                    connection,
+                    &run.id,
+                    &step.id,
+                    &memory_context.titles,
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: false,
+                    user_reason: format!("Couldn't persist learning context usage: {e}"),
+                })?;
                 Self::persist_provider_output(connection, run, step, &response)?;
                 if run.plan.recipe == RecipeKind::InboxTriage
                     && step.primitive == PrimitiveId::WriteEmailDraft
@@ -1184,11 +1401,16 @@ impl RunnerEngine {
                 }
 
                 let content_hash = fnv1a_64_hex(&normalized);
-                let item = Self::upsert_inbox_item(connection, &run.autopilot_id, &normalized, &content_hash)
-                    .map_err(|e| StepExecutionError {
-                        retryable: false,
-                        user_reason: e.to_string(),
-                    })?;
+                let item = Self::upsert_inbox_item(
+                    connection,
+                    &run.autopilot_id,
+                    &normalized,
+                    &content_hash,
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: false,
+                    user_reason: e.to_string(),
+                })?;
 
                 let artifact = InboxReadArtifact {
                     item_id: item.id.clone(),
@@ -1201,13 +1423,15 @@ impl RunnerEngine {
 
                 if item.processed_at_ms.is_some() {
                     return Ok(StepExecutionResult {
-                        user_message: "This forwarded email was already processed. No new draft created."
-                            .to_string(),
+                        user_message:
+                            "This forwarded email was already processed. No new draft created."
+                                .to_string(),
                         actual_spend_usd_cents: 0,
                         next_step_index_override: Some(run.plan.steps.len() as i64),
                         terminal_state_override: Some(RunState::Succeeded),
                         terminal_summary_override: Some(
-                            "Email already processed. Existing draft remains available.".to_string(),
+                            "Email already processed. Existing draft remains available."
+                                .to_string(),
                         ),
                         failure_reason_override: None,
                     });
@@ -1222,20 +1446,21 @@ impl RunnerEngine {
                     failure_reason_override: None,
                 })
             }
-            PrimitiveId::ReadVaultFile
-            | PrimitiveId::ScheduleRun
-            | PrimitiveId::NotifyUser => Ok(StepExecutionResult {
-                user_message: "Step completed.".to_string(),
-                actual_spend_usd_cents: 0,
-                next_step_index_override: None,
-                terminal_state_override: None,
-                terminal_summary_override: None,
-                failure_reason_override: None,
-            }),
+            PrimitiveId::ReadVaultFile | PrimitiveId::ScheduleRun | PrimitiveId::NotifyUser => {
+                Ok(StepExecutionResult {
+                    user_message: "Step completed.".to_string(),
+                    actual_spend_usd_cents: 0,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
             PrimitiveId::SendEmail => Err(StepExecutionError {
                 retryable: false,
-                user_reason: "Sending is disabled right now. Drafts are allowed, sends are blocked."
-                    .to_string(),
+                user_reason:
+                    "Sending is disabled right now. Drafts are allowed, sends are blocked."
+                        .to_string(),
             }),
         }
     }
@@ -1469,7 +1694,10 @@ impl RunnerEngine {
             .map_err(|e| RunnerError::Db(e.to_string()))
     }
 
-    fn mark_inbox_item_processed(connection: &Connection, run: &RunRecord) -> Result<(), StepExecutionError> {
+    fn mark_inbox_item_processed(
+        connection: &Connection,
+        run: &RunRecord,
+    ) -> Result<(), StepExecutionError> {
         let artifact = Self::get_inbox_read_artifact(connection, &run.id)
             .map_err(|_| StepExecutionError {
                 retryable: false,
@@ -1917,7 +2145,10 @@ impl RunnerEngine {
         }
     }
 
-    fn get_approval(connection: &Connection, approval_id: &str) -> Result<ApprovalRecord, RunnerError> {
+    fn get_approval(
+        connection: &Connection,
+        approval_id: &str,
+    ) -> Result<ApprovalRecord, RunnerError> {
         connection
             .query_row(
                 "SELECT id, run_id, step_id, status, preview, reason FROM approvals WHERE id = ?1",
@@ -1940,6 +2171,20 @@ impl RunnerEngine {
                     RunnerError::Db(e.to_string())
                 }
             })
+    }
+
+    fn get_approval_created_at(
+        connection: &Connection,
+        approval_id: &str,
+    ) -> Result<Option<i64>, RunnerError> {
+        connection
+            .query_row(
+                "SELECT created_at FROM approvals WHERE id = ?1",
+                params![approval_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))
     }
 
     fn pause_for_approval(
@@ -2097,7 +2342,14 @@ impl RunnerEngine {
                 updated_at = ?5
             WHERE id = ?6
             ",
-            params![retry_count, backoff_ms, next_retry_at_ms, reason, now, run_id],
+            params![
+                retry_count,
+                backoff_ms,
+                next_retry_at_ms,
+                reason,
+                now,
+                run_id
+            ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
@@ -2278,6 +2530,62 @@ impl RunnerEngine {
         Ok(out)
     }
 
+    fn run_learning_pipeline(
+        connection: &mut Connection,
+        run: &RunRecord,
+    ) -> Result<(), RunnerError> {
+        let evaluation = learning::evaluate_run(connection, &run.id)
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let adaptation =
+            learning::adapt_autopilot(connection, &run.autopilot_id, &run.id, run.plan.recipe)
+                .map_err(|e| RunnerError::Db(e.to_string()))?;
+        learning::update_memory_cards(connection, &run.autopilot_id, &run.id, run.plan.recipe)
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let memory_titles = learning::list_memory_titles_for_run(connection, &run.id)
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Self::enrich_terminal_receipt(connection, &run.id, evaluation, adaptation, memory_titles)?;
+        Ok(())
+    }
+
+    fn enrich_terminal_receipt(
+        connection: &Connection,
+        run_id: &str,
+        evaluation: RunEvaluationSummary,
+        adaptation: AdaptationSummary,
+        memory_titles: Vec<String>,
+    ) -> Result<(), RunnerError> {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'receipt' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let Some(payload) = existing else {
+            return Ok(());
+        };
+
+        let mut receipt: RunReceipt =
+            serde_json::from_str(&payload).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        receipt.evaluation = Some(evaluation);
+        receipt.adaptation = Some(adaptation);
+        receipt.memory_titles_used = memory_titles;
+        let updated =
+            serde_json::to_string(&receipt).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        connection
+            .execute(
+                "
+                UPDATE outcomes
+                SET content = ?1, updated_at = ?2
+                WHERE run_id = ?3 AND kind = 'receipt'
+                ",
+                params![updated, now_ms(), run_id],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn transition_state_with_forced_failure(
         connection: &mut Connection,
@@ -2374,7 +2682,9 @@ fn build_receipt(
     cost_breakdown: Vec<ReceiptCostLineItem>,
 ) -> RunReceipt {
     let recovery_options = match terminal_state {
-        RunState::Succeeded => vec!["Review the outcome and keep this Autopilot running.".to_string()],
+        RunState::Succeeded => {
+            vec!["Review the outcome and keep this Autopilot running.".to_string()]
+        }
         RunState::Failed => vec![
             "Retry now.".to_string(),
             "Reduce scope and run again.".to_string(),
@@ -2401,6 +2711,9 @@ fn build_receipt(
         recovery_options,
         total_spend_usd_cents: run.usd_cents_actual,
         cost_breakdown,
+        evaluation: None,
+        adaptation: None,
+        memory_titles_used: Vec::new(),
         redacted: true,
         created_at_ms: now_ms(),
     }
@@ -2432,7 +2745,11 @@ fn fnv1a_64_hex(input: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn parse_daily_summary_output(raw: &str, sources_hash: &str) -> DailySummaryArtifact {
+fn parse_daily_summary_output(
+    raw: &str,
+    sources_hash: &str,
+    max_bullets: usize,
+) -> DailySummaryArtifact {
     let lines = raw
         .lines()
         .map(|l| l.trim())
@@ -2440,7 +2757,10 @@ fn parse_daily_summary_output(raw: &str, sources_hash: &str) -> DailySummaryArti
         .collect::<Vec<&str>>();
     let mut title = lines
         .iter()
-        .find_map(|line| line.strip_prefix("Title:").map(|rest| rest.trim().to_string()))
+        .find_map(|line| {
+            line.strip_prefix("Title:")
+                .map(|rest| rest.trim().to_string())
+        })
         .unwrap_or_else(|| "Daily Brief".to_string());
     if title.is_empty() {
         title = "Daily Brief".to_string();
@@ -2464,8 +2784,11 @@ fn parse_daily_summary_output(raw: &str, sources_hash: &str) -> DailySummaryArti
             .map(|line| line.to_string())
             .collect::<Vec<String>>();
     }
+    if bullet_points.len() > max_bullets.max(1) {
+        bullet_points.truncate(max_bullets.max(1));
+    }
 
-    let summary_text = lines.join(" ");
+    let summary_text = truncate_chars(&lines.join(" "), 4000);
     let content_hash = fnv1a_64_hex(&summary_text);
     DailySummaryArtifact {
         title,
@@ -2476,10 +2799,43 @@ fn parse_daily_summary_output(raw: &str, sources_hash: &str) -> DailySummaryArti
     }
 }
 
+fn compute_diff_score(previous: &str, current: &str) -> f64 {
+    let prev = previous.trim();
+    let curr = current.trim();
+    if prev.is_empty() && curr.is_empty() {
+        return 0.0;
+    }
+    if prev.is_empty() || curr.is_empty() {
+        return 1.0;
+    }
+
+    let prev_chars = prev.chars().collect::<Vec<char>>();
+    let curr_chars = curr.chars().collect::<Vec<char>>();
+    let max_len = prev_chars.len().max(curr_chars.len()) as f64;
+    if max_len == 0.0 {
+        return 0.0;
+    }
+
+    let shared_prefix = prev_chars
+        .iter()
+        .zip(curr_chars.iter())
+        .take_while(|(a, b)| a == b)
+        .count() as f64;
+    (1.0 - (shared_prefix / max_len)).clamp(0.0, 1.0)
+}
+
 fn compute_daily_sources_hash(results: &[DailySourceResult]) -> String {
     let material = results
         .iter()
-        .map(|r| format!("{}|{}|{}|{}", r.source_id, r.url, r.text_excerpt, r.fetch_error.clone().unwrap_or_default()))
+        .map(|r| {
+            format!(
+                "{}|{}|{}|{}",
+                r.source_id,
+                r.url,
+                r.text_excerpt,
+                r.fetch_error.clone().unwrap_or_default()
+            )
+        })
         .collect::<Vec<String>>()
         .join("\n");
     fnv1a_64_hex(&material)
@@ -2522,13 +2878,15 @@ fn current_day_bucket() -> i64 {
 
 fn compute_backoff_ms(retry_attempt: u32) -> u32 {
     let base: u32 = 200;
-    base.saturating_mul(2u32.saturating_pow(retry_attempt.saturating_sub(1))).min(2_000)
+    base.saturating_mul(2u32.saturating_pow(retry_attempt.saturating_sub(1)))
+        .min(2_000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{RunReceipt, RunState, RunnerEngine};
-    use crate::db::bootstrap_schema;
+    use crate::db::{bootstrap_schema, AutopilotProfileUpsert};
+    use crate::learning;
     use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
     use rusqlite::{params, Connection};
     use std::io::{Read, Write};
@@ -2572,7 +2930,10 @@ mod tests {
         )
     }
 
-    fn spawn_http_server(bodies: Vec<String>, content_type: &str) -> (String, thread::JoinHandle<()>) {
+    fn spawn_http_server(
+        bodies: Vec<String>,
+        content_type: &str,
+    ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
         let url = format!("http://{addr}/monitor");
@@ -2588,7 +2949,9 @@ mod tests {
                     body.len(),
                     body
                 );
-                stream.write_all(response.as_bytes()).expect("write response");
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
             }
         });
 
@@ -2600,8 +2963,9 @@ mod tests {
         let mut conn = setup_conn();
 
         let retryable_plan = plan_with_single_write_step("simulate_provider_retryable_failure");
-        let run_retryable = RunnerEngine::start_run(&mut conn, "auto_retryable", retryable_plan, "idem_r1", 1)
-            .expect("start");
+        let run_retryable =
+            RunnerEngine::start_run(&mut conn, "auto_retryable", retryable_plan, "idem_r1", 1)
+                .expect("start");
         let first = RunnerEngine::run_tick(&mut conn, &run_retryable.id).expect("tick");
         assert_eq!(first.state, RunState::Retrying);
 
@@ -2613,7 +2977,8 @@ mod tests {
         let resumed = RunnerEngine::resume_due_runs(&mut conn, 10).expect("resume");
         assert_eq!(resumed[0].state, RunState::Succeeded);
 
-        let non_retryable_plan = plan_with_single_write_step("simulate_provider_non_retryable_failure");
+        let non_retryable_plan =
+            plan_with_single_write_step("simulate_provider_non_retryable_failure");
         let run_non_retry =
             RunnerEngine::start_run(&mut conn, "auto_nonretry", non_retryable_plan, "idem_r2", 1)
                 .expect("start");
@@ -2626,7 +2991,8 @@ mod tests {
     fn spend_ledger_updates_once_per_step_even_after_retry_resume() {
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("simulate_provider_retryable_failure");
-        let run = RunnerEngine::start_run(&mut conn, "auto_spend", plan, "idem_spend", 1).expect("start");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_spend", plan, "idem_spend", 1).expect("start");
         let first = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
         assert_eq!(first.state, RunState::Retrying);
 
@@ -2672,8 +3038,8 @@ mod tests {
     fn per_run_hard_cap_boundary_at_exactly_80_cents_is_not_blocked() {
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("simulate_cap_boundary");
-        let run =
-            RunnerEngine::start_run(&mut conn, "auto_boundary", plan, "idem_boundary", 1).expect("start");
+        let run = RunnerEngine::start_run(&mut conn, "auto_boundary", plan, "idem_boundary", 1)
+            .expect("start");
 
         let paused = RunnerEngine::run_tick(&mut conn, &run.id).expect("soft cap gate");
         assert_eq!(paused.state, RunState::NeedsApproval);
@@ -2725,8 +3091,9 @@ mod tests {
     fn retry_metadata_and_activity_are_atomic() {
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("atomic retry test");
-        let run = RunnerEngine::start_run(&mut conn, "auto_retry_atomic", plan, "idem_atomic_retry", 2)
-            .expect("run created");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_retry_atomic", plan, "idem_atomic_retry", 2)
+                .expect("run created");
 
         RunnerEngine::schedule_retry_with_forced_failure(
             &mut conn,
@@ -2771,11 +3138,15 @@ mod tests {
     fn website_monitor_happy_path_shared_runtime() {
         let mut conn = setup_conn();
         let (url, server) = spawn_http_server(
-            vec!["<html><body><h1>Launch update</h1><p>new feature shipped</p></body></html>".to_string()],
+            vec![
+                "<html><body><h1>Launch update</h1><p>new feature shipped</p></body></html>"
+                    .to_string(),
+            ],
             "text/html",
         );
         let plan = website_plan_with_url(&url);
-        let run = RunnerEngine::start_run(&mut conn, "auto_web", plan, "idem_web", 2).expect("start");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_web", plan, "idem_web", 2).expect("start");
 
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
@@ -2792,14 +3163,20 @@ mod tests {
         assert_eq!(need_approval_1.state, RunState::NeedsApproval);
 
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let first = approvals.iter().find(|a| a.run_id == run.id).expect("first approval");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("first approval");
         let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
         assert_eq!(after_first.state, RunState::Ready);
 
         let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
         assert_eq!(need_approval_2.state, RunState::NeedsApproval);
         let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
-        let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("second approval");
+        let second = approvals_2
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("second approval");
         let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
         assert_eq!(done.state, RunState::Succeeded);
         server.join().expect("server join");
@@ -2817,8 +3194,14 @@ mod tests {
         );
         let plan = website_plan_with_url(&url);
 
-        let run1 = RunnerEngine::start_run(&mut conn, "auto_no_change", plan.clone(), "idem_nochange_1", 2)
-            .expect("start1");
+        let run1 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_no_change",
+            plan.clone(),
+            "idem_nochange_1",
+            2,
+        )
+        .expect("start1");
         let first = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step1");
         assert_eq!(first.state, RunState::Ready);
 
@@ -2850,8 +3233,9 @@ mod tests {
         );
         let plan = website_plan_with_url(&url);
 
-        let run1 = RunnerEngine::start_run(&mut conn, "auto_change", plan.clone(), "idem_change_1", 2)
-            .expect("start1");
+        let run1 =
+            RunnerEngine::start_run(&mut conn, "auto_change", plan.clone(), "idem_change_1", 2)
+                .expect("start1");
         let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step1");
 
         let run2 = RunnerEngine::start_run(&mut conn, "auto_change", plan, "idem_change_2", 2)
@@ -2862,14 +3246,20 @@ mod tests {
         let need_approval_1 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 approval1");
         assert_eq!(need_approval_1.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let first = approvals.iter().find(|a| a.run_id == run2.id).expect("first approval");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run2.id)
+            .expect("first approval");
         let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
         assert_eq!(after_first.state, RunState::Ready);
 
         let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 approval2");
         assert_eq!(need_approval_2.state, RunState::NeedsApproval);
         let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
-        let second = approvals_2.iter().find(|a| a.run_id == run2.id).expect("second approval");
+        let second = approvals_2
+            .iter()
+            .find(|a| a.run_id == run2.id)
+            .expect("second approval");
         let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
         assert_eq!(done.state, RunState::Succeeded);
 
@@ -2890,8 +3280,8 @@ mod tests {
         let url = "http://127.0.0.1:65530/blocked";
         let mut plan = website_plan_with_url(&url);
         plan.web_allowed_domains = vec!["example.com".to_string()];
-        let run =
-            RunnerEngine::start_run(&mut conn, "auto_block", plan, "idem_block_host", 2).expect("start");
+        let run = RunnerEngine::start_run(&mut conn, "auto_block", plan, "idem_block_host", 2)
+            .expect("start");
 
         let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
         assert_eq!(failed.state, RunState::Failed);
@@ -2905,8 +3295,8 @@ mod tests {
         let huge = "A".repeat(260_000);
         let (url, server) = spawn_http_server(vec![huge], "text/plain");
         let plan = website_plan_with_url(&url);
-        let run =
-            RunnerEngine::start_run(&mut conn, "auto_large", plan, "idem_large_content", 2).expect("start");
+        let run = RunnerEngine::start_run(&mut conn, "auto_large", plan, "idem_large_content", 2)
+            .expect("start");
 
         let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
         assert_eq!(failed.state, RunState::Failed);
@@ -2924,9 +3314,11 @@ mod tests {
             ProviderId::Anthropic,
         );
         plan.inbox_source_text = Some(
-            "Subject: Vendor follow-up\nCan you confirm timeline for contract signature?".to_string(),
+            "Subject: Vendor follow-up\nCan you confirm timeline for contract signature?"
+                .to_string(),
         );
-        let run = RunnerEngine::start_run(&mut conn, "auto_inbox", plan, "idem_inbox", 2).expect("start");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_inbox", plan, "idem_inbox", 2).expect("start");
 
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
@@ -2937,7 +3329,10 @@ mod tests {
         let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
         assert_eq!(need_approval_2.state, RunState::NeedsApproval);
         let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
-        let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("approval");
+        let second = approvals_2
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval");
         let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
     }
@@ -2966,7 +3361,10 @@ mod tests {
         let need_approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
         assert_eq!(need_approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let approval = approvals.iter().find(|a| a.run_id == run1.id).expect("approval");
+        let approval = approvals
+            .iter()
+            .find(|a| a.run_id == run1.id)
+            .expect("approval");
         let done = RunnerEngine::approve(&mut conn, &approval.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
 
@@ -3015,8 +3413,9 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan.inbox_source_text = Some("X".repeat(25_000));
-        let run = RunnerEngine::start_run(&mut conn, "auto_inbox_large", plan, "idem_inbox_large", 2)
-            .expect("start");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_inbox_large", plan, "idem_inbox_large", 2)
+                .expect("start");
         let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
         assert_eq!(failed.state, RunState::Failed);
         let reason = failed.failure_reason.expect("reason");
@@ -3065,7 +3464,8 @@ mod tests {
             ProviderId::Gemini,
         );
         plan.daily_sources = vec![url];
-        let run = RunnerEngine::start_run(&mut conn, "auto_brief", plan, "idem_brief", 2).expect("start");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_brief", plan, "idem_brief", 2).expect("start");
 
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
@@ -3077,7 +3477,10 @@ mod tests {
         assert_eq!(need_approval.state, RunState::NeedsApproval);
 
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let first = approvals.iter().find(|a| a.run_id == run.id).expect("approval exists");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval exists");
         let done = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
         server.join().expect("server join");
@@ -3100,14 +3503,23 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan1.daily_sources = vec![url.clone()];
-        let run1 = RunnerEngine::start_run(&mut conn, "auto_brief_dedupe", plan1, "idem_brief_dedupe_1", 2)
-            .expect("start1");
+        let run1 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_brief_dedupe",
+            plan1,
+            "idem_brief_dedupe_1",
+            2,
+        )
+        .expect("start1");
         let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s1");
         let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s2");
         let approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
         assert_eq!(approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let first = approvals.iter().find(|a| a.run_id == run1.id).expect("approval");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run1.id)
+            .expect("approval");
         let done = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
 
@@ -3117,8 +3529,14 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan2.daily_sources = vec![url];
-        let run2 = RunnerEngine::start_run(&mut conn, "auto_brief_dedupe", plan2, "idem_brief_dedupe_2", 2)
-            .expect("start2");
+        let run2 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_brief_dedupe",
+            plan2,
+            "idem_brief_dedupe_2",
+            2,
+        )
+        .expect("start2");
         let _ = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s1");
         let r2s2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s2");
         assert_eq!(r2s2.state, RunState::Succeeded);
@@ -3151,14 +3569,23 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan1.daily_sources = vec![url.clone()];
-        let run1 = RunnerEngine::start_run(&mut conn, "auto_brief_change", plan1, "idem_brief_change_1", 2)
-            .expect("start1");
+        let run1 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_brief_change",
+            plan1,
+            "idem_brief_change_1",
+            2,
+        )
+        .expect("start1");
         let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s1");
         let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s2");
         let approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
         assert_eq!(approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let first = approvals.iter().find(|a| a.run_id == run1.id).expect("approval");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run1.id)
+            .expect("approval");
         let _ = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
 
         let mut plan2 = AutopilotPlan::from_intent(
@@ -3167,8 +3594,14 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan2.daily_sources = vec![url, "Inline: include founder note".to_string()];
-        let run2 = RunnerEngine::start_run(&mut conn, "auto_brief_change", plan2, "idem_brief_change_2", 2)
-            .expect("start2");
+        let run2 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_brief_change",
+            plan2,
+            "idem_brief_change_2",
+            2,
+        )
+        .expect("start2");
         let _ = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s1");
         let r2s2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s2");
         assert_eq!(r2s2.state, RunState::Ready);
@@ -3190,8 +3623,14 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan.daily_sources = vec![url, "http://127.0.0.1:65530/unreachable".to_string()];
-        let run = RunnerEngine::start_run(&mut conn, "auto_brief_partial", plan, "idem_brief_partial", 2)
-            .expect("start");
+        let run = RunnerEngine::start_run(
+            &mut conn,
+            "auto_brief_partial",
+            plan,
+            "idem_brief_partial",
+            2,
+        )
+        .expect("start");
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("s1");
         assert_eq!(s1.state, RunState::Ready);
         let s2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("s2");
@@ -3214,8 +3653,9 @@ mod tests {
             ProviderId::OpenAi,
         );
         plan.daily_sources = vec![url];
-        let run = RunnerEngine::start_run(&mut conn, "auto_brief_retry", plan, "idem_brief_retry", 2)
-            .expect("start");
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_brief_retry", plan, "idem_brief_retry", 2)
+                .expect("start");
         let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("s1");
         let retrying = RunnerEngine::run_tick(&mut conn, &run.id).expect("s2 retry");
         assert_eq!(retrying.state, RunState::Retrying);
@@ -3237,6 +3677,233 @@ mod tests {
             .expect("count source usage rows");
         assert_eq!(spend_rows, 1);
         server.join().expect("server join");
-    
+    }
+
+    #[test]
+    fn approval_decisions_emit_decision_events() {
+        let mut conn = setup_conn();
+        let mut plan = plan_with_single_write_step("approval event capture");
+        plan.steps[0].requires_approval = true;
+        let run = RunnerEngine::start_run(&mut conn, "auto_decisions", plan, "idem_decisions_1", 2)
+            .expect("start");
+        let needs = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval needed");
+        assert_eq!(needs.state, RunState::NeedsApproval);
+
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("approvals");
+        let approval = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval");
+        let _done = RunnerEngine::approve(&mut conn, &approval.id).expect("approve");
+
+        let approved_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_events WHERE run_id = ?1 AND event_type = 'approval_approved'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("count approved decision events");
+        assert_eq!(approved_count, 1);
+
+        let mut plan2 = plan_with_single_write_step("approval reject capture");
+        plan2.steps[0].requires_approval = true;
+        let run2 =
+            RunnerEngine::start_run(&mut conn, "auto_decisions", plan2, "idem_decisions_2", 2)
+                .expect("start2");
+        let needs2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("approval needed");
+        assert_eq!(needs2.state, RunState::NeedsApproval);
+        let approvals2 = RunnerEngine::list_pending_approvals(&conn).expect("approvals2");
+        let approval2 = approvals2
+            .iter()
+            .find(|a| a.run_id == run2.id)
+            .expect("approval2");
+        let _ = RunnerEngine::reject(
+            &mut conn,
+            &approval2.id,
+            Some("Not needed right now".to_string()),
+        )
+        .expect("reject");
+        let rejected_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM decision_events WHERE run_id = ?1 AND event_type = 'approval_rejected'",
+                params![run2.id],
+                |row| row.get(0),
+            )
+            .expect("count rejected decision events");
+        assert_eq!(rejected_count, 1);
+    }
+
+    #[test]
+    fn terminal_receipt_includes_evaluation_once_and_no_raw_inputs() {
+        let mut conn = setup_conn();
+        let run = RunnerEngine::start_run(
+            &mut conn,
+            "auto_eval_receipt",
+            plan_with_single_write_step("sensitive phrase: customer-pii-123"),
+            "idem_eval_receipt",
+            2,
+        )
+        .expect("start");
+        let done = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let eval_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_evaluations WHERE run_id = ?1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("count run evaluations");
+        assert_eq!(eval_count, 1);
+
+        let _ = learning::evaluate_run(&conn, &run.id).expect("evaluate twice");
+        let eval_count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_evaluations WHERE run_id = ?1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("count run evaluations after");
+        assert_eq!(eval_count_after, 1);
+
+        let receipt = RunnerEngine::get_terminal_receipt(&conn, &run.id)
+            .expect("get receipt")
+            .expect("receipt exists");
+        assert!(receipt.evaluation.is_some());
+
+        let signals_json: String = conn
+            .query_row(
+                "SELECT signals_json FROM run_evaluations WHERE run_id = ?1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("signals");
+        assert!(!signals_json.contains("customer-pii-123"));
+    }
+
+    #[test]
+    fn suppression_profile_stops_run_early_without_side_effects() {
+        let mut conn = setup_conn();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("now")
+            .as_millis() as i64;
+        conn.execute(
+            "INSERT OR IGNORE INTO autopilots (id, name, created_at) VALUES (?1, 'Autopilot', ?2)",
+            params!["auto_suppressed", now_ms],
+        )
+        .expect("insert autopilot");
+        crate::db::upsert_autopilot_profile(
+            &conn,
+            &AutopilotProfileUpsert {
+                autopilot_id: "auto_suppressed".to_string(),
+                learning_enabled: true,
+                mode: "balanced".to_string(),
+                knobs_json: "{\"min_diff_score_to_notify\":0.2,\"max_sources\":5,\"max_bullets\":6,\"reply_length_hint\":\"medium\"}".to_string(),
+                suppression_json: format!(
+                    "{{\"suppress_until_ms\":{},\"quiet_until_ms\":null}}",
+                    now_ms + 60_000
+                ),
+                updated_at_ms: now_ms,
+                version: 1,
+            },
+        )
+        .expect("upsert profile");
+
+        let run = RunnerEngine::start_run(
+            &mut conn,
+            "auto_suppressed",
+            plan_with_single_write_step("suppressed should skip"),
+            "idem_suppressed",
+            2,
+        )
+        .expect("start");
+        let done = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let approval_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM approvals WHERE run_id = ?1",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("approvals");
+        assert_eq!(approval_count, 0);
+
+        let draft_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind IN ('outcome_draft','email_draft')",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("draft count");
+        assert_eq!(draft_count, 0);
+
+        let receipt = RunnerEngine::get_terminal_receipt(&conn, &run.id)
+            .expect("receipt")
+            .expect("exists");
+        assert!(receipt.summary.to_ascii_lowercase().contains("suppressed"));
+    }
+
+    #[test]
+    fn memory_titles_are_persisted_and_exposed_in_receipt() {
+        let mut conn = setup_conn();
+        let run1 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_memory",
+            plan_with_single_write_step("first run"),
+            "idem_memory_1",
+            2,
+        )
+        .expect("start1");
+        let done1 = RunnerEngine::run_tick(&mut conn, &run1.id).expect("tick1");
+        assert_eq!(done1.state, RunState::Succeeded);
+
+        learning::record_decision_event(
+            &conn,
+            "auto_memory",
+            &run1.id,
+            Some("step_1"),
+            learning::DecisionEventType::DraftEdited,
+            learning::DecisionEventMetadata {
+                draft_length: Some(500),
+                ..Default::default()
+            },
+        )
+        .expect("event1");
+        learning::record_decision_event(
+            &conn,
+            "auto_memory",
+            &run1.id,
+            Some("step_1"),
+            learning::DecisionEventType::DraftEdited,
+            learning::DecisionEventMetadata {
+                draft_length: Some(530),
+                ..Default::default()
+            },
+        )
+        .expect("event2");
+        learning::update_memory_cards(&conn, "auto_memory", &run1.id, RecipeKind::InboxTriage)
+            .expect("update cards");
+
+        let run2 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_memory",
+            plan_with_single_write_step("second run"),
+            "idem_memory_2",
+            2,
+        )
+        .expect("start2");
+        let done2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("tick2");
+        assert_eq!(done2.state, RunState::Succeeded);
+
+        let receipt = RunnerEngine::get_terminal_receipt(&conn, &run2.id)
+            .expect("receipt")
+            .expect("exists");
+        assert!(!receipt.memory_titles_used.is_empty());
+        assert!(receipt
+            .memory_titles_used
+            .iter()
+            .all(|title| !title.to_ascii_lowercase().contains("subject:")));
     }
 }

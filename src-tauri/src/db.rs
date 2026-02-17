@@ -1,5 +1,5 @@
-use rusqlite::Connection;
-use serde::Serialize;
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::Manager;
 
@@ -23,6 +23,62 @@ pub struct HomeSnapshot {
     pub runner: RunnerStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionEventInsert {
+    pub event_id: String,
+    pub autopilot_id: String,
+    pub run_id: String,
+    pub step_id: Option<String>,
+    pub event_type: String,
+    pub metadata_json: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunEvaluationInsert {
+    pub run_id: String,
+    pub autopilot_id: String,
+    pub quality_score: i64,
+    pub noise_score: i64,
+    pub cost_score: i64,
+    pub signals_json: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutopilotProfileUpsert {
+    pub autopilot_id: String,
+    pub learning_enabled: bool,
+    pub mode: String,
+    pub knobs_json: String,
+    pub suppression_json: String,
+    pub updated_at_ms: i64,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptationLogInsert {
+    pub id: String,
+    pub autopilot_id: String,
+    pub run_id: String,
+    pub changes_json: String,
+    pub rationale_codes_json: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCardUpsert {
+    pub card_id: String,
+    pub autopilot_id: String,
+    pub card_type: String,
+    pub title: String,
+    pub content_json: String,
+    pub confidence: i64,
+    pub created_from_run_id: Option<String>,
+    pub updated_at_ms: i64,
+    pub version: i64,
+}
+
 pub fn bootstrap_sqlite(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data = app_handle
         .path()
@@ -31,7 +87,8 @@ pub fn bootstrap_sqlite(app_handle: &tauri::AppHandle) -> Result<PathBuf, String
     fs::create_dir_all(&app_data).map_err(|e| format!("Failed to create app data dir: {e}"))?;
 
     let db_path = app_data.join("terminus.sqlite");
-    let mut connection = Connection::open(&db_path).map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    let mut connection =
+        Connection::open(&db_path).map_err(|e| format!("Failed to open sqlite db: {e}"))?;
     bootstrap_schema(&mut connection)?;
     Ok(db_path)
 }
@@ -166,6 +223,66 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (run_id) REFERENCES runs(id)
             );
 
+            CREATE TABLE IF NOT EXISTS decision_events (
+              event_id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              step_id TEXT,
+              event_type TEXT NOT NULL,
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              created_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS run_evaluations (
+              run_id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              quality_score INTEGER NOT NULL,
+              noise_score INTEGER NOT NULL,
+              cost_score INTEGER NOT NULL,
+              signals_json TEXT NOT NULL DEFAULT '{}',
+              created_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS adaptation_log (
+              id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              changes_json TEXT NOT NULL,
+              rationale_codes_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS autopilot_profile (
+              autopilot_id TEXT PRIMARY KEY,
+              learning_enabled INTEGER NOT NULL DEFAULT 1,
+              mode TEXT NOT NULL DEFAULT 'balanced',
+              knobs_json TEXT NOT NULL DEFAULT '{}',
+              suppression_json TEXT NOT NULL DEFAULT '{}',
+              updated_at_ms INTEGER NOT NULL,
+              version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_cards (
+              card_id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              card_type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              content_json TEXT NOT NULL,
+              confidence INTEGER NOT NULL DEFAULT 50,
+              created_from_run_id TEXT,
+              updated_at_ms INTEGER NOT NULL,
+              version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
+              FOREIGN KEY (created_from_run_id) REFERENCES runs(id)
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
@@ -178,18 +295,78 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to bootstrap schema: {e}"))?;
 
     ensure_column(connection, "runs", "next_retry_at_ms", "INTEGER")?;
-    ensure_column(connection, "runs", "provider_kind", "TEXT NOT NULL DEFAULT 'openai'")?;
-    ensure_column(connection, "runs", "provider_tier", "TEXT NOT NULL DEFAULT 'supported'")?;
-    ensure_column(connection, "runs", "soft_cap_approved", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(connection, "runs", "spend_usd_estimate", "REAL NOT NULL DEFAULT 0.0")?;
-    ensure_column(connection, "runs", "spend_usd_actual", "REAL NOT NULL DEFAULT 0.0")?;
-    ensure_column(connection, "runs", "usd_cents_estimate", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(connection, "runs", "usd_cents_actual", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(connection, "spend_ledger", "step_id", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(connection, "spend_ledger", "entry_kind", "TEXT NOT NULL DEFAULT 'actual'")?;
-    ensure_column(connection, "spend_ledger", "amount_usd_cents", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(connection, "web_snapshots", "last_text_excerpt", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(connection, "web_snapshots", "updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        connection,
+        "runs",
+        "provider_kind",
+        "TEXT NOT NULL DEFAULT 'openai'",
+    )?;
+    ensure_column(
+        connection,
+        "runs",
+        "provider_tier",
+        "TEXT NOT NULL DEFAULT 'supported'",
+    )?;
+    ensure_column(
+        connection,
+        "runs",
+        "soft_cap_approved",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "runs",
+        "spend_usd_estimate",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    ensure_column(
+        connection,
+        "runs",
+        "spend_usd_actual",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    ensure_column(
+        connection,
+        "runs",
+        "usd_cents_estimate",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "runs",
+        "usd_cents_actual",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "spend_ledger",
+        "step_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "spend_ledger",
+        "entry_kind",
+        "TEXT NOT NULL DEFAULT 'actual'",
+    )?;
+    ensure_column(
+        connection,
+        "spend_ledger",
+        "amount_usd_cents",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "web_snapshots",
+        "last_text_excerpt",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "web_snapshots",
+        "updated_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     // Best-effort backfill from legacy float columns for existing vaults.
     connection
@@ -227,6 +404,24 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create spend ledger unique index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_decision_events_autopilot_created_at ON decision_events(autopilot_id, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create decision events index: {e}"))?;
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_adaptation_log_autopilot_run ON adaptation_log(autopilot_id, run_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create adaptation log index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_cards_autopilot_type ON memory_cards(autopilot_id, card_type)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create memory card index: {e}"))?;
 
     Ok(())
 }
@@ -265,8 +460,152 @@ fn ensure_column(
     Ok(())
 }
 
+pub fn insert_decision_event(
+    connection: &Connection,
+    payload: &DecisionEventInsert,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO decision_events (
+              event_id, autopilot_id, run_id, step_id, event_type, metadata_json, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(event_id) DO NOTHING
+            ",
+            params![
+                &payload.event_id,
+                &payload.autopilot_id,
+                &payload.run_id,
+                &payload.step_id,
+                &payload.event_type,
+                &payload.metadata_json,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(|e| format!("Failed to insert decision event: {e}"))?;
+    Ok(())
+}
+
+pub fn insert_run_evaluation_if_missing(
+    connection: &Connection,
+    payload: &RunEvaluationInsert,
+) -> Result<bool, String> {
+    let changed = connection
+        .execute(
+            "
+            INSERT INTO run_evaluations (
+              run_id, autopilot_id, quality_score, noise_score, cost_score, signals_json, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(run_id) DO NOTHING
+            ",
+            params![
+                &payload.run_id,
+                &payload.autopilot_id,
+                payload.quality_score,
+                payload.noise_score,
+                payload.cost_score,
+                &payload.signals_json,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(|e| format!("Failed to insert run evaluation: {e}"))?;
+    Ok(changed > 0)
+}
+
+pub fn upsert_autopilot_profile(
+    connection: &Connection,
+    payload: &AutopilotProfileUpsert,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO autopilot_profile (
+              autopilot_id, learning_enabled, mode, knobs_json, suppression_json, updated_at_ms, version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(autopilot_id) DO UPDATE SET
+              learning_enabled = excluded.learning_enabled,
+              mode = excluded.mode,
+              knobs_json = excluded.knobs_json,
+              suppression_json = excluded.suppression_json,
+              updated_at_ms = excluded.updated_at_ms,
+              version = excluded.version
+            ",
+            params![
+                &payload.autopilot_id,
+                if payload.learning_enabled { 1 } else { 0 },
+                &payload.mode,
+                &payload.knobs_json,
+                &payload.suppression_json,
+                payload.updated_at_ms,
+                payload.version
+            ],
+        )
+        .map_err(|e| format!("Failed to upsert autopilot profile: {e}"))?;
+    Ok(())
+}
+
+pub fn insert_adaptation_log(
+    connection: &Connection,
+    payload: &AdaptationLogInsert,
+) -> Result<bool, String> {
+    let changed = connection
+        .execute(
+            "
+            INSERT INTO adaptation_log (
+              id, autopilot_id, run_id, changes_json, rationale_codes_json, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(autopilot_id, run_id) DO NOTHING
+            ",
+            params![
+                &payload.id,
+                &payload.autopilot_id,
+                &payload.run_id,
+                &payload.changes_json,
+                &payload.rationale_codes_json,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(|e| format!("Failed to insert adaptation log: {e}"))?;
+    Ok(changed > 0)
+}
+
+pub fn upsert_memory_card(
+    connection: &Connection,
+    payload: &MemoryCardUpsert,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO memory_cards (
+              card_id, autopilot_id, card_type, title, content_json, confidence, created_from_run_id, updated_at_ms, version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(card_id) DO UPDATE SET
+              title = excluded.title,
+              content_json = excluded.content_json,
+              confidence = excluded.confidence,
+              created_from_run_id = excluded.created_from_run_id,
+              updated_at_ms = excluded.updated_at_ms,
+              version = excluded.version
+            ",
+            params![
+                &payload.card_id,
+                &payload.autopilot_id,
+                &payload.card_type,
+                &payload.title,
+                &payload.content_json,
+                payload.confidence,
+                &payload.created_from_run_id,
+                payload.updated_at_ms,
+                payload.version
+            ],
+        )
+        .map_err(|e| format!("Failed to upsert memory card: {e}"))?;
+    Ok(())
+}
+
 pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
-    let connection = Connection::open(db_path).map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    let connection =
+        Connection::open(db_path).map_err(|e| format!("Failed to open sqlite db: {e}"))?;
 
     let count = |table: &str| -> Result<i64, String> {
         let sql = format!("SELECT COUNT(*) FROM {table}");

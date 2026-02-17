@@ -1,6 +1,4 @@
-use crate::providers::types::{
-    ProviderError, ProviderRequest, ProviderResponse, ProviderUsage,
-};
+use crate::providers::types::{ProviderError, ProviderRequest, ProviderResponse, ProviderUsage};
 use crate::transport::ExecutionTransport;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -48,13 +46,19 @@ impl ExecutionTransport for MockTransport {
         request: &ProviderRequest,
         _keychain_api_key: Option<&str>,
     ) -> Result<ProviderResponse, ProviderError> {
-        if request.input.contains("simulate_provider_non_retryable_failure") {
+        if request
+            .input
+            .contains("simulate_provider_non_retryable_failure")
+        {
             return Err(ProviderError::non_retryable(
                 "Provider rejected the request. Update the prompt and try again.",
             ));
         }
 
-        if request.input.contains("simulate_provider_retryable_failure") {
+        if request
+            .input
+            .contains("simulate_provider_retryable_failure")
+        {
             let key = Self::key_for(request);
             let mut attempts = self
                 .attempts

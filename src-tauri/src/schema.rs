@@ -113,7 +113,10 @@ impl AutopilotPlan {
             None
         };
         let daily_sources = if recipe == RecipeKind::DailyBrief {
-            extract_urls(&intent).into_iter().take(5).collect::<Vec<String>>()
+            extract_urls(&intent)
+                .into_iter()
+                .take(5)
+                .collect::<Vec<String>>()
         } else {
             Vec::new()
         };
