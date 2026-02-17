@@ -30,9 +30,9 @@ const INBOX_TEXT_MAX_CHARS: usize = 20_000;
 const DAILY_SOURCE_MAX_ITEMS: usize = 10;
 
 // Retry backoff constants
-const RETRY_BACKOFF_BASE_MS: u32 = 200;        // Initial backoff: 200ms
-const RETRY_BACKOFF_MAX_MS: u32 = 2_000;       // Max backoff: 2 seconds
-const MS_PER_DAY: i64 = 86_400_000;            // Milliseconds in 24 hours
+const RETRY_BACKOFF_BASE_MS: u32 = 200; // Initial backoff: 200ms
+const RETRY_BACKOFF_MAX_MS: u32 = 2_000; // Max backoff: 2 seconds
+const MS_PER_DAY: i64 = 86_400_000; // Milliseconds in 24 hours
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -253,7 +253,7 @@ enum CapDecision {
 }
 
 /// Core state machine for executing autopilot runs.
-/// 
+///
 /// The runner uses a tick-based execution model where each call to `run_tick()`
 /// advances the state machine by exactly one step. This enables bounded execution,
 /// easy pause/resume, and prevents stack overflow.
@@ -261,18 +261,18 @@ pub struct RunnerEngine;
 
 impl RunnerEngine {
     /// Starts a new autopilot run or returns existing run for duplicate idempotency key.
-    /// 
+    ///
     /// # Arguments
     /// * `connection` - SQLite connection (must be mutable for transactions)
     /// * `autopilot_id` - ID of the autopilot initiating this run
     /// * `plan` - The execution plan (recipe + steps + primitives)
     /// * `idempotency_key` - Unique key to prevent duplicate execution
     /// * `max_retries` - Maximum retry attempts for retryable failures
-    /// 
+    ///
     /// # Idempotency
     /// If a run with the same `idempotency_key` already exists, returns the existing
     /// run without creating a new one. This prevents accidental double-execution.
-    /// 
+    ///
     /// # Returns
     /// New or existing `RunRecord` in `Ready` state
     pub fn start_run(
@@ -360,13 +360,13 @@ impl RunnerEngine {
     }
 
     /// Advances the run state machine by exactly one step.
-    /// 
+    ///
     /// This is the core execution method. Each call:
     /// 1. Fetches the current run state
     /// 2. Executes the next step (if Ready/Running)
     /// 3. Persists the new state atomically
     /// 4. Returns the updated run
-    /// 
+    ///
     /// # Tick-Based Execution
     /// Unlike recursive execution, ticking is bounded - each call does exactly
     /// one step of work and returns. The caller decides when to tick again.
@@ -374,14 +374,14 @@ impl RunnerEngine {
     /// - Pause/resume at any point
     /// - Rate limiting / throttling
     /// - No stack overflow on long runs
-    /// 
+    ///
     /// # State Transitions
     /// - `Ready` → executes next step → `Running` or `NeedsApproval`
     /// - `Running` → step completes → `Ready`, `Succeeded`, `Retrying`, `Failed`, or `Blocked`
     /// - `NeedsApproval` → waits for approval (no-op tick)
     /// - `Retrying` → waits for retry time (use `resume_due_runs`)
     /// - Terminal states (`Succeeded`, `Failed`, `Blocked`, `Canceled`) → no-op
-    /// 
+    ///
     /// # Returns
     /// Updated `RunRecord` after the tick
     pub fn run_tick(connection: &mut Connection, run_id: &str) -> Result<RunRecord, RunnerError> {
@@ -389,13 +389,13 @@ impl RunnerEngine {
     }
 
     /// Resumes runs that are in `Retrying` state and due for retry.
-    /// 
+    ///
     /// Finds runs where `next_retry_at_ms <= now()` and ticks them.
     /// This is typically called by a background scheduler.
-    /// 
+    ///
     /// # Arguments
     /// * `limit` - Maximum number of runs to resume in one call
-    /// 
+    ///
     /// # Returns
     /// Vector of resumed runs (may be empty if none are due)
     pub fn resume_due_runs(
@@ -436,20 +436,23 @@ impl RunnerEngine {
     }
 
     /// Approves a pending approval and resumes execution.
-    /// 
+    ///
     /// When a run hits an approval gate (spend cap or primitive approval),
     /// it pauses in `NeedsApproval` state. This method:
     /// 1. Marks the approval as approved
     /// 2. Transitions run to `Ready`
     /// 3. Automatically ticks to resume execution
-    /// 
+    ///
     /// # Special Cases
     /// - **Spend cap approvals** (`step_id == "__soft_cap__"`): Sets `soft_cap_approved` flag
     /// - **Step approvals**: Resumes execution at the approved step
-    /// 
+    ///
     /// # Returns
     /// Updated run after resume (may advance multiple states if execution continues)
-    pub fn approve(connection: &mut Connection, approval_id: &str) -> Result<RunRecord, RunnerError> {
+    pub fn approve(
+        connection: &mut Connection,
+        approval_id: &str,
+    ) -> Result<RunRecord, RunnerError> {
         let approval = Self::get_approval(connection, approval_id)?;
         if approval.status != "pending" {
             return Err(RunnerError::Human(
@@ -529,6 +532,7 @@ impl RunnerEngine {
                 usd_cents_actual: Some(run_after_approval.usd_cents_actual),
                 ..Default::default()
             },
+            None,
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
@@ -540,17 +544,17 @@ impl RunnerEngine {
     }
 
     /// Rejects a pending approval and cancels the run.
-    /// 
+    ///
     /// When a user rejects an approval:
     /// 1. Marks the approval as rejected
     /// 2. Transitions run to `Canceled`
     /// 3. Records the rejection reason in activity log
-    /// 
+    ///
     /// Canceled runs are terminal and cannot be resumed.
-    /// 
+    ///
     /// # Arguments
     /// * `reason` - Optional user-provided reason for rejection
-    /// 
+    ///
     /// # Returns
     /// Canceled run record
     pub fn reject(
@@ -646,6 +650,7 @@ impl RunnerEngine {
                 usd_cents_actual: Some(run_after_reject.usd_cents_actual),
                 ..Default::default()
             },
+            None,
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
         Self::get_run_with_learning(connection, &approval.run_id)
@@ -1361,6 +1366,7 @@ impl RunnerEngine {
                             content_length: Some(artifact.current_excerpt.chars().count() as i64),
                             ..Default::default()
                         },
+                        None,
                     );
                     return Ok(StepExecutionResult {
                         user_message: "Change was below your notify threshold.".to_string(),
@@ -3049,6 +3055,50 @@ mod tests {
         (url, handle)
     }
 
+    fn assert_marker_not_in_learning_or_receipts(conn: &Connection, run_id: &str, marker: &str) {
+        let decision_blob: String = conn
+            .query_row(
+                "SELECT COALESCE(group_concat(metadata_json, '||'), '') FROM decision_events WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("decision blob");
+        let eval_blob: String = conn
+            .query_row(
+                "SELECT COALESCE(signals_json, '') FROM run_evaluations WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("eval blob");
+        let adapt_blob: String = conn
+            .query_row(
+                "SELECT COALESCE(group_concat(changes_json || rationale_codes_json, '||'), '') FROM adaptation_log WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("adapt blob");
+        let memory_blob: String = conn
+            .query_row(
+                "SELECT COALESCE(group_concat(title || content_json, '||'), '') FROM memory_cards",
+                [],
+                |row| row.get(0),
+            )
+            .expect("memory blob");
+        let receipt_blob: String = conn
+            .query_row(
+                "SELECT COALESCE(group_concat(content, '||'), '') FROM outcomes WHERE run_id = ?1 AND kind = 'receipt'",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("receipt blob");
+
+        assert!(!decision_blob.contains(marker));
+        assert!(!eval_blob.contains(marker));
+        assert!(!adapt_blob.contains(marker));
+        assert!(!memory_blob.contains(marker));
+        assert!(!receipt_blob.contains(marker));
+    }
+
     #[test]
     fn retries_only_retryable_provider_errors() {
         let mut conn = setup_conn();
@@ -3543,6 +3593,57 @@ mod tests {
     }
 
     #[test]
+    fn inbox_triage_never_persists_raw_marker_in_learning_or_receipt_fields() {
+        let mut conn = setup_conn();
+        let marker = "__LEAK_MARKER_9f2a__";
+        let mut plan = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Inbox privacy regression".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan.inbox_source_text = Some(format!(
+            "Subject: Private\nThis body includes {marker} and must never persist in learning fields."
+        ));
+        let run = RunnerEngine::start_run(
+            &mut conn,
+            "auto_privacy_inbox",
+            plan,
+            "idem_privacy_inbox",
+            2,
+        )
+        .expect("start");
+
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step2");
+        let need_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
+        assert_eq!(need_approval.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("list approvals");
+        let approval = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval row");
+        let done = RunnerEngine::approve(&mut conn, &approval.id).expect("approve");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        learning::record_decision_event(
+            &conn,
+            "auto_privacy_inbox",
+            &run.id,
+            Some("step_3"),
+            learning::DecisionEventType::DraftEdited,
+            learning::DecisionEventMetadata {
+                reason_code: Some("manual_edit".to_string()),
+                draft_length: Some(200),
+                ..Default::default()
+            },
+            Some("privacy_evt_inbox"),
+        )
+        .expect("safe event");
+
+        assert_marker_not_in_learning_or_receipts(&conn, &run.id, marker);
+    }
+
+    #[test]
     fn daily_brief_happy_path_shared_runtime() {
         let mut conn = setup_conn();
         let (url, server) = spawn_http_server(
@@ -3575,6 +3676,45 @@ mod tests {
         let done = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn website_monitor_never_persists_raw_marker_in_learning_or_receipt_fields() {
+        let mut conn = setup_conn();
+        let marker = "__LEAK_MARKER_9f2a__";
+        let (url, server) = spawn_http_server(
+            vec![format!(
+                "<html><body><h1>Private</h1><p>Contains {marker} but learning must only keep hashes and scores.</p></body></html>"
+            )],
+            "text/html",
+        );
+        let plan = website_plan_with_url(&url);
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_privacy_web", plan, "idem_privacy_web", 2)
+                .expect("start");
+
+        let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
+        assert_eq!(s1.state, RunState::Ready);
+        let s2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(s2.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending1");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval 1");
+        let _ = RunnerEngine::approve(&mut conn, &first.id).expect("approve1");
+        let s3 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        assert_eq!(s3.state, RunState::NeedsApproval);
+        let approvals2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
+        let second = approvals2
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval 2");
+        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve2");
+        assert_eq!(done.state, RunState::Succeeded);
+        server.join().expect("server join");
+
+        assert_marker_not_in_learning_or_receipts(&conn, &run.id, marker);
     }
 
     #[test]
@@ -3960,6 +4100,7 @@ mod tests {
                 draft_length: Some(500),
                 ..Default::default()
             },
+            None,
         )
         .expect("event1");
         learning::record_decision_event(
@@ -3972,6 +4113,7 @@ mod tests {
                 draft_length: Some(530),
                 ..Default::default()
             },
+            None,
         )
         .expect("event2");
         learning::update_memory_cards(&conn, "auto_memory", &run1.id, RecipeKind::InboxTriage)
@@ -4006,7 +4148,7 @@ mod tests {
         // This test validates the retry exhaustion logic exists, even though
         // MockTransport doesn't exercise it fully. Full exhaustion testing
         // would require a real provider with persistent failures.
-        
+
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("simulate_provider_retryable_failure");
         let run = RunnerEngine::start_run(&mut conn, "auto_exhaust", plan, "idem_exhaust", 2)
@@ -4027,7 +4169,7 @@ mod tests {
         // Second retry succeeds with MockTransport (it only fails once)
         let resumed = RunnerEngine::resume_due_runs(&mut conn, 10).expect("resume");
         assert_eq!(resumed[0].state, RunState::Succeeded);
-        
+
         // Verify retry metadata was properly managed during the flow
         assert_eq!(resumed[0].retry_count, 1);
     }
@@ -4046,10 +4188,18 @@ mod tests {
         assert_eq!(need_approval.state, RunState::NeedsApproval);
 
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let approval = approvals.iter().find(|a| a.run_id == run.id).expect("approval exists");
+        let approval = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval exists");
 
         // Reject the approval
-        let rejected = RunnerEngine::reject(&mut conn, &approval.id, Some("User rejected test".to_string())).expect("reject");
+        let rejected = RunnerEngine::reject(
+            &mut conn,
+            &approval.id,
+            Some("User rejected test".to_string()),
+        )
+        .expect("reject");
         assert_eq!(rejected.state, RunState::Canceled);
 
         // Verify activity log recorded rejection
@@ -4124,7 +4274,11 @@ mod tests {
         // Manually force an invalid state transition (Succeeded -> Ready)
         let invalid_result = conn.execute(
             "UPDATE runs SET state = ?1 WHERE id = ?2 AND state = ?3",
-            params![RunState::Ready.as_str(), run.id, RunState::Succeeded.as_str()],
+            params![
+                RunState::Ready.as_str(),
+                run.id,
+                RunState::Succeeded.as_str()
+            ],
         );
 
         // Should not update any rows (state protection via WHERE clause)
@@ -4170,34 +4324,53 @@ mod tests {
         // - "simulate_cap_boundary" = 80 cents (at hard boundary, soft cap approval)
         // - "simulate_cap_hard" = 95 cents (exceeds hard cap, blocks)
         // - default = 12 cents (normal execution)
-        
+
         let mut conn = setup_conn();
 
         // Test: normal spend (12 cents, under all caps)
         let plan_normal = plan_with_single_write_step("normal execution");
         let run_normal =
-            RunnerEngine::start_run(&mut conn, "auto_normal", plan_normal, "idem_normal", 1).expect("start");
+            RunnerEngine::start_run(&mut conn, "auto_normal", plan_normal, "idem_normal", 1)
+                .expect("start");
         let normal = RunnerEngine::run_tick(&mut conn, &run_normal.id).expect("tick normal");
-        assert_eq!(normal.state, RunState::Succeeded, "Normal spend should succeed without approval");
+        assert_eq!(
+            normal.state,
+            RunState::Succeeded,
+            "Normal spend should succeed without approval"
+        );
 
         // Test: over soft cap (45 cents)
         let plan_soft = plan_with_single_write_step("simulate_cap_soft");
-        let run_soft =
-            RunnerEngine::start_run(&mut conn, "auto_soft", plan_soft, "idem_soft", 1).expect("start");
+        let run_soft = RunnerEngine::start_run(&mut conn, "auto_soft", plan_soft, "idem_soft", 1)
+            .expect("start");
         let soft = RunnerEngine::run_tick(&mut conn, &run_soft.id).expect("tick soft");
-        assert_eq!(soft.state, RunState::NeedsApproval, "45 cents should trigger soft cap approval");
+        assert_eq!(
+            soft.state,
+            RunState::NeedsApproval,
+            "45 cents should trigger soft cap approval"
+        );
 
         // Test: exactly at hard cap boundary (80 cents)
         let plan_boundary = plan_with_single_write_step("simulate_cap_boundary");
-        let run_boundary =
-            RunnerEngine::start_run(&mut conn, "auto_boundary", plan_boundary, "idem_boundary", 1).expect("start");
+        let run_boundary = RunnerEngine::start_run(
+            &mut conn,
+            "auto_boundary",
+            plan_boundary,
+            "idem_boundary",
+            1,
+        )
+        .expect("start");
         let boundary = RunnerEngine::run_tick(&mut conn, &run_boundary.id).expect("tick boundary");
-        assert_eq!(boundary.state, RunState::NeedsApproval, "80 cents (boundary) requires soft cap approval");
+        assert_eq!(
+            boundary.state,
+            RunState::NeedsApproval,
+            "80 cents (boundary) requires soft cap approval"
+        );
 
         // Test: over hard cap (95 cents)
         let plan_hard = plan_with_single_write_step("simulate_cap_hard");
-        let run_hard =
-            RunnerEngine::start_run(&mut conn, "auto_hard", plan_hard, "idem_hard", 1).expect("start");
+        let run_hard = RunnerEngine::start_run(&mut conn, "auto_hard", plan_hard, "idem_hard", 1)
+            .expect("start");
         let hard = RunnerEngine::run_tick(&mut conn, &run_hard.id).expect("tick hard");
         assert_eq!(hard.state, RunState::Blocked, "95 cents should hard block");
     }
@@ -4208,18 +4381,28 @@ mod tests {
 
         // Retryable error
         let plan_retryable = plan_with_single_write_step("simulate_provider_retryable_failure");
-        let run_retryable =
-            RunnerEngine::start_run(&mut conn, "auto_retry", plan_retryable, "idem_retry_class", 1)
-                .expect("start");
+        let run_retryable = RunnerEngine::start_run(
+            &mut conn,
+            "auto_retry",
+            plan_retryable,
+            "idem_retry_class",
+            1,
+        )
+        .expect("start");
         let retryable_result = RunnerEngine::run_tick(&mut conn, &run_retryable.id).expect("tick");
         assert_eq!(retryable_result.state, RunState::Retrying);
         assert!(retryable_result.next_retry_at_ms.is_some());
 
         // Non-retryable error
         let plan_non_retry = plan_with_single_write_step("simulate_provider_non_retryable_failure");
-        let run_non_retry =
-            RunnerEngine::start_run(&mut conn, "auto_non_retry", plan_non_retry, "idem_non_retry_class", 1)
-                .expect("start");
+        let run_non_retry = RunnerEngine::start_run(
+            &mut conn,
+            "auto_non_retry",
+            plan_non_retry,
+            "idem_non_retry_class",
+            1,
+        )
+        .expect("start");
         let non_retry_result = RunnerEngine::run_tick(&mut conn, &run_non_retry.id).expect("tick");
         assert_eq!(non_retry_result.state, RunState::Failed);
         assert!(non_retry_result.next_retry_at_ms.is_none());
@@ -4254,7 +4437,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count final");
-        assert!(final_activities > initial_activities, "Should have recorded state transition");
+        assert!(
+            final_activities > initial_activities,
+            "Should have recorded state transition"
+        );
 
         // Verify activity types are present
         let transition_activities: Vec<String> = conn
@@ -4272,7 +4458,8 @@ mod tests {
     fn database_schema_enforces_unique_outcome_per_run_step_kind() {
         let mut conn = setup_conn();
         let plan = plan_with_single_write_step("outcome uniqueness test");
-        let run = RunnerEngine::start_run(&mut conn, "auto_outcomes", plan, "idem_outcomes", 1).expect("start");
+        let run = RunnerEngine::start_run(&mut conn, "auto_outcomes", plan, "idem_outcomes", 1)
+            .expect("start");
 
         // Complete the run to generate an outcome
         let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
@@ -4295,7 +4482,10 @@ mod tests {
              VALUES (?1, ?2, ?3, ?4, 'final', 'duplicate', 0, 0)",
             params!["dup_outcome", run.id, step_id, kind],
         );
-        assert!(duplicate_result.is_err(), "Duplicate (run_id, step_id, kind) should violate unique constraint");
+        assert!(
+            duplicate_result.is_err(),
+            "Duplicate (run_id, step_id, kind) should violate unique constraint"
+        );
 
         // But inserting with different step_id OR kind should succeed
         let different_step = conn.execute(
@@ -4303,7 +4493,10 @@ mod tests {
              VALUES (?1, ?2, ?3, ?4, 'final', 'different step', 0, 0)",
             params!["diff_step_outcome", run.id, "different_step", kind],
         );
-        assert!(different_step.is_ok(), "Different step_id should be allowed");
+        assert!(
+            different_step.is_ok(),
+            "Different step_id should be allowed"
+        );
 
         let different_kind = conn.execute(
             "INSERT INTO outcomes (id, run_id, step_id, kind, status, content, created_at, updated_at)

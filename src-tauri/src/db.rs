@@ -26,6 +26,7 @@ pub struct HomeSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionEventInsert {
     pub event_id: String,
+    pub client_event_id: Option<String>,
     pub autopilot_id: String,
     pub run_id: String,
     pub step_id: Option<String>,
@@ -61,6 +62,7 @@ pub struct AdaptationLogInsert {
     pub id: String,
     pub autopilot_id: String,
     pub run_id: String,
+    pub adaptation_hash: String,
     pub changes_json: String,
     pub rationale_codes_json: String,
     pub created_at_ms: i64,
@@ -225,6 +227,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
 
             CREATE TABLE IF NOT EXISTS decision_events (
               event_id TEXT PRIMARY KEY,
+              client_event_id TEXT,
               autopilot_id TEXT NOT NULL,
               run_id TEXT NOT NULL,
               step_id TEXT,
@@ -251,6 +254,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               id TEXT PRIMARY KEY,
               autopilot_id TEXT NOT NULL,
               run_id TEXT NOT NULL,
+              adaptation_hash TEXT NOT NULL DEFAULT '',
               changes_json TEXT NOT NULL,
               rationale_codes_json TEXT NOT NULL,
               created_at_ms INTEGER NOT NULL,
@@ -367,6 +371,13 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "updated_at",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column(connection, "decision_events", "client_event_id", "TEXT")?;
+    ensure_column(
+        connection,
+        "adaptation_log",
+        "adaptation_hash",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
 
     // Best-effort backfill from legacy float columns for existing vaults.
     connection
@@ -412,10 +423,22 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to create decision events index: {e}"))?;
     connection
         .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_events_client_event_id ON decision_events(client_event_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create decision client_event_id index: {e}"))?;
+    connection
+        .execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_adaptation_log_autopilot_run ON adaptation_log(autopilot_id, run_id)",
             [],
         )
         .map_err(|e| format!("Failed to create adaptation log index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_adaptation_log_autopilot_hash_created ON adaptation_log(autopilot_id, adaptation_hash, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create adaptation hash index: {e}"))?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_memory_cards_autopilot_type ON memory_cards(autopilot_id, card_type)",
@@ -463,17 +486,18 @@ fn ensure_column(
 pub fn insert_decision_event(
     connection: &Connection,
     payload: &DecisionEventInsert,
-) -> Result<(), String> {
-    connection
+) -> Result<bool, String> {
+    let changed = connection
         .execute(
             "
             INSERT INTO decision_events (
-              event_id, autopilot_id, run_id, step_id, event_type, metadata_json, created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(event_id) DO NOTHING
+              event_id, client_event_id, autopilot_id, run_id, step_id, event_type, metadata_json, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT DO NOTHING
             ",
             params![
                 &payload.event_id,
+                &payload.client_event_id,
                 &payload.autopilot_id,
                 &payload.run_id,
                 &payload.step_id,
@@ -483,7 +507,7 @@ pub fn insert_decision_event(
             ],
         )
         .map_err(|e| format!("Failed to insert decision event: {e}"))?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn insert_run_evaluation_if_missing(
@@ -552,14 +576,15 @@ pub fn insert_adaptation_log(
         .execute(
             "
             INSERT INTO adaptation_log (
-              id, autopilot_id, run_id, changes_json, rationale_codes_json, created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+              id, autopilot_id, run_id, adaptation_hash, changes_json, rationale_codes_json, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(autopilot_id, run_id) DO NOTHING
             ",
             params![
                 &payload.id,
                 &payload.autopilot_id,
                 &payload.run_id,
+                &payload.adaptation_hash,
                 &payload.changes_json,
                 &payload.rationale_codes_json,
                 payload.created_at_ms

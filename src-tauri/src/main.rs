@@ -148,6 +148,7 @@ fn record_decision_event(
     event_type: String,
     step_id: Option<String>,
     metadata_json: Option<String>,
+    client_event_id: Option<String>,
 ) -> Result<(), String> {
     let connection = open_connection(&state)?;
     learning::record_decision_event_from_json(
@@ -157,6 +158,22 @@ fn record_decision_event(
         step_id.as_deref(),
         &event_type,
         metadata_json.as_deref(),
+        client_event_id.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn compact_learning_data(
+    state: tauri::State<AppState>,
+    autopilot_id: Option<String>,
+    dry_run: Option<bool>,
+) -> Result<learning::LearningCompactionSummary, String> {
+    let connection = open_connection(&state)?;
+    learning::compact_learning_data(
+        &connection,
+        autopilot_id.as_deref(),
+        dry_run.unwrap_or(false),
     )
     .map_err(|e| e.to_string())
 }
@@ -200,7 +217,8 @@ fn main() {
             list_pending_approvals,
             get_run,
             get_terminal_receipt,
-            record_decision_event
+            record_decision_event,
+            compact_learning_data
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Terminus app");
