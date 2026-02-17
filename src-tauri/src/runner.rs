@@ -3,9 +3,10 @@ use crate::providers::{
     ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
 };
 use crate::schema::{
-    AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
+    AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId, RecipeKind,
     ProviderTier as SchemaProviderTier,
 };
+use crate::web::{fetch_allowlisted_text, WebFetchError, WebFetchResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -160,6 +161,27 @@ struct StepExecutionError {
 struct StepExecutionResult {
     user_message: String,
     actual_spend_usd_cents: i64,
+    next_step_index_override: Option<i64>,
+    terminal_state_override: Option<RunState>,
+    terminal_summary_override: Option<String>,
+    failure_reason_override: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebReadArtifact {
+    url: String,
+    fetched_at_ms: i64,
+    status_code: u16,
+    content_hash: String,
+    changed: bool,
+    current_excerpt: String,
+    previous_excerpt: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WebSnapshotRecord {
+    last_hash: String,
+    last_text_excerpt: String,
 }
 
 enum CapDecision {
@@ -765,14 +787,30 @@ impl RunnerEngine {
                     )?;
                 }
 
-                let next_idx = (current_idx as i64) + 1;
-                let next_state = if next_idx as usize >= run.plan.steps.len() {
-                    RunState::Succeeded
-                } else {
-                    RunState::Ready
-                };
-                let activity = if next_state == RunState::Succeeded {
-                    "run_succeeded"
+                let next_idx = result
+                    .next_step_index_override
+                    .unwrap_or((current_idx as i64) + 1);
+                let next_state = result.terminal_state_override.unwrap_or_else(|| {
+                    if next_idx as usize >= run.plan.steps.len() {
+                        RunState::Succeeded
+                    } else {
+                        RunState::Ready
+                    }
+                });
+                let user_message = result
+                    .terminal_summary_override
+                    .as_deref()
+                    .unwrap_or(&result.user_message);
+                let failure_reason = result.failure_reason_override.as_deref();
+
+                let activity = if next_state.is_terminal() {
+                    match next_state {
+                        RunState::Succeeded => "run_succeeded",
+                        RunState::Failed => "run_failed",
+                        RunState::Blocked => "run_blocked",
+                        RunState::Canceled => "run_canceled",
+                        _ => "step_completed",
+                    }
                 } else {
                     "step_completed"
                 };
@@ -783,8 +821,8 @@ impl RunnerEngine {
                     from_state,
                     next_state,
                     activity,
-                    &result.user_message,
-                    None,
+                    user_message,
+                    failure_reason,
                     Some(next_idx),
                 )?;
             }
@@ -870,7 +908,7 @@ impl RunnerEngine {
     }
 
     fn execute_step(
-        connection: &Connection,
+        connection: &mut Connection,
         run: &RunRecord,
         step: &PlanStep,
     ) -> Result<StepExecutionResult, StepExecutionError> {
@@ -891,13 +929,97 @@ impl RunnerEngine {
         }
 
         match step.primitive {
+            PrimitiveId::ReadWeb => {
+                if run.plan.recipe != RecipeKind::WebsiteMonitor {
+                    return Ok(StepExecutionResult {
+                        user_message: "Step completed.".to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: None,
+                        terminal_state_override: None,
+                        terminal_summary_override: None,
+                        failure_reason_override: None,
+                    });
+                }
+
+                let source_url = run.plan.web_source_url.clone().ok_or_else(|| StepExecutionError {
+                    retryable: false,
+                    user_reason:
+                        "Add a website URL to this Autopilot intent before running website monitoring."
+                            .to_string(),
+                })?;
+                if run.plan.web_allowed_domains.is_empty() {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "This Autopilot has no allowed website domains yet. Add one and try again."
+                                .to_string(),
+                    });
+                }
+
+                let fetched = fetch_allowlisted_text(&source_url, &run.plan.web_allowed_domains)
+                    .map_err(map_web_fetch_error)?;
+                let previous = Self::get_web_snapshot(connection, &run.autopilot_id, &fetched.url)
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    })?;
+                let changed = previous
+                    .as_ref()
+                    .map(|prev| prev.last_hash != fetched.content_hash)
+                    .unwrap_or(true);
+
+                let artifact = WebReadArtifact {
+                    url: fetched.url.clone(),
+                    fetched_at_ms: fetched.fetched_at_ms,
+                    status_code: fetched.status_code,
+                    content_hash: fetched.content_hash.clone(),
+                    changed,
+                    current_excerpt: fetched.content_text.clone(),
+                    previous_excerpt: previous.as_ref().map(|p| p.last_text_excerpt.clone()),
+                };
+
+                Self::upsert_web_snapshot(connection, &run.autopilot_id, &fetched, changed, previous.as_ref())
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    })?;
+                Self::persist_web_read_artifact(connection, run, step, &artifact)?;
+
+                if !changed {
+                    return Ok(StepExecutionResult {
+                        user_message: "No changes detected.".to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: Some(run.plan.steps.len() as i64),
+                        terminal_state_override: Some(RunState::Succeeded),
+                        terminal_summary_override: Some(
+                            "No changes detected for this website since the last snapshot."
+                                .to_string(),
+                        ),
+                        failure_reason_override: None,
+                    });
+                }
+
+                Ok(StepExecutionResult {
+                    user_message: "Website change detected. Continuing to draft summary.".to_string(),
+                    actual_spend_usd_cents: 0,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
             PrimitiveId::WriteOutcomeDraft | PrimitiveId::WriteEmailDraft => {
                 let runtime = ProviderRuntime::default();
+                let model_input = if run.plan.recipe == RecipeKind::WebsiteMonitor {
+                    Self::build_website_monitor_prompt(connection, run, step)?
+                } else {
+                    format!("{}\n\nStep: {}", run.plan.intent, step.label)
+                };
                 let request = ProviderRequest {
                     provider_kind: run.provider_kind,
                     provider_tier: run.provider_tier,
                     model: run.plan.provider.default_model.clone(),
-                    input: format!("{}\n\nStep: {}", run.plan.intent, step.label),
+                    input: model_input,
                     max_output_tokens: Some(512),
                     correlation_id: Some(format!("{}:{}", run.id, step.id)),
                 };
@@ -917,15 +1039,22 @@ impl RunnerEngine {
                         "Draft outcome saved.".to_string()
                     },
                     actual_spend_usd_cents: actual_cents,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
                 })
             }
-            PrimitiveId::ReadWeb
-            | PrimitiveId::ReadForwardedEmail
+            PrimitiveId::ReadForwardedEmail
             | PrimitiveId::ReadVaultFile
             | PrimitiveId::ScheduleRun
             | PrimitiveId::NotifyUser => Ok(StepExecutionResult {
                 user_message: "Step completed.".to_string(),
                 actual_spend_usd_cents: 0,
+                next_step_index_override: None,
+                terminal_state_override: None,
+                terminal_summary_override: None,
+                failure_reason_override: None,
             }),
             PrimitiveId::SendEmail => Err(StepExecutionError {
                 retryable: false,
@@ -965,6 +1094,154 @@ impl RunnerEngine {
                 user_reason: "Couldn't save generated output yet.".to_string(),
             })?;
 
+        Ok(())
+    }
+
+    fn persist_web_read_artifact(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        artifact: &WebReadArtifact,
+    ) -> Result<(), StepExecutionError> {
+        let payload = serde_json::to_string(artifact).map_err(|_| StepExecutionError {
+            retryable: false,
+            user_reason: "Couldn't store website snapshot details.".to_string(),
+        })?;
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'web_read', 'captured', ?4, ?5, ?5)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![make_id("outcome"), run.id, step.id, payload, now_ms()],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't save website read artifact.".to_string(),
+            })?;
+        Ok(())
+    }
+
+    fn get_web_read_artifact(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Option<WebReadArtifact>, RunnerError> {
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'web_read' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        match payload {
+            Some(json) => {
+                let artifact =
+                    serde_json::from_str(&json).map_err(|e| RunnerError::Serde(e.to_string()))?;
+                Ok(Some(artifact))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn build_website_monitor_prompt(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+    ) -> Result<String, StepExecutionError> {
+        let artifact = Self::get_web_read_artifact(connection, &run.id)
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't load website snapshot for drafting.".to_string(),
+            })?
+            .ok_or_else(|| StepExecutionError {
+                retryable: false,
+                user_reason: "Website content is missing for this run.".to_string(),
+            })?;
+
+        let previous = artifact
+            .previous_excerpt
+            .as_deref()
+            .unwrap_or("No previous snapshot.");
+        let current = artifact.current_excerpt.as_str();
+        let task = if step.primitive == PrimitiveId::WriteEmailDraft {
+            "Draft a calm email update describing the key changes."
+        } else {
+            "Summarize what's changed in concise bullets."
+        };
+
+        Ok(format!(
+            "Intent: {}\nTask: {}\nURL: {}\nFetched at: {}\nPrevious snapshot:\n{}\n\nCurrent snapshot:\n{}\n",
+            run.plan.intent,
+            task,
+            artifact.url,
+            artifact.fetched_at_ms,
+            previous,
+            current
+        ))
+    }
+
+    fn get_web_snapshot(
+        connection: &Connection,
+        autopilot_id: &str,
+        url: &str,
+    ) -> Result<Option<WebSnapshotRecord>, RunnerError> {
+        connection
+            .query_row(
+                "SELECT autopilot_id, url, last_hash, last_fetched_at_ms, last_text_excerpt FROM web_snapshots WHERE autopilot_id = ?1 AND url = ?2",
+                params![autopilot_id, url],
+                |row| {
+                    Ok(WebSnapshotRecord {
+                        last_hash: row.get(2)?,
+                        last_text_excerpt: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    fn upsert_web_snapshot(
+        connection: &mut Connection,
+        autopilot_id: &str,
+        fetched: &WebFetchResult,
+        changed: bool,
+        previous: Option<&WebSnapshotRecord>,
+    ) -> Result<(), RunnerError> {
+        let excerpt = if changed {
+            truncate_chars(&fetched.content_text, 2_000)
+        } else {
+            previous
+                .map(|p| p.last_text_excerpt.clone())
+                .unwrap_or_else(|| truncate_chars(&fetched.content_text, 2_000))
+        };
+        connection
+            .execute(
+                "
+                INSERT INTO web_snapshots (
+                  autopilot_id, url, last_hash, last_fetched_at_ms, last_text_excerpt, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(autopilot_id, url)
+                DO UPDATE SET
+                  last_hash = excluded.last_hash,
+                  last_fetched_at_ms = excluded.last_fetched_at_ms,
+                  last_text_excerpt = excluded.last_text_excerpt,
+                  updated_at = excluded.updated_at
+                ",
+                params![
+                    autopilot_id,
+                    fetched.url,
+                    fetched.content_hash,
+                    fetched.fetched_at_ms,
+                    excerpt,
+                    now_ms()
+                ],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
         Ok(())
     }
 
@@ -1435,6 +1712,13 @@ fn map_provider_error(error: ProviderError) -> StepExecutionError {
     }
 }
 
+fn map_web_fetch_error(error: WebFetchError) -> StepExecutionError {
+    StepExecutionError {
+        retryable: error.is_retryable(),
+        user_reason: error.to_string(),
+    }
+}
+
 fn provider_kind_from_plan(plan: &AutopilotPlan) -> ProviderKind {
     match plan.provider.id {
         SchemaProviderId::OpenAi => ProviderKind::OpenAi,
@@ -1517,6 +1801,10 @@ fn format_usd_cents(cents: i64) -> String {
     format!("{sign}${}.{:02}", abs / 100, abs % 100)
 }
 
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect::<String>()
+}
+
 fn estimate_step_cost_usd_cents(run: &RunRecord, step: &PlanStep) -> i64 {
     if run.plan.intent.contains("simulate_cap_hard") {
         return 95;
@@ -1568,8 +1856,13 @@ mod tests {
     use crate::db::bootstrap_schema;
     use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
     use rusqlite::{params, Connection};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn setup_conn() -> Connection {
+        // Keep runner tests deterministic regardless of local shell environment.
+        std::env::set_var("TERMINUS_TRANSPORT", "mock");
         let mut conn = Connection::open_in_memory().expect("open memory db");
         bootstrap_schema(&mut conn).expect("bootstrap schema");
         conn
@@ -1578,9 +1871,11 @@ mod tests {
     fn plan_with_single_write_step(intent: &str) -> AutopilotPlan {
         AutopilotPlan {
             schema_version: "1.0".to_string(),
-            recipe: RecipeKind::WebsiteMonitor,
+            recipe: RecipeKind::InboxTriage,
             intent: intent.to_string(),
             provider: crate::schema::ProviderMetadata::from_provider_id(ProviderId::OpenAi),
+            web_source_url: None,
+            web_allowed_domains: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft],
             steps: vec![PlanStep {
                 id: "step_1".to_string(),
@@ -1590,6 +1885,37 @@ mod tests {
                 risk_tier: RiskTier::Low,
             }],
         }
+    }
+
+    fn website_plan_with_url(url: &str) -> AutopilotPlan {
+        AutopilotPlan::from_intent(
+            RecipeKind::WebsiteMonitor,
+            format!("Monitor this website for changes: {url}"),
+            ProviderId::OpenAi,
+        )
+    }
+
+    fn spawn_http_server(bodies: Vec<String>, content_type: &str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let url = format!("http://{addr}/monitor");
+        let content_type = content_type.to_string();
+
+        let handle = thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0_u8; 2048];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).expect("write response");
+            }
+        });
+
+        (url, handle)
     }
 
     #[test]
@@ -1767,15 +2093,23 @@ mod tests {
     #[test]
     fn website_monitor_happy_path_shared_runtime() {
         let mut conn = setup_conn();
-        let plan = AutopilotPlan::from_intent(
-            RecipeKind::WebsiteMonitor,
-            "Website monitor happy path".to_string(),
-            ProviderId::OpenAi,
+        let (url, server) = spawn_http_server(
+            vec!["<html><body><h1>Launch update</h1><p>new feature shipped</p></body></html>".to_string()],
+            "text/html",
         );
+        let plan = website_plan_with_url(&url);
         let run = RunnerEngine::start_run(&mut conn, "auto_web", plan, "idem_web", 2).expect("start");
 
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
+        let snapshots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM web_snapshots WHERE autopilot_id = 'auto_web'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("snapshot exists");
+        assert_eq!(snapshots, 1);
 
         let need_approval_1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
         assert_eq!(need_approval_1.state, RunState::NeedsApproval);
@@ -1791,6 +2125,117 @@ mod tests {
         let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("second approval");
         let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
         assert_eq!(done.state, RunState::Succeeded);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn website_monitor_second_run_no_change_ends_without_draft() {
+        let mut conn = setup_conn();
+        let (url, server) = spawn_http_server(
+            vec![
+                "<html><body><p>same content</p></body></html>".to_string(),
+                "<html><body><p>same content</p></body></html>".to_string(),
+            ],
+            "text/html",
+        );
+        let plan = website_plan_with_url(&url);
+
+        let run1 = RunnerEngine::start_run(&mut conn, "auto_no_change", plan.clone(), "idem_nochange_1", 2)
+            .expect("start1");
+        let first = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step1");
+        assert_eq!(first.state, RunState::Ready);
+
+        let run2 = RunnerEngine::start_run(&mut conn, "auto_no_change", plan, "idem_nochange_2", 2)
+            .expect("start2");
+        let second = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 step1");
+        assert_eq!(second.state, RunState::Succeeded);
+
+        let drafts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'email_draft'",
+                params![run2.id],
+                |row| row.get(0),
+            )
+            .expect("count drafts");
+        assert_eq!(drafts, 0);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn website_monitor_change_triggers_summary_and_email_draft() {
+        let mut conn = setup_conn();
+        let (url, server) = spawn_http_server(
+            vec![
+                "<html><body><p>version one</p></body></html>".to_string(),
+                "<html><body><p>version two changed</p></body></html>".to_string(),
+            ],
+            "text/html",
+        );
+        let plan = website_plan_with_url(&url);
+
+        let run1 = RunnerEngine::start_run(&mut conn, "auto_change", plan.clone(), "idem_change_1", 2)
+            .expect("start1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step1");
+
+        let run2 = RunnerEngine::start_run(&mut conn, "auto_change", plan, "idem_change_2", 2)
+            .expect("start2");
+        let s1 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 step1");
+        assert_eq!(s1.state, RunState::Ready);
+
+        let need_approval_1 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 approval1");
+        assert_eq!(need_approval_1.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let first = approvals.iter().find(|a| a.run_id == run2.id).expect("first approval");
+        let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
+        assert_eq!(after_first.state, RunState::Ready);
+
+        let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 approval2");
+        assert_eq!(need_approval_2.state, RunState::NeedsApproval);
+        let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
+        let second = approvals_2.iter().find(|a| a.run_id == run2.id).expect("second approval");
+        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let email_drafts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'email_draft'",
+                params![run2.id],
+                |row| row.get(0),
+            )
+            .expect("count email drafts");
+        assert_eq!(email_drafts, 1);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn read_web_blocks_disallowed_host_with_human_message() {
+        let mut conn = setup_conn();
+        let url = "http://127.0.0.1:65530/blocked";
+        let mut plan = website_plan_with_url(&url);
+        plan.web_allowed_domains = vec!["example.com".to_string()];
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_block", plan, "idem_block_host", 2).expect("start");
+
+        let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(failed.state, RunState::Failed);
+        let reason = failed.failure_reason.expect("reason");
+        assert!(reason.contains("allowlist"));
+    }
+
+    #[test]
+    fn read_web_large_response_fails_safely() {
+        let mut conn = setup_conn();
+        let huge = "A".repeat(260_000);
+        let (url, server) = spawn_http_server(vec![huge], "text/plain");
+        let plan = website_plan_with_url(&url);
+        let run =
+            RunnerEngine::start_run(&mut conn, "auto_large", plan, "idem_large_content", 2).expect("start");
+
+        let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(failed.state, RunState::Failed);
+        let reason = failed.failure_reason.expect("reason");
+        assert!(reason.contains("too large") || reason.contains("Reduce scope"));
+        server.join().expect("server join");
     }
 
     #[test]

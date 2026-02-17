@@ -124,6 +124,17 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (run_id) REFERENCES runs(id)
             );
 
+            CREATE TABLE IF NOT EXISTS web_snapshots (
+              autopilot_id TEXT NOT NULL,
+              url TEXT NOT NULL,
+              last_hash TEXT NOT NULL,
+              last_fetched_at_ms INTEGER NOT NULL,
+              last_text_excerpt TEXT NOT NULL DEFAULT '',
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY (autopilot_id, url),
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
@@ -146,6 +157,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     ensure_column(connection, "spend_ledger", "step_id", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(connection, "spend_ledger", "entry_kind", "TEXT NOT NULL DEFAULT 'actual'")?;
     ensure_column(connection, "spend_ledger", "amount_usd_cents", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(connection, "web_snapshots", "last_text_excerpt", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(connection, "web_snapshots", "updated_at", "INTEGER NOT NULL DEFAULT 0")?;
 
     // Best-effort backfill from legacy float columns for existing vaults.
     connection

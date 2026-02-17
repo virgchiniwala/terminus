@@ -4,6 +4,7 @@ mod providers;
 mod runner;
 mod schema;
 mod transport;
+mod web;
 
 use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
 use schema::{AutopilotPlan, ProviderId, RecipeKind};
