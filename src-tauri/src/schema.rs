@@ -66,6 +66,8 @@ pub struct AutopilotPlan {
     pub recipe: RecipeKind,
     pub intent: String,
     pub provider: ProviderMetadata,
+    pub web_source_url: Option<String>,
+    pub web_allowed_domains: Vec<String>,
     pub allowed_primitives: Vec<PrimitiveId>,
     pub steps: Vec<PlanStep>,
 }
@@ -95,6 +97,12 @@ impl ProviderMetadata {
 impl AutopilotPlan {
     pub fn from_intent(recipe: RecipeKind, intent: String, provider_id: ProviderId) -> Self {
         let provider = ProviderMetadata::from_provider_id(provider_id);
+        let web_source_url = extract_first_url(&intent);
+        let web_allowed_domains = web_source_url
+            .as_deref()
+            .and_then(extract_host)
+            .map(|host| vec![host])
+            .unwrap_or_default();
         let allowed_primitives = vec![
             PrimitiveId::ReadWeb,
             PrimitiveId::ReadForwardedEmail,
@@ -180,9 +188,35 @@ impl AutopilotPlan {
             recipe,
             intent,
             provider,
+            web_source_url,
+            web_allowed_domains,
             allowed_primitives,
             steps,
         }
+    }
+}
+
+fn extract_first_url(input: &str) -> Option<String> {
+    input.split_whitespace().find_map(|token| {
+        let normalized = token
+            .trim_matches(|c: char| ",.;:!?()[]{}<>\"'".contains(c))
+            .to_string();
+        if normalized.starts_with("http://") || normalized.starts_with("https://") {
+            Some(normalized)
+        } else {
+            None
+        }
+    })
+}
+
+fn extract_host(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let host_port = rest.split('/').next()?.trim();
+    let host = host_port.split('@').next_back()?.split(':').next()?.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
     }
 }
 
