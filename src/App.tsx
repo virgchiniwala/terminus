@@ -17,42 +17,109 @@ const fallbackSnapshot: HomeSnapshot = {
 
 export function App() {
   const [snapshot, setSnapshot] = useState<HomeSnapshot>(fallbackSnapshot);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+
+  const loadSnapshot = () => {
+    setLoading(true);
+    invoke<HomeSnapshot>("get_home_snapshot")
+      .then((data) => {
+        setSnapshot(data);
+        setError(null);
+        setRetryCount(0);
+      })
+      .catch((err) => {
+        console.error("Failed to load home snapshot:", err);
+        const isFirstFailure = retryCount === 0;
+        setError(
+          isFirstFailure
+            ? "Could not load data. Using default view."
+            : "Still unable to connect. Check that Tauri backend is running."
+        );
+        setSnapshot(fallbackSnapshot);
+        setRetryCount((c) => c + 1);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
 
   useEffect(() => {
-    invoke<HomeSnapshot>("get_home_snapshot")
-      .then(setSnapshot)
-      .catch(() => {
-        setSnapshot(fallbackSnapshot);
-      });
+    loadSnapshot();
   }, []);
 
-  return (
-    <main className="app-shell" aria-label="Terminus Home">
-      <header className="hero">
-        <p className="kicker">Terminus</p>
-        <h1>Personal AI OS</h1>
-        <p className="subhead">Autopilots, outcomes, approvals, and activity in one calm view.</p>
-      </header>
+  if (loading) {
+    return (
+      <main className="app-shell loading-state" aria-label="Loading Terminus" aria-busy="true">
+        <div className="loading-spinner" role="status">
+          <span className="sr-only">Loading...</span>
+        </div>
+      </main>
+    );
+  }
 
-      <section className="surface-grid" aria-label="Home surfaces">
+  return (
+    <>
+      <a href="#main-content" className="skip-to-main">
+        Skip to main content
+      </a>
+      <main id="main-content" className="app-shell" aria-label="Terminus Home">
+        {error && (
+          <aside className="error-banner" role="alert" aria-live="polite">
+            <div className="error-content">
+              <span className="error-icon">⚠️</span>
+              <p>{error}</p>
+            </div>
+            <button
+              type="button"
+              className="retry-button"
+              onClick={loadSnapshot}
+              aria-label="Retry loading data"
+            >
+              Retry
+            </button>
+          </aside>
+        )}
+        
+        <header className="hero">
+          <p className="kicker">Terminus</p>
+          <h1>Personal AI OS</h1>
+          <p className="subhead">Autopilots, outcomes, approvals, and activity in one calm view.</p>
+        </header>
+
+      <section className="surface-grid" aria-label="Home surfaces" role="region">
         {snapshot.surfaces.map((surface) => (
-          <article key={surface.title} className="surface-card" aria-label={surface.title}>
+          <article 
+            key={surface.title} 
+            className={`surface-card ${surface.count === 0 ? 'empty' : ''}`}
+            aria-labelledby={`${surface.title.toLowerCase()}-title`}
+          >
             <div>
-              <h2>{surface.title}</h2>
-              <p>{surface.subtitle}</p>
+              <h2 id={`${surface.title.toLowerCase()}-title`}>{surface.title}</h2>
+              <p className="surface-subtitle">{surface.subtitle}</p>
             </div>
             <div className="surface-footer">
-              <span>{surface.count === 0 ? "Empty" : `${surface.count} items`}</span>
-              <button type="button">{surface.cta}</button>
+              <span className="count-badge" aria-label={`${surface.count} ${surface.count === 1 ? 'item' : 'items'}`}>
+                {surface.count === 0 ? "Empty" : `${surface.count} ${surface.count === 1 ? 'item' : 'items'}`}
+              </span>
+              <button 
+                type="button" 
+                className="cta-button"
+                aria-label={`${surface.cta} for ${surface.title}`}
+              >
+                {surface.cta}
+              </button>
             </div>
           </article>
         ))}
       </section>
 
-      <section className="runner-banner" aria-label="Runner status">
-        <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
-        <p>{snapshot.runner.statusLine}</p>
-      </section>
-    </main>
+        <section className="runner-banner" aria-label="Runner status">
+          <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
+          <p>{snapshot.runner.statusLine}</p>
+        </section>
+      </main>
+    </>
   );
 }
