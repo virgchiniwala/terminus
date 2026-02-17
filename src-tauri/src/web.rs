@@ -43,7 +43,10 @@ impl WebFetchError {
     }
 }
 
-pub fn fetch_allowlisted_text(url: &str, allowlisted_hosts: &[String]) -> Result<WebFetchResult, WebFetchError> {
+pub fn fetch_allowlisted_text(
+    url: &str,
+    allowlisted_hosts: &[String],
+) -> Result<WebFetchResult, WebFetchError> {
     let (scheme, host) = parse_scheme_host(url).ok_or(WebFetchError::InvalidScheme)?;
     validate_scheme(&scheme)?;
     validate_allowlist(&host, allowlisted_hosts)?;
@@ -53,8 +56,10 @@ pub fn fetch_allowlisted_text(url: &str, allowlisted_hosts: &[String]) -> Result
         let response = fetch_once(&current_url)?;
         if (300..400).contains(&response.status_code) {
             let location = response.location.ok_or(WebFetchError::InvalidRedirect)?;
-            let next_url = resolve_redirect_url(&current_url, &location).ok_or(WebFetchError::InvalidRedirect)?;
-            let (next_scheme, next_host) = parse_scheme_host(&next_url).ok_or(WebFetchError::InvalidRedirect)?;
+            let next_url = resolve_redirect_url(&current_url, &location)
+                .ok_or(WebFetchError::InvalidRedirect)?;
+            let (next_scheme, next_host) =
+                parse_scheme_host(&next_url).ok_or(WebFetchError::InvalidRedirect)?;
             validate_scheme(&next_scheme)?;
             validate_allowlist(&next_host, allowlisted_hosts)?;
             current_url = next_url;
@@ -222,7 +227,10 @@ fn resolve_redirect_url(current_url: &str, location: &str) -> Option<String> {
     if location.starts_with('/') {
         return Some(format!("{scheme}://{host}{location}"));
     }
-    let base = current_url.rsplit_once('/').map(|(b, _)| b).unwrap_or(current_url);
+    let base = current_url
+        .rsplit_once('/')
+        .map(|(b, _)| b)
+        .unwrap_or(current_url);
     Some(format!("{base}/{location}"))
 }
 

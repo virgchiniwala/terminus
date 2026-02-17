@@ -35,7 +35,9 @@ pub enum RiskTier {
 #[serde(rename_all = "snake_case")]
 pub enum PrimitiveId {
     ReadWeb,
+    ReadSources,
     ReadForwardedEmail,
+    AggregateDailySummary,
     ReadVaultFile,
     WriteOutcomeDraft,
     WriteEmailDraft,
@@ -68,6 +70,8 @@ pub struct AutopilotPlan {
     pub provider: ProviderMetadata,
     pub web_source_url: Option<String>,
     pub web_allowed_domains: Vec<String>,
+    pub inbox_source_text: Option<String>,
+    pub daily_sources: Vec<String>,
     pub allowed_primitives: Vec<PrimitiveId>,
     pub steps: Vec<PlanStep>,
 }
@@ -103,9 +107,24 @@ impl AutopilotPlan {
             .and_then(extract_host)
             .map(|host| vec![host])
             .unwrap_or_default();
+        let inbox_source_text = if recipe == RecipeKind::InboxTriage {
+            Some(intent.clone())
+        } else {
+            None
+        };
+        let daily_sources = if recipe == RecipeKind::DailyBrief {
+            extract_urls(&intent)
+                .into_iter()
+                .take(5)
+                .collect::<Vec<String>>()
+        } else {
+            Vec::new()
+        };
         let allowed_primitives = vec![
             PrimitiveId::ReadWeb,
+            PrimitiveId::ReadSources,
             PrimitiveId::ReadForwardedEmail,
+            PrimitiveId::AggregateDailySummary,
             PrimitiveId::WriteOutcomeDraft,
             PrimitiveId::WriteEmailDraft,
             PrimitiveId::NotifyUser,
@@ -147,7 +166,7 @@ impl AutopilotPlan {
                     id: "step_2".to_string(),
                     label: "Draft reply options and triage labels".to_string(),
                     primitive: PrimitiveId::WriteOutcomeDraft,
-                    requires_approval: true,
+                    requires_approval: false,
                     risk_tier: RiskTier::Medium,
                 },
                 PlanStep {
@@ -162,23 +181,23 @@ impl AutopilotPlan {
                 PlanStep {
                     id: "step_1".to_string(),
                     label: "Read configured sources".to_string(),
-                    primitive: PrimitiveId::ReadWeb,
+                    primitive: PrimitiveId::ReadSources,
                     requires_approval: false,
                     risk_tier: RiskTier::Low,
                 },
                 PlanStep {
                     id: "step_2".to_string(),
-                    label: "Compose a single daily brief outcome card".to_string(),
-                    primitive: PrimitiveId::WriteOutcomeDraft,
-                    requires_approval: true,
+                    label: "Aggregate a cohesive daily summary".to_string(),
+                    primitive: PrimitiveId::AggregateDailySummary,
+                    requires_approval: false,
                     risk_tier: RiskTier::Medium,
                 },
                 PlanStep {
                     id: "step_3".to_string(),
-                    label: "Notify user that the brief is ready".to_string(),
-                    primitive: PrimitiveId::NotifyUser,
-                    requires_approval: false,
-                    risk_tier: RiskTier::Low,
+                    label: "Compose a single daily brief outcome card".to_string(),
+                    primitive: PrimitiveId::WriteOutcomeDraft,
+                    requires_approval: true,
+                    risk_tier: RiskTier::Medium,
                 },
             ],
         };
@@ -190,6 +209,8 @@ impl AutopilotPlan {
             provider,
             web_source_url,
             web_allowed_domains,
+            inbox_source_text,
+            daily_sources,
             allowed_primitives,
             steps,
         }
@@ -207,6 +228,22 @@ fn extract_first_url(input: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn extract_urls(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .filter_map(|token| {
+            let normalized = token
+                .trim_matches(|c: char| ",.;:!?()[]{}<>\"'".contains(c))
+                .to_string();
+            if normalized.starts_with("http://") || normalized.starts_with("https://") {
+                Some(normalized)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn extract_host(url: &str) -> Option<String> {
