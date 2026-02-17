@@ -49,6 +49,7 @@ fn start_recipe_run(
     recipe: String,
     intent: String,
     pasted_text: Option<String>,
+    daily_sources: Option<Vec<String>>,
     provider: String,
     idempotency_key: String,
     max_retries: Option<i64>,
@@ -60,6 +61,16 @@ fn start_recipe_run(
     if let Some(text) = pasted_text {
         if !text.trim().is_empty() {
             plan.inbox_source_text = Some(text);
+        }
+    }
+    if let Some(sources) = daily_sources {
+        let cleaned = sources
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<String>>();
+        if !cleaned.is_empty() {
+            plan.daily_sources = cleaned;
         }
     }
 
