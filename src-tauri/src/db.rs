@@ -145,6 +145,27 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
             );
 
+            CREATE TABLE IF NOT EXISTS daily_brief_sources (
+              autopilot_id TEXT PRIMARY KEY,
+              sources_json TEXT NOT NULL,
+              sources_hash TEXT NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_brief_history (
+              id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              sources_hash TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              summary_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              UNIQUE(autopilot_id, sources_hash, content_hash),
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,

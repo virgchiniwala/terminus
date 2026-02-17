@@ -6,7 +6,7 @@ use crate::schema::{
     AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId, RecipeKind,
     ProviderTier as SchemaProviderTier,
 };
-use crate::web::{fetch_allowlisted_text, WebFetchError, WebFetchResult};
+use crate::web::{fetch_allowlisted_text, parse_scheme_host, WebFetchError, WebFetchResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -22,6 +22,7 @@ const DAILY_SOFT_CAP_USD_CENTS: i64 = 300;
 const DAILY_HARD_CAP_USD_CENTS: i64 = 500;
 const SOFT_CAP_APPROVAL_STEP_ID: &str = "__soft_cap__";
 const INBOX_TEXT_MAX_CHARS: usize = 20_000;
+const DAILY_SOURCE_MAX_ITEMS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +114,7 @@ pub struct ApprovalRecord {
 pub struct RunReceipt {
     pub schema_version: String,
     pub run_id: String,
+    pub autopilot_id: String,
     pub provider_kind: String,
     pub provider_tier: String,
     pub terminal_state: String,
@@ -120,8 +122,16 @@ pub struct RunReceipt {
     pub failure_reason: Option<String>,
     pub recovery_options: Vec<String>,
     pub total_spend_usd_cents: i64,
+    pub cost_breakdown: Vec<ReceiptCostLineItem>,
     pub redacted: bool,
     pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptCostLineItem {
+    pub step_id: String,
+    pub entry_kind: String,
+    pub amount_usd_cents: i64,
 }
 
 #[derive(Debug, Error)]
@@ -194,6 +204,30 @@ struct InboxReadArtifact {
     text_excerpt: String,
     created_at_ms: i64,
     deduped_existing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DailySourceResult {
+    source_id: String,
+    url: String,
+    text_excerpt: String,
+    fetched_at_ms: i64,
+    fetch_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DailySourcesArtifact {
+    sources_hash: String,
+    source_results: Vec<DailySourceResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DailySummaryArtifact {
+    title: String,
+    bullet_points: Vec<String>,
+    summary_text: String,
+    sources_hash: String,
+    content_hash: String,
 }
 
 enum CapDecision {
@@ -858,6 +892,146 @@ impl RunnerEngine {
         }
 
         match step.primitive {
+            PrimitiveId::ReadSources => {
+                let configured = run
+                    .plan
+                    .daily_sources
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .take(DAILY_SOURCE_MAX_ITEMS)
+                    .collect::<Vec<String>>();
+                let sources = if configured.is_empty() {
+                    vec![
+                        "https://example.com/".to_string(),
+                        "https://www.rust-lang.org/".to_string(),
+                        "Inline note: prioritize product and ops updates".to_string(),
+                    ]
+                } else {
+                    configured
+                };
+
+                Self::upsert_daily_brief_sources(connection, &run.autopilot_id, &sources)
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    })?;
+                let source_results = Self::read_daily_sources(&sources);
+                let sources_hash = compute_daily_sources_hash(&source_results);
+                let artifact = DailySourcesArtifact {
+                    sources_hash,
+                    source_results,
+                };
+                Self::persist_daily_sources_artifact(connection, run, step, &artifact)?;
+
+                Ok(StepExecutionResult {
+                    user_message: "Sources captured for Daily Brief.".to_string(),
+                    actual_spend_usd_cents: 0,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
+            PrimitiveId::AggregateDailySummary => {
+                let sources_artifact = Self::get_daily_sources_artifact(connection, &run.id)
+                    .map_err(|_| StepExecutionError {
+                        retryable: false,
+                        user_reason: "Couldn't load Daily Brief sources for aggregation.".to_string(),
+                    })?
+                    .ok_or_else(|| StepExecutionError {
+                        retryable: false,
+                        user_reason: "Daily Brief sources are missing for this run.".to_string(),
+                    })?;
+
+                let usable = sources_artifact
+                    .source_results
+                    .iter()
+                    .filter(|s| s.fetch_error.is_none())
+                    .cloned()
+                    .collect::<Vec<DailySourceResult>>();
+                if usable.is_empty() {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "Could not fetch any Daily Brief sources. Check source URLs and try again."
+                                .to_string(),
+                    });
+                }
+
+                let runtime = ProviderRuntime::default();
+                let source_context = usable
+                    .iter()
+                    .map(|s| format!("[{}] {}\n{}", s.source_id, s.url, s.text_excerpt))
+                    .collect::<Vec<String>>()
+                    .join("\n\n");
+                let request = ProviderRequest {
+                    provider_kind: run.provider_kind,
+                    provider_tier: run.provider_tier,
+                    model: run.plan.provider.default_model.clone(),
+                    input: format!(
+                        "Intent: {}\nTask: Create a cohesive daily brief.\nOutput format:\nTitle: <one line>\n- bullet 1\n- bullet 2\n- bullet 3\n\nSources:\n{}",
+                        run.plan.intent,
+                        source_context
+                    ),
+                    max_output_tokens: Some(700),
+                    correlation_id: Some(format!("{}:{}", run.id, step.id)),
+                };
+                let response = runtime.dispatch(&request).map_err(map_provider_error)?;
+                let parsed = parse_daily_summary_output(&response.text, &sources_artifact.sources_hash);
+                let seen_before = Self::daily_summary_exists(
+                    connection,
+                    &run.autopilot_id,
+                    &parsed.sources_hash,
+                    &parsed.content_hash,
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: false,
+                    user_reason: e.to_string(),
+                })?;
+                Self::persist_daily_summary_artifact(connection, run, step, &parsed)?;
+                if !seen_before {
+                    Self::insert_daily_summary_history(
+                        connection,
+                        &run.autopilot_id,
+                        &run.id,
+                        &parsed,
+                    )
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    })?;
+                }
+
+                let fallback_estimate = estimate_step_cost_usd_cents(run, step);
+                let total_cents = std::cmp::max(fallback_estimate, response.usage.estimated_cost_usd_cents);
+                if total_cents > 0 {
+                    Self::record_spend_by_sources(connection, run, step, &usable, total_cents)?;
+                }
+
+                if seen_before {
+                    return Ok(StepExecutionResult {
+                        user_message: "Daily Brief sources are unchanged. No new summary draft created."
+                            .to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: Some(run.plan.steps.len() as i64),
+                        terminal_state_override: Some(RunState::Succeeded),
+                        terminal_summary_override: Some(
+                            "Daily Brief unchanged. Existing summary is still current.".to_string(),
+                        ),
+                        failure_reason_override: None,
+                    });
+                }
+
+                Ok(StepExecutionResult {
+                    user_message: "Daily summary aggregated from sources.".to_string(),
+                    actual_spend_usd_cents: 0,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
             PrimitiveId::ReadWeb => {
                 if run.plan.recipe != RecipeKind::WebsiteMonitor {
                     return Ok(StepExecutionResult {
@@ -940,9 +1114,14 @@ impl RunnerEngine {
             PrimitiveId::WriteOutcomeDraft | PrimitiveId::WriteEmailDraft => {
                 let runtime = ProviderRuntime::default();
                 let model_input = if run.plan.recipe == RecipeKind::WebsiteMonitor {
-                    Self::build_website_monitor_prompt(connection, run, step)?
+                    Self::build_website_monitor_prompt(connection, run, step)
+                        .unwrap_or_else(|_| format!("{}\n\nStep: {}", run.plan.intent, step.label))
                 } else if run.plan.recipe == RecipeKind::InboxTriage {
-                    Self::build_inbox_triage_prompt(connection, run, step)?
+                    Self::build_inbox_triage_prompt(connection, run, step)
+                        .unwrap_or_else(|_| format!("{}\n\nStep: {}", run.plan.intent, step.label))
+                } else if run.plan.recipe == RecipeKind::DailyBrief {
+                    Self::build_daily_brief_draft_prompt(connection, run)
+                        .unwrap_or_else(|_| format!("{}\n\nStep: {}", run.plan.intent, step.label))
                 } else {
                     format!("{}\n\nStep: {}", run.plan.intent, step.label)
                 };
@@ -1310,6 +1489,285 @@ impl RunnerEngine {
                 retryable: false,
                 user_reason: "Couldn't finalize forwarded email processing state.".to_string(),
             })?;
+        Ok(())
+    }
+
+    fn upsert_daily_brief_sources(
+        connection: &mut Connection,
+        autopilot_id: &str,
+        sources: &[String],
+    ) -> Result<(), RunnerError> {
+        let sources_json =
+            serde_json::to_string(sources).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        let sources_hash = fnv1a_64_hex(&sources_json);
+        let current: Option<String> = connection
+            .query_row(
+                "SELECT sources_hash FROM daily_brief_sources WHERE autopilot_id = ?1",
+                params![autopilot_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        if current.as_deref() == Some(sources_hash.as_str()) {
+            return Ok(());
+        }
+
+        connection
+            .execute(
+                "
+                INSERT INTO daily_brief_sources (autopilot_id, sources_json, sources_hash, updated_at_ms)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(autopilot_id) DO UPDATE SET
+                  sources_json = excluded.sources_json,
+                  sources_hash = excluded.sources_hash,
+                  updated_at_ms = excluded.updated_at_ms
+                ",
+                params![autopilot_id, sources_json, sources_hash, now_ms()],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    fn read_daily_sources(inputs: &[String]) -> Vec<DailySourceResult> {
+        inputs
+            .iter()
+            .enumerate()
+            .map(|(idx, raw)| {
+                let source_id = format!("source_{}", idx + 1);
+                let trimmed = raw.trim().to_string();
+                if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    let host_allowlist = parse_scheme_host(&trimmed)
+                        .map(|(_, host)| vec![host])
+                        .unwrap_or_default();
+                    match fetch_allowlisted_text(&trimmed, &host_allowlist) {
+                        Ok(fetched) => DailySourceResult {
+                            source_id,
+                            url: fetched.url,
+                            text_excerpt: truncate_chars(&fetched.content_text, 1200),
+                            fetched_at_ms: fetched.fetched_at_ms,
+                            fetch_error: None,
+                        },
+                        Err(err) => DailySourceResult {
+                            source_id,
+                            url: trimmed,
+                            text_excerpt: String::new(),
+                            fetched_at_ms: now_ms(),
+                            fetch_error: Some(err.to_string()),
+                        },
+                    }
+                } else {
+                    DailySourceResult {
+                        source_id,
+                        url: "inline://text".to_string(),
+                        text_excerpt: truncate_chars(&trimmed, 1200),
+                        fetched_at_ms: now_ms(),
+                        fetch_error: None,
+                    }
+                }
+            })
+            .collect::<Vec<DailySourceResult>>()
+    }
+
+    fn persist_daily_sources_artifact(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        artifact: &DailySourcesArtifact,
+    ) -> Result<(), StepExecutionError> {
+        let payload = serde_json::to_string(artifact).map_err(|_| StepExecutionError {
+            retryable: false,
+            user_reason: "Couldn't store Daily Brief source artifact.".to_string(),
+        })?;
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'daily_sources', 'captured', ?4, ?5, ?5)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![make_id("outcome"), run.id, step.id, payload, now_ms()],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't save Daily Brief source artifact.".to_string(),
+            })?;
+        Ok(())
+    }
+
+    fn get_daily_sources_artifact(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Option<DailySourcesArtifact>, RunnerError> {
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'daily_sources' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        match payload {
+            Some(json) => {
+                let artifact =
+                    serde_json::from_str(&json).map_err(|e| RunnerError::Serde(e.to_string()))?;
+                Ok(Some(artifact))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn persist_daily_summary_artifact(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        artifact: &DailySummaryArtifact,
+    ) -> Result<(), StepExecutionError> {
+        let payload = serde_json::to_string(artifact).map_err(|_| StepExecutionError {
+            retryable: false,
+            user_reason: "Couldn't store Daily Brief summary artifact.".to_string(),
+        })?;
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'daily_summary', 'aggregated', ?4, ?5, ?5)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![make_id("outcome"), run.id, step.id, payload, now_ms()],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't save Daily Brief summary artifact.".to_string(),
+            })?;
+        Ok(())
+    }
+
+    fn get_daily_summary_artifact(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Option<DailySummaryArtifact>, RunnerError> {
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'daily_summary' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        match payload {
+            Some(json) => {
+                let artifact =
+                    serde_json::from_str(&json).map_err(|e| RunnerError::Serde(e.to_string()))?;
+                Ok(Some(artifact))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn daily_summary_exists(
+        connection: &Connection,
+        autopilot_id: &str,
+        sources_hash: &str,
+        content_hash: &str,
+    ) -> Result<bool, RunnerError> {
+        let found: Option<String> = connection
+            .query_row(
+                "SELECT id FROM daily_brief_history WHERE autopilot_id = ?1 AND sources_hash = ?2 AND content_hash = ?3 LIMIT 1",
+                params![autopilot_id, sources_hash, content_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(found.is_some())
+    }
+
+    fn insert_daily_summary_history(
+        connection: &Connection,
+        autopilot_id: &str,
+        run_id: &str,
+        artifact: &DailySummaryArtifact,
+    ) -> Result<(), RunnerError> {
+        let summary_json =
+            serde_json::to_string(artifact).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        connection
+            .execute(
+                "
+                INSERT OR IGNORE INTO daily_brief_history (
+                  id, autopilot_id, run_id, sources_hash, content_hash, summary_json, created_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ",
+                params![
+                    make_id("brief_hist"),
+                    autopilot_id,
+                    run_id,
+                    artifact.sources_hash,
+                    artifact.content_hash,
+                    summary_json,
+                    now_ms()
+                ],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    fn build_daily_brief_draft_prompt(
+        connection: &Connection,
+        run: &RunRecord,
+    ) -> Result<String, StepExecutionError> {
+        let summary = Self::get_daily_summary_artifact(connection, &run.id)
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't load Daily Brief summary for drafting.".to_string(),
+            })?
+            .ok_or_else(|| StepExecutionError {
+                retryable: false,
+                user_reason: "Daily Brief summary is missing for this run.".to_string(),
+            })?;
+
+        let bullets = summary
+            .bullet_points
+            .iter()
+            .map(|b| format!("- {b}"))
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        Ok(format!(
+            "Create a polished Daily Brief card.\nTitle: {}\nBullets:\n{}\nSummary:\n{}",
+            summary.title, bullets, summary.summary_text
+        ))
+    }
+
+    fn record_spend_by_sources(
+        connection: &mut Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        sources: &[DailySourceResult],
+        total_cents: i64,
+    ) -> Result<(), StepExecutionError> {
+        if sources.is_empty() || total_cents <= 0 {
+            return Ok(());
+        }
+        let count = sources.len() as i64;
+        let base = total_cents / count;
+        let mut remainder = total_cents % count;
+        for source in sources {
+            let mut cents = base;
+            if remainder > 0 {
+                cents += 1;
+                remainder -= 1;
+            }
+            let step_id = format!("{}:{}", step.id, source.source_id);
+            Self::record_spend(connection, &run.id, &step_id, "source_usage", cents, step)
+                .map_err(|e| StepExecutionError {
+                    retryable: false,
+                    user_reason: e.to_string(),
+                })?;
+        }
         Ok(())
     }
 
@@ -1761,7 +2219,8 @@ impl RunnerEngine {
         summary: &str,
         failure_reason: Option<&str>,
     ) -> Result<(), RunnerError> {
-        let receipt = build_receipt(run, terminal_state, summary, failure_reason);
+        let cost_breakdown = Self::cost_breakdown_for_run_in_tx(tx, &run.id)?;
+        let receipt = build_receipt(run, terminal_state, summary, failure_reason, cost_breakdown);
         let receipt_json =
             serde_json::to_string(&receipt).map_err(|e| RunnerError::Serde(e.to_string()))?;
         let now = now_ms();
@@ -1789,6 +2248,34 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         Ok(())
+    }
+
+    fn cost_breakdown_for_run_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        run_id: &str,
+    ) -> Result<Vec<ReceiptCostLineItem>, RunnerError> {
+        let mut stmt = tx
+            .prepare(
+                "SELECT step_id, entry_kind, amount_usd_cents
+                 FROM spend_ledger
+                 WHERE run_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok(ReceiptCostLineItem {
+                    step_id: row.get(0)?,
+                    entry_kind: row.get(1)?,
+                    amount_usd_cents: row.get(2)?,
+                })
+            })
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| RunnerError::Db(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     #[cfg(test)]
@@ -1884,6 +2371,7 @@ fn build_receipt(
     terminal_state: RunState,
     summary: &str,
     failure_reason: Option<&str>,
+    cost_breakdown: Vec<ReceiptCostLineItem>,
 ) -> RunReceipt {
     let recovery_options = match terminal_state {
         RunState::Succeeded => vec!["Review the outcome and keep this Autopilot running.".to_string()],
@@ -1904,6 +2392,7 @@ fn build_receipt(
     RunReceipt {
         schema_version: "1.0".to_string(),
         run_id: run.id.clone(),
+        autopilot_id: run.autopilot_id.clone(),
         provider_kind: run.provider_kind.as_str().to_string(),
         provider_tier: run.provider_tier.as_str().to_string(),
         terminal_state: terminal_state.as_str().to_string(),
@@ -1911,6 +2400,7 @@ fn build_receipt(
         failure_reason: failure_reason.map(redact_text),
         recovery_options,
         total_spend_usd_cents: run.usd_cents_actual,
+        cost_breakdown,
         redacted: true,
         created_at_ms: now_ms(),
     }
@@ -1942,6 +2432,59 @@ fn fnv1a_64_hex(input: &str) -> String {
     format!("{hash:016x}")
 }
 
+fn parse_daily_summary_output(raw: &str, sources_hash: &str) -> DailySummaryArtifact {
+    let lines = raw
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<&str>>();
+    let mut title = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Title:").map(|rest| rest.trim().to_string()))
+        .unwrap_or_else(|| "Daily Brief".to_string());
+    if title.is_empty() {
+        title = "Daily Brief".to_string();
+    }
+
+    let mut bullet_points = lines
+        .iter()
+        .filter_map(|line| {
+            if line.starts_with("- ") {
+                Some(line.trim_start_matches("- ").trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|b| !b.is_empty())
+        .collect::<Vec<String>>();
+    if bullet_points.is_empty() {
+        bullet_points = lines
+            .iter()
+            .take(4)
+            .map(|line| line.to_string())
+            .collect::<Vec<String>>();
+    }
+
+    let summary_text = lines.join(" ");
+    let content_hash = fnv1a_64_hex(&summary_text);
+    DailySummaryArtifact {
+        title,
+        bullet_points,
+        summary_text,
+        sources_hash: sources_hash.to_string(),
+        content_hash,
+    }
+}
+
+fn compute_daily_sources_hash(results: &[DailySourceResult]) -> String {
+    let material = results
+        .iter()
+        .map(|r| format!("{}|{}|{}|{}", r.source_id, r.url, r.text_excerpt, r.fetch_error.clone().unwrap_or_default()))
+        .collect::<Vec<String>>()
+        .join("\n");
+    fnv1a_64_hex(&material)
+}
+
 fn estimate_step_cost_usd_cents(run: &RunRecord, step: &PlanStep) -> i64 {
     if run.plan.intent.contains("simulate_cap_hard") {
         return 95;
@@ -1954,6 +2497,7 @@ fn estimate_step_cost_usd_cents(run: &RunRecord, step: &PlanStep) -> i64 {
     }
 
     match step.primitive {
+        PrimitiveId::AggregateDailySummary => 16,
         PrimitiveId::WriteOutcomeDraft => 12,
         PrimitiveId::WriteEmailDraft => 14,
         _ => 0,
@@ -2008,6 +2552,7 @@ mod tests {
             web_source_url: None,
             web_allowed_domains: Vec::new(),
             inbox_source_text: None,
+            daily_sources: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft],
             steps: vec![PlanStep {
                 id: "step_1".to_string(),
@@ -2489,6 +3034,7 @@ mod tests {
             web_source_url: None,
             web_allowed_domains: Vec::new(),
             inbox_source_text: Some("Subject: hi\nCan we meet tomorrow?".to_string()),
+            daily_sources: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft, PrimitiveId::WriteEmailDraft],
             steps: vec![PlanStep {
                 id: "step_1".to_string(),
@@ -2509,15 +3055,23 @@ mod tests {
     #[test]
     fn daily_brief_happy_path_shared_runtime() {
         let mut conn = setup_conn();
-        let plan = AutopilotPlan::from_intent(
+        let (url, server) = spawn_http_server(
+            vec!["<html><body><p>daily source content</p></body></html>".to_string()],
+            "text/html",
+        );
+        let mut plan = AutopilotPlan::from_intent(
             RecipeKind::DailyBrief,
             "Daily brief happy path".to_string(),
             ProviderId::Gemini,
         );
+        plan.daily_sources = vec![url];
         let run = RunnerEngine::start_run(&mut conn, "auto_brief", plan, "idem_brief", 2).expect("start");
 
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
+
+        let s2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 2");
+        assert_eq!(s2.state, RunState::Ready);
 
         let need_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
         assert_eq!(need_approval.state, RunState::NeedsApproval);
@@ -2525,9 +3079,164 @@ mod tests {
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
         let first = approvals.iter().find(|a| a.run_id == run.id).expect("approval exists");
         let done = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
-        assert_eq!(done.state, RunState::Ready);
+        assert_eq!(done.state, RunState::Succeeded);
+        server.join().expect("server join");
+    }
 
-        let final_tick = RunnerEngine::run_tick(&mut conn, &run.id).expect("final tick");
-        assert_eq!(final_tick.state, RunState::Succeeded);
+    #[test]
+    fn daily_brief_same_sources_same_content_dedupes_draft_creation() {
+        let mut conn = setup_conn();
+        let (url, server) = spawn_http_server(
+            vec![
+                "<html><body><p>same daily content</p></body></html>".to_string(),
+                "<html><body><p>same daily content</p></body></html>".to_string(),
+            ],
+            "text/html",
+        );
+
+        let mut plan1 = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "Daily brief dedupe one".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan1.daily_sources = vec![url.clone()];
+        let run1 = RunnerEngine::start_run(&mut conn, "auto_brief_dedupe", plan1, "idem_brief_dedupe_1", 2)
+            .expect("start1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s2");
+        let approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
+        assert_eq!(approval.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let first = approvals.iter().find(|a| a.run_id == run1.id).expect("approval");
+        let done = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let mut plan2 = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "Daily brief dedupe two".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan2.daily_sources = vec![url];
+        let run2 = RunnerEngine::start_run(&mut conn, "auto_brief_dedupe", plan2, "idem_brief_dedupe_2", 2)
+            .expect("start2");
+        let _ = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s1");
+        let r2s2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s2");
+        assert_eq!(r2s2.state, RunState::Succeeded);
+
+        let run2_drafts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'outcome_draft'",
+                params![run2.id],
+                |row| row.get(0),
+            )
+            .expect("count drafts run2");
+        assert_eq!(run2_drafts, 0);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn daily_brief_source_list_change_triggers_new_summary() {
+        let mut conn = setup_conn();
+        let (url, server) = spawn_http_server(
+            vec![
+                "<html><body><p>market update one</p></body></html>".to_string(),
+                "<html><body><p>market update one</p></body></html>".to_string(),
+            ],
+            "text/html",
+        );
+
+        let mut plan1 = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "Daily brief source change one".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan1.daily_sources = vec![url.clone()];
+        let run1 = RunnerEngine::start_run(&mut conn, "auto_brief_change", plan1, "idem_brief_change_1", 2)
+            .expect("start1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 s2");
+        let approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
+        assert_eq!(approval.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let first = approvals.iter().find(|a| a.run_id == run1.id).expect("approval");
+        let _ = RunnerEngine::approve(&mut conn, &first.id).expect("approve");
+
+        let mut plan2 = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "Daily brief source change two".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan2.daily_sources = vec![url, "Inline: include founder note".to_string()];
+        let run2 = RunnerEngine::start_run(&mut conn, "auto_brief_change", plan2, "idem_brief_change_2", 2)
+            .expect("start2");
+        let _ = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s1");
+        let r2s2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 s2");
+        assert_eq!(r2s2.state, RunState::Ready);
+        let approval2 = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 approval");
+        assert_eq!(approval2.state, RunState::NeedsApproval);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn daily_brief_handles_partial_fetch_failures_gracefully() {
+        let mut conn = setup_conn();
+        let (url, server) = spawn_http_server(
+            vec!["<html><body><p>reliable source</p></body></html>".to_string()],
+            "text/html",
+        );
+        let mut plan = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "Daily brief graceful source errors".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan.daily_sources = vec![url, "http://127.0.0.1:65530/unreachable".to_string()];
+        let run = RunnerEngine::start_run(&mut conn, "auto_brief_partial", plan, "idem_brief_partial", 2)
+            .expect("start");
+        let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("s1");
+        assert_eq!(s1.state, RunState::Ready);
+        let s2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("s2");
+        assert_eq!(s2.state, RunState::Ready);
+        let approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
+        assert_eq!(approval.state, RunState::NeedsApproval);
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn daily_brief_retry_does_not_double_charge_source_usage() {
+        let mut conn = setup_conn();
+        let (url, server) = spawn_http_server(
+            vec!["<html><body><p>retry source pass one</p></body></html>".to_string()],
+            "text/html",
+        );
+        let mut plan = AutopilotPlan::from_intent(
+            RecipeKind::DailyBrief,
+            "simulate_provider_retryable_failure".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan.daily_sources = vec![url];
+        let run = RunnerEngine::start_run(&mut conn, "auto_brief_retry", plan, "idem_brief_retry", 2)
+            .expect("start");
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("s1");
+        let retrying = RunnerEngine::run_tick(&mut conn, &run.id).expect("s2 retry");
+        assert_eq!(retrying.state, RunState::Retrying);
+
+        conn.execute(
+            "UPDATE runs SET next_retry_at_ms = 0 WHERE id = ?1",
+            params![run.id],
+        )
+        .expect("force due");
+        let resumed = RunnerEngine::resume_due_runs(&mut conn, 10).expect("resume");
+        assert_eq!(resumed[0].state, RunState::Ready);
+
+        let spend_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spend_ledger WHERE run_id = ?1 AND entry_kind = 'source_usage'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("count source usage rows");
+        assert_eq!(spend_rows, 1);
+        server.join().expect("server join");
+    
     }
 }
