@@ -48,6 +48,7 @@ fn start_recipe_run(
     autopilot_id: String,
     recipe: String,
     intent: String,
+    pasted_text: Option<String>,
     provider: String,
     idempotency_key: String,
     max_retries: Option<i64>,
@@ -55,7 +56,12 @@ fn start_recipe_run(
     let mut connection = open_connection(&state)?;
     let recipe_kind = parse_recipe(&recipe)?;
     let provider_id = parse_provider(&provider)?;
-    let plan = AutopilotPlan::from_intent(recipe_kind, intent, provider_id);
+    let mut plan = AutopilotPlan::from_intent(recipe_kind, intent, provider_id);
+    if let Some(text) = pasted_text {
+        if !text.trim().is_empty() {
+            plan.inbox_source_text = Some(text);
+        }
+    }
 
     RunnerEngine::start_run(
         &mut connection,

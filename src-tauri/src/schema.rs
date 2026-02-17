@@ -68,6 +68,7 @@ pub struct AutopilotPlan {
     pub provider: ProviderMetadata,
     pub web_source_url: Option<String>,
     pub web_allowed_domains: Vec<String>,
+    pub inbox_source_text: Option<String>,
     pub allowed_primitives: Vec<PrimitiveId>,
     pub steps: Vec<PlanStep>,
 }
@@ -103,6 +104,11 @@ impl AutopilotPlan {
             .and_then(extract_host)
             .map(|host| vec![host])
             .unwrap_or_default();
+        let inbox_source_text = if recipe == RecipeKind::InboxTriage {
+            Some(intent.clone())
+        } else {
+            None
+        };
         let allowed_primitives = vec![
             PrimitiveId::ReadWeb,
             PrimitiveId::ReadForwardedEmail,
@@ -147,7 +153,7 @@ impl AutopilotPlan {
                     id: "step_2".to_string(),
                     label: "Draft reply options and triage labels".to_string(),
                     primitive: PrimitiveId::WriteOutcomeDraft,
-                    requires_approval: true,
+                    requires_approval: false,
                     risk_tier: RiskTier::Medium,
                 },
                 PlanStep {
@@ -190,6 +196,7 @@ impl AutopilotPlan {
             provider,
             web_source_url,
             web_allowed_domains,
+            inbox_source_text,
             allowed_primitives,
             steps,
         }

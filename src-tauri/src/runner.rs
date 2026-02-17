@@ -21,6 +21,7 @@ const PER_RUN_HARD_CAP_USD_CENTS: i64 = 80;
 const DAILY_SOFT_CAP_USD_CENTS: i64 = 300;
 const DAILY_HARD_CAP_USD_CENTS: i64 = 500;
 const SOFT_CAP_APPROVAL_STEP_ID: &str = "__soft_cap__";
+const INBOX_TEXT_MAX_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -176,6 +177,23 @@ struct WebReadArtifact {
 struct WebSnapshotRecord {
     last_hash: String,
     last_text_excerpt: String,
+}
+
+#[derive(Debug, Clone)]
+struct InboxItemRecord {
+    id: String,
+    content_hash: String,
+    raw_text: String,
+    processed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InboxReadArtifact {
+    item_id: String,
+    content_hash: String,
+    text_excerpt: String,
+    created_at_ms: i64,
+    deduped_existing: bool,
 }
 
 enum CapDecision {
@@ -923,6 +941,8 @@ impl RunnerEngine {
                 let runtime = ProviderRuntime::default();
                 let model_input = if run.plan.recipe == RecipeKind::WebsiteMonitor {
                     Self::build_website_monitor_prompt(connection, run, step)?
+                } else if run.plan.recipe == RecipeKind::InboxTriage {
+                    Self::build_inbox_triage_prompt(connection, run, step)?
                 } else {
                     format!("{}\n\nStep: {}", run.plan.intent, step.label)
                 };
@@ -937,6 +957,11 @@ impl RunnerEngine {
 
                 let response = runtime.dispatch(&request).map_err(map_provider_error)?;
                 Self::persist_provider_output(connection, run, step, &response)?;
+                if run.plan.recipe == RecipeKind::InboxTriage
+                    && step.primitive == PrimitiveId::WriteEmailDraft
+                {
+                    Self::mark_inbox_item_processed(connection, run)?;
+                }
                 let fallback_estimate_cents = estimate_step_cost_usd_cents(run, step);
                 let actual_cents = std::cmp::max(
                     fallback_estimate_cents,
@@ -956,8 +981,69 @@ impl RunnerEngine {
                     failure_reason_override: None,
                 })
             }
-            PrimitiveId::ReadForwardedEmail
-            | PrimitiveId::ReadVaultFile
+            PrimitiveId::ReadForwardedEmail => {
+                let raw_input = run
+                    .plan
+                    .inbox_source_text
+                    .clone()
+                    .unwrap_or_else(|| run.plan.intent.clone());
+                let normalized = raw_input.trim().to_string();
+                if normalized.is_empty() {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason: "Paste forwarded email text before running Inbox Triage."
+                            .to_string(),
+                    });
+                }
+                if normalized.chars().count() > INBOX_TEXT_MAX_CHARS {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "Forwarded email text is too large. Paste a smaller message or trim quoted threads."
+                                .to_string(),
+                    });
+                }
+
+                let content_hash = fnv1a_64_hex(&normalized);
+                let item = Self::upsert_inbox_item(connection, &run.autopilot_id, &normalized, &content_hash)
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    })?;
+
+                let artifact = InboxReadArtifact {
+                    item_id: item.id.clone(),
+                    content_hash: item.content_hash.clone(),
+                    text_excerpt: truncate_chars(&item.raw_text, 1200),
+                    created_at_ms: now_ms(),
+                    deduped_existing: item.processed_at_ms.is_some(),
+                };
+                Self::persist_inbox_read_artifact(connection, run, step, &artifact)?;
+
+                if item.processed_at_ms.is_some() {
+                    return Ok(StepExecutionResult {
+                        user_message: "This forwarded email was already processed. No new draft created."
+                            .to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: Some(run.plan.steps.len() as i64),
+                        terminal_state_override: Some(RunState::Succeeded),
+                        terminal_summary_override: Some(
+                            "Email already processed. Existing draft remains available.".to_string(),
+                        ),
+                        failure_reason_override: None,
+                    });
+                }
+
+                Ok(StepExecutionResult {
+                    user_message: "Forwarded email captured for triage.".to_string(),
+                    actual_spend_usd_cents: 0,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
+            PrimitiveId::ReadVaultFile
             | PrimitiveId::ScheduleRun
             | PrimitiveId::NotifyUser => Ok(StepExecutionResult {
                 user_message: "Step completed.".to_string(),
@@ -1094,6 +1180,137 @@ impl RunnerEngine {
             previous,
             current
         ))
+    }
+
+    fn persist_inbox_read_artifact(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        artifact: &InboxReadArtifact,
+    ) -> Result<(), StepExecutionError> {
+        let payload = serde_json::to_string(artifact).map_err(|_| StepExecutionError {
+            retryable: false,
+            user_reason: "Couldn't store forwarded email artifact.".to_string(),
+        })?;
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'inbox_read', 'captured', ?4, ?5, ?5)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![make_id("outcome"), run.id, step.id, payload, now_ms()],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't save forwarded email artifact.".to_string(),
+            })?;
+        Ok(())
+    }
+
+    fn get_inbox_read_artifact(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Option<InboxReadArtifact>, RunnerError> {
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'inbox_read' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        match payload {
+            Some(json) => {
+                let artifact =
+                    serde_json::from_str(&json).map_err(|e| RunnerError::Serde(e.to_string()))?;
+                Ok(Some(artifact))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn build_inbox_triage_prompt(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+    ) -> Result<String, StepExecutionError> {
+        let artifact = Self::get_inbox_read_artifact(connection, &run.id)
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't load forwarded email for drafting.".to_string(),
+            })?
+            .ok_or_else(|| StepExecutionError {
+                retryable: false,
+                user_reason: "Forwarded email content is missing for this run.".to_string(),
+            })?;
+        let task = if step.primitive == PrimitiveId::WriteEmailDraft {
+            "Draft a clear, concise reply email."
+        } else {
+            "Summarize the email and suggest triage labels."
+        };
+        Ok(format!(
+            "Intent: {}\nTask: {}\nForwarded email:\n{}\n",
+            run.plan.intent, task, artifact.text_excerpt
+        ))
+    }
+
+    fn upsert_inbox_item(
+        connection: &mut Connection,
+        autopilot_id: &str,
+        raw_text: &str,
+        content_hash: &str,
+    ) -> Result<InboxItemRecord, RunnerError> {
+        let now = now_ms();
+        connection
+            .execute(
+                "
+                INSERT OR IGNORE INTO inbox_items (id, autopilot_id, content_hash, raw_text, created_at_ms, processed_at_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+                ",
+                params![make_id("inbox"), autopilot_id, content_hash, raw_text, now],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        connection
+            .query_row(
+                "SELECT id, content_hash, raw_text, processed_at_ms FROM inbox_items WHERE content_hash = ?1",
+                params![content_hash],
+                |row| {
+                    Ok(InboxItemRecord {
+                        id: row.get(0)?,
+                        content_hash: row.get(1)?,
+                        raw_text: row.get(2)?,
+                        processed_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    fn mark_inbox_item_processed(connection: &Connection, run: &RunRecord) -> Result<(), StepExecutionError> {
+        let artifact = Self::get_inbox_read_artifact(connection, &run.id)
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't load forwarded email record.".to_string(),
+            })?
+            .ok_or_else(|| StepExecutionError {
+                retryable: false,
+                user_reason: "Forwarded email record is missing.".to_string(),
+            })?;
+
+        connection
+            .execute(
+                "UPDATE inbox_items SET processed_at_ms = COALESCE(processed_at_ms, ?1) WHERE id = ?2",
+                params![now_ms(), artifact.item_id],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: false,
+                user_reason: "Couldn't finalize forwarded email processing state.".to_string(),
+            })?;
+        Ok(())
     }
 
     fn get_web_snapshot(
@@ -1716,6 +1933,15 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
     input.chars().take(max_chars).collect::<String>()
 }
 
+fn fnv1a_64_hex(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn estimate_step_cost_usd_cents(run: &RunRecord, step: &PlanStep) -> i64 {
     if run.plan.intent.contains("simulate_cap_hard") {
         return 95;
@@ -1776,11 +2002,12 @@ mod tests {
     fn plan_with_single_write_step(intent: &str) -> AutopilotPlan {
         AutopilotPlan {
             schema_version: "1.0".to_string(),
-            recipe: RecipeKind::InboxTriage,
+            recipe: RecipeKind::DailyBrief,
             intent: intent.to_string(),
             provider: crate::schema::ProviderMetadata::from_provider_id(ProviderId::OpenAi),
             web_source_url: None,
             web_allowed_domains: Vec::new(),
+            inbox_source_text: None,
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft],
             steps: vec![PlanStep {
                 id: "step_1".to_string(),
@@ -2146,30 +2373,137 @@ mod tests {
     #[test]
     fn inbox_triage_happy_path_shared_runtime() {
         let mut conn = setup_conn();
-        let plan = AutopilotPlan::from_intent(
+        let mut plan = AutopilotPlan::from_intent(
             RecipeKind::InboxTriage,
             "Inbox triage happy path".to_string(),
             ProviderId::Anthropic,
+        );
+        plan.inbox_source_text = Some(
+            "Subject: Vendor follow-up\nCan you confirm timeline for contract signature?".to_string(),
         );
         let run = RunnerEngine::start_run(&mut conn, "auto_inbox", plan, "idem_inbox", 2).expect("start");
 
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
 
-        let need_approval_1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
-        assert_eq!(need_approval_1.state, RunState::NeedsApproval);
+        let s2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 2");
+        assert_eq!(s2.state, RunState::Ready);
 
-        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
-        let first = approvals.iter().find(|a| a.run_id == run.id).expect("first approval");
-        let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
-        assert_eq!(after_first.state, RunState::Ready);
-
-        let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
         assert_eq!(need_approval_2.state, RunState::NeedsApproval);
         let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
-        let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("second approval");
-        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
+        let second = approvals_2.iter().find(|a| a.run_id == run.id).expect("approval");
+        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
+    }
+
+    #[test]
+    fn inbox_triage_dedupes_identical_pasted_content() {
+        let mut conn = setup_conn();
+        let pasted = "Subject: Question\nCould you review this deck before Friday?".to_string();
+
+        let mut plan_first = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Inbox triage first".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan_first.inbox_source_text = Some(pasted.clone());
+        let run1 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_inbox_dedupe",
+            plan_first,
+            "idem_inbox_dedupe_1",
+            2,
+        )
+        .expect("start1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step2");
+        let need_approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
+        assert_eq!(need_approval.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
+        let approval = approvals.iter().find(|a| a.run_id == run1.id).expect("approval");
+        let done = RunnerEngine::approve(&mut conn, &approval.id).expect("approve");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let mut plan_second = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Inbox triage second".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan_second.inbox_source_text = Some(pasted);
+        let run2 = RunnerEngine::start_run(
+            &mut conn,
+            "auto_inbox_dedupe",
+            plan_second,
+            "idem_inbox_dedupe_2",
+            2,
+        )
+        .expect("start2");
+        let second_tick = RunnerEngine::run_tick(&mut conn, &run2.id).expect("run2 step1");
+        assert_eq!(second_tick.state, RunState::Succeeded);
+
+        let draft_count_run2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'email_draft'",
+                params![run2.id],
+                |row| row.get(0),
+            )
+            .expect("count drafts run2");
+        assert_eq!(draft_count_run2, 0);
+
+        let inbox_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM inbox_items WHERE autopilot_id = 'auto_inbox_dedupe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count inbox rows");
+        assert_eq!(inbox_rows, 1);
+    }
+
+    #[test]
+    fn inbox_triage_size_limit_is_enforced() {
+        let mut conn = setup_conn();
+        let mut plan = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Inbox triage large".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan.inbox_source_text = Some("X".repeat(25_000));
+        let run = RunnerEngine::start_run(&mut conn, "auto_inbox_large", plan, "idem_inbox_large", 2)
+            .expect("start");
+        let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(failed.state, RunState::Failed);
+        let reason = failed.failure_reason.expect("reason");
+        assert!(reason.contains("too large"));
+    }
+
+    #[test]
+    fn inbox_triage_denies_read_when_primitive_not_allowlisted() {
+        let mut conn = setup_conn();
+        let plan = AutopilotPlan {
+            schema_version: "1.0".to_string(),
+            recipe: RecipeKind::InboxTriage,
+            intent: "Inbox triage deny test".to_string(),
+            provider: crate::schema::ProviderMetadata::from_provider_id(ProviderId::OpenAi),
+            web_source_url: None,
+            web_allowed_domains: Vec::new(),
+            inbox_source_text: Some("Subject: hi\nCan we meet tomorrow?".to_string()),
+            allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft, PrimitiveId::WriteEmailDraft],
+            steps: vec![PlanStep {
+                id: "step_1".to_string(),
+                label: "Read forwarded email".to_string(),
+                primitive: PrimitiveId::ReadForwardedEmail,
+                requires_approval: false,
+                risk_tier: RiskTier::Low,
+            }],
+        };
+        let run = RunnerEngine::start_run(&mut conn, "auto_inbox_deny", plan, "idem_inbox_deny", 1)
+            .expect("start");
+        let failed = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(failed.state, RunState::Failed);
+        let reason = failed.failure_reason.expect("reason");
+        assert_eq!(reason, "This action isn't allowed in Terminus yet.");
     }
 
     #[test]
