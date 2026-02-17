@@ -135,6 +135,16 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
             );
 
+            CREATE TABLE IF NOT EXISTS inbox_items (
+              id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL UNIQUE,
+              raw_text TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              processed_at_ms INTEGER,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
