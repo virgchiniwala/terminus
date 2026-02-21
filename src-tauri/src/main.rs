@@ -68,6 +68,8 @@ struct RunnerCycleSummary {
     started_runs: usize,
     failed: usize,
     resumed_due_runs: usize,
+    missed_runs_detected: i64,
+    catch_up_cycles_run: i64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -304,6 +306,7 @@ fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary
     let mut connection = open_connection(&state)?;
     let mut control = db::get_runner_control(&connection)?;
     let now = now_ms();
+    let poll_ms = control.watcher_poll_seconds.saturating_mul(1000);
 
     let mut summary = RunnerCycleSummary {
         watcher_status: "idle".to_string(),
@@ -313,28 +316,46 @@ fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary
         started_runs: 0,
         failed: 0,
         resumed_due_runs: 0,
+        missed_runs_detected: 0,
+        catch_up_cycles_run: 0,
     };
+
+    let missed_cycles = compute_missed_cycles(control.watcher_last_tick_ms, now, poll_ms);
+    if missed_cycles > 0 {
+        summary.missed_runs_detected = missed_cycles;
+        control.missed_runs_count = missed_cycles;
+    }
 
     if !control.watcher_enabled {
         summary.watcher_status = "paused".to_string();
     } else if let Some(last_tick) = control.watcher_last_tick_ms {
-        if now - last_tick < control.watcher_poll_seconds.saturating_mul(1000) {
+        if now - last_tick < poll_ms {
             summary.watcher_status = "throttled".to_string();
         } else {
+            let catch_up_cycles = missed_cycles.min(3);
+            for _ in 0..catch_up_cycles {
+                run_watchers(&mut connection, &control, &mut summary)?;
+                summary.catch_up_cycles_run += 1;
+            }
             run_watchers(&mut connection, &control, &mut summary)?;
             control.watcher_last_tick_ms = Some(now);
+            control.missed_runs_count = 0;
             db::upsert_runner_control(&connection, &control)?;
             summary.watcher_status = "ran".to_string();
         }
     } else {
         run_watchers(&mut connection, &control, &mut summary)?;
         control.watcher_last_tick_ms = Some(now);
+        control.missed_runs_count = 0;
         db::upsert_runner_control(&connection, &control)?;
         summary.watcher_status = "ran".to_string();
     }
 
     let resumed = RunnerEngine::resume_due_runs(&mut connection, 20).map_err(|e| e.to_string())?;
     summary.resumed_due_runs = resumed.len();
+    if summary.watcher_status == "throttled" && control.missed_runs_count > 0 {
+        db::upsert_runner_control(&connection, &control)?;
+    }
     Ok(summary)
 }
 
@@ -424,6 +445,40 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn compute_missed_cycles(last_tick_ms: Option<i64>, now_ms_value: i64, poll_ms: i64) -> i64 {
+    if poll_ms <= 0 {
+        return 0;
+    }
+    let Some(last_tick) = last_tick_ms else {
+        return 0;
+    };
+    if now_ms_value <= last_tick {
+        return 0;
+    }
+    let elapsed = now_ms_value - last_tick;
+    if elapsed <= poll_ms {
+        return 0;
+    }
+    (elapsed / poll_ms) - 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_missed_cycles;
+
+    #[test]
+    fn compute_missed_cycles_returns_zero_when_within_interval() {
+        assert_eq!(compute_missed_cycles(Some(1_000), 1_900, 1_000), 0);
+        assert_eq!(compute_missed_cycles(Some(1_000), 2_000, 1_000), 0);
+    }
+
+    #[test]
+    fn compute_missed_cycles_returns_expected_overage() {
+        assert_eq!(compute_missed_cycles(Some(1_000), 3_500, 1_000), 1);
+        assert_eq!(compute_missed_cycles(Some(1_000), 6_100, 1_000), 4);
+    }
 }
 
 #[tauri::command]
