@@ -13,7 +13,11 @@ use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
 use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 #[derive(Default)]
@@ -92,6 +96,13 @@ fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connectio
         .clone()
         .ok_or_else(|| "Database is not initialized yet".to_string())?;
 
+    let mut connection = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    db::bootstrap_schema(&mut connection)?;
+    Ok(connection)
+}
+
+fn open_connection_from_path(db_path: &PathBuf) -> Result<rusqlite::Connection, String> {
     let mut connection = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open sqlite db: {e}"))?;
     db::bootstrap_schema(&mut connection)?;
@@ -304,7 +315,27 @@ fn update_runner_control(
 #[tauri::command]
 fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary, String> {
     let mut connection = open_connection(&state)?;
+    tick_runner_cycle_internal(&mut connection, false)
+}
+
+fn tick_runner_cycle_internal(
+    connection: &mut rusqlite::Connection,
+    require_background_enabled: bool,
+) -> Result<RunnerCycleSummary, String> {
     let mut control = db::get_runner_control(&connection)?;
+    if require_background_enabled && !control.background_enabled {
+        return Ok(RunnerCycleSummary {
+            watcher_status: "background_off".to_string(),
+            providers_polled: 0,
+            fetched: 0,
+            deduped: 0,
+            started_runs: 0,
+            failed: 0,
+            resumed_due_runs: 0,
+            missed_runs_detected: 0,
+            catch_up_cycles_run: 0,
+        });
+    }
     let now = now_ms();
     let poll_ms = control.watcher_poll_seconds.saturating_mul(1000);
 
@@ -334,29 +365,109 @@ fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary
         } else {
             let catch_up_cycles = missed_cycles.min(3);
             for _ in 0..catch_up_cycles {
-                run_watchers(&mut connection, &control, &mut summary)?;
+                run_watchers(connection, &control, &mut summary)?;
                 summary.catch_up_cycles_run += 1;
             }
-            run_watchers(&mut connection, &control, &mut summary)?;
+            run_watchers(connection, &control, &mut summary)?;
             control.watcher_last_tick_ms = Some(now);
             control.missed_runs_count = 0;
             db::upsert_runner_control(&connection, &control)?;
             summary.watcher_status = "ran".to_string();
         }
     } else {
-        run_watchers(&mut connection, &control, &mut summary)?;
+        run_watchers(connection, &control, &mut summary)?;
         control.watcher_last_tick_ms = Some(now);
         control.missed_runs_count = 0;
         db::upsert_runner_control(&connection, &control)?;
         summary.watcher_status = "ran".to_string();
     }
 
-    let resumed = RunnerEngine::resume_due_runs(&mut connection, 20).map_err(|e| e.to_string())?;
+    let resumed = RunnerEngine::resume_due_runs(connection, 20).map_err(|e| e.to_string())?;
     summary.resumed_due_runs = resumed.len();
     if summary.watcher_status == "throttled" && control.missed_runs_count > 0 {
         db::upsert_runner_control(&connection, &control)?;
     }
     Ok(summary)
+}
+
+fn spawn_background_cycle_thread(app: &tauri::AppHandle, db_path: PathBuf) {
+    let app_handle = app.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(10));
+        let app_state = app_handle.state::<AppState>();
+        if app_state
+            .db_path
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_none()
+        {
+            continue;
+        }
+        let mut connection = match open_connection_from_path(&db_path) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        let _ = tick_runner_cycle_internal(&mut connection, true);
+    });
+}
+
+fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
+    let open_item = MenuItemBuilder::with_id("tray_open", "Open Terminus")
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    let run_item = MenuItemBuilder::with_id("tray_run_now", "Run Cycle Now")
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    let quit_item = MenuItemBuilder::with_id("tray_quit", "Quit")
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&open_item, &run_item, &quit_item])
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let app_handle = app.clone();
+    TrayIconBuilder::new()
+        .menu(&menu)
+        .on_menu_event(move |_, event: MenuEvent| match event.id().as_ref() {
+            "tray_open" => {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "tray_run_now" => {
+                let app_state = app_handle.state::<AppState>();
+                let db_path = app_state.db_path.lock().ok().and_then(|g| g.clone());
+                if let Some(path) = db_path {
+                    if let Ok(mut connection) = open_connection_from_path(&path) {
+                        let _ = tick_runner_cycle_internal(&mut connection, false);
+                    }
+                }
+            }
+            "tray_quit" => {
+                app_handle.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(move |tray: &TrayIcon, event: TrayIconEvent| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -701,9 +812,27 @@ fn main() {
             let db_path = db::bootstrap_sqlite(app.handle())?;
             let state = app.state::<AppState>();
             if let Ok(mut guard) = state.db_path.lock() {
-                *guard = Some(db_path);
+                *guard = Some(db_path.clone());
             }
+            install_tray(app.handle())?;
+            spawn_background_cycle_thread(app.handle(), db_path);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app_state = window.state::<AppState>();
+                let db_path = app_state.db_path.lock().ok().and_then(|g| g.clone());
+                if let Some(path) = db_path {
+                    if let Ok(connection) = open_connection_from_path(&path) {
+                        if let Ok(control) = db::get_runner_control(&connection) {
+                            if control.background_enabled {
+                                api.prevent_close();
+                                let _ = window.hide();
+                            }
+                        }
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_home_snapshot,
