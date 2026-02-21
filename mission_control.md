@@ -1,9 +1,9 @@
 # Mission Control — Terminus
-Last updated: 2026-02-17
+Last updated: 2026-02-18
 
 ## Current State
 - Mode: Day
-- Branch: `codex/daily-brief-real-preset`
+- Branch: `codex/learning-layer-hardening`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -13,6 +13,7 @@ Last updated: 2026-02-17
 - Compose-first outbound behavior
 - Secrets only in OS keychain
 - Shared runtime for all three MVP presets
+- Intent Bar may be conversational input, but outputs must always resolve to objects (run draft or autopilot draft)
 
 ## Provider Policy
 - Supported: OpenAI, Anthropic
@@ -20,7 +21,7 @@ Last updated: 2026-02-17
 
 ## MVP Presets (Shared Runtime)
 1. Website Monitor
-2. Inbox Triage (paste/forward only)
+2. Inbox Triage (moving to real always-on inbox watching)
 3. Daily Brief
 
 ## Runtime Baseline (Shipped)
@@ -33,27 +34,29 @@ Last updated: 2026-02-17
 - Learning Layer: Evaluate -> Adapt -> Memory
 
 ## Now
-### T1008 — Documentation Unification
-Owner: Loki + Jarvis
-Status: In Progress
+### P0.1 / P0.2 / P0.3 — Universal Intake Foundations
+Owner: Friday + Loki
+Status: Done
 Scope:
-- unify strategy/architecture/constraints docs
-- add canonical docs for principles, primitives, schema, learning, differentiation, user stories, and future extension lane
-- create docs index for future agents
+- global Intent Bar entrypoint (`⌘K`) in desktop shell
+- intent classification to `one_off_run` vs `draft_autopilot`
+- calm Draft Plan Card preview (`will read / will create / approvals / spend / run now`)
 Acceptance:
-- consistent terminology and constraints
-- explicit MVP vs future separation
-- no contradictory guidance on scope, providers, or runtime behavior
+- intent flow resolves to object drafts (no chat-thread end state)
+- one-line classifier reason shown and overridable by rerun intent
+- primary CTA starts run via existing tick runner path
 Verification:
-- manual consistency pass + grep for stale contradictions
+- `cargo test`
+- `npm run build`
+- manual `⌘K` flow test in app
 
 ## Next
-- T1009: UI wiring for Learning Layer visibility in object surfaces (no jargon)
-- T1010: schedule suggestion UX after first successful run
+1. P0.4: Gmail + M365 OAuth connection (keychain-backed tokens)
+2. P0.5: inbox watcher + dedupe + throttling while app open/background
+3. P0.6: Safe Effector email send/reply policy gates + typed approval payloads
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
 - plugin marketplace
 - OpenClaw compatibility
 - hosted always-on runner
-- IMAP/OAuth inbox sync
