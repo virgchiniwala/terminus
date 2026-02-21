@@ -37,24 +37,24 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### P0.6 / P0.7 — Provider-backed send + triage execution
+### P0.8 / P0.9 — Runner cadence + missed-run reconciliation
 Owner: Friday + Loki
 Status: Done (slice 1)
 Scope:
-- replace simulated send with provider-backed execution seam
-- add inbox triage execution primitive with typed approval payload
-- persist triage/send execution receipts with idempotent outcome writes
+- detect missed runner cycles when app was inactive or Mac was asleep/offline
+- run bounded catch-up cycles before current watcher tick
+- persist missed-run count in runner control and surface explicit runner truth on Home
 Acceptance:
-- send executes via connected provider context (Gmail/Microsoft) with policy gates
-- triage execution is approval-gated and writes explicit outcome receipt
-- tests remain deterministic in mock mode and pass in CI/local
+- catch-up remains bounded (max 3 cycles per tick)
+- due runs continue to resume via existing tick boundary
+- Home clearly shows missed count and catch-up status line
 Verification:
 - `cargo test`
 - `npm run build`
-- manual: inbox run -> triage approval -> draft approval -> send approval
+- manual: set long watcher interval gap -> run `tick_runner_cycle` -> verify missed count/status
 
 ## Next
-1. P0.8/P0.9: menubar/background runner with missed-run reconciliation
+1. P0.8 continuation: menubar/background agent execution while window is closed
 2. P0.10+: scoped Guide, Voice object, and rule extraction without chat-first drift
 3. P1.x: provider routing/caching hardening and security tightening
 

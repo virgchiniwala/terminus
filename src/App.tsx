@@ -41,6 +41,8 @@ function normalizeSnapshot(raw: unknown): HomeSnapshot {
       watcher_enabled?: boolean;
       watcherLastTickMs?: number | null;
       watcher_last_tick_ms?: number | null;
+      missedRunsCount?: number;
+      missed_runs_count?: number;
     };
   };
   return {
@@ -52,6 +54,8 @@ function normalizeSnapshot(raw: unknown): HomeSnapshot {
       watcherEnabled: value.runner?.watcherEnabled ?? value.runner?.watcher_enabled ?? true,
       watcherLastTickMs:
         value.runner?.watcherLastTickMs ?? value.runner?.watcher_last_tick_ms ?? null,
+      missedRunsCount:
+        value.runner?.missedRunsCount ?? value.runner?.missed_runs_count ?? 0,
     },
   };
 }
@@ -229,6 +233,7 @@ export function App() {
             payload.microsoft_autopilot_id ??
             "auto_inbox_watch_microsoft365",
           watcherLastTickMs: payload.watcherLastTickMs ?? payload.watcher_last_tick_ms ?? null,
+          missedRunsCount: payload.missedRunsCount ?? payload.missed_runs_count ?? 0,
         });
       })
       .catch((err) => {
@@ -549,6 +554,7 @@ export function App() {
           <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
           <p>{snapshot.runner.statusLine}</p>
           <p>Pending runs: {snapshot.runner.backlogCount ?? 0}</p>
+          <p>Missed while asleep/offline: {snapshot.runner.missedRunsCount ?? 0}</p>
         </section>
 
         <section className="connection-panel" aria-label="Email connections">

@@ -18,6 +18,7 @@ pub struct RunnerStatus {
     pub backlog_count: i64,
     pub watcher_enabled: bool,
     pub watcher_last_tick_ms: Option<i64>,
+    pub missed_runs_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +37,7 @@ pub struct RunnerControlRecord {
     pub gmail_autopilot_id: String,
     pub microsoft_autopilot_id: String,
     pub watcher_last_tick_ms: Option<i64>,
+    pub missed_runs_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +369,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               gmail_autopilot_id TEXT NOT NULL DEFAULT 'auto_inbox_watch_gmail',
               microsoft_autopilot_id TEXT NOT NULL DEFAULT 'auto_inbox_watch_microsoft365',
               watcher_last_tick_ms INTEGER,
+              missed_runs_count INTEGER NOT NULL DEFAULT 0,
               updated_at_ms INTEGER NOT NULL
             );
 
@@ -462,6 +465,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     )?;
     ensure_column(connection, "email_ingest_events", "provider_thread_id", "TEXT")?;
     ensure_column(connection, "email_ingest_events", "sender_email", "TEXT")?;
+    ensure_column(
+        connection,
+        "runner_control",
+        "missed_runs_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(
         connection,
         "web_snapshots",
@@ -576,8 +585,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .execute(
             "INSERT OR IGNORE INTO runner_control (
                singleton_id, background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items,
-               gmail_autopilot_id, microsoft_autopilot_id, updated_at_ms
-             ) VALUES (1, 0, 1, 60, 10, 'auto_inbox_watch_gmail', 'auto_inbox_watch_microsoft365', strftime('%s','now') * 1000)",
+               gmail_autopilot_id, microsoft_autopilot_id, missed_runs_count, updated_at_ms
+             ) VALUES (1, 0, 1, 60, 10, 'auto_inbox_watch_gmail', 'auto_inbox_watch_microsoft365', 0, strftime('%s','now') * 1000)",
             [],
         )
         .map_err(|e| format!("Failed to seed runner control: {e}"))?;
@@ -784,7 +793,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
         )
         .map_err(|e| format!("Failed to count run backlog: {e}"))?;
 
-    let status_line = if runner_control.watcher_enabled {
+    let base_line = if runner_control.watcher_enabled {
         if runner_control.background_enabled {
             "Autopilots run while your Mac is awake. Inbox watcher is active."
         } else {
@@ -794,6 +803,14 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
         "Autopilots run while your Mac is awake. Inbox watcher is paused."
     } else {
         "Autopilots run only while the app is open. Inbox watcher is paused."
+    };
+    let status_line = if runner_control.missed_runs_count > 0 {
+        format!(
+            "{} {} runs were missed while your Mac was asleep/offline. Catch-up is in progress.",
+            base_line, runner_control.missed_runs_count
+        )
+    } else {
+        base_line.to_string()
     };
 
     Ok(HomeSnapshot {
@@ -829,10 +846,11 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             } else {
                 "app_open".into()
             },
-            status_line: status_line.to_string(),
+            status_line,
             backlog_count,
             watcher_enabled: runner_control.watcher_enabled,
             watcher_last_tick_ms: runner_control.watcher_last_tick_ms,
+            missed_runs_count: runner_control.missed_runs_count,
         },
     })
 }
@@ -840,7 +858,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
 pub fn get_runner_control(connection: &Connection) -> Result<RunnerControlRecord, String> {
     connection
         .query_row(
-            "SELECT background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items, gmail_autopilot_id, microsoft_autopilot_id, watcher_last_tick_ms
+            "SELECT background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items, gmail_autopilot_id, microsoft_autopilot_id, watcher_last_tick_ms, missed_runs_count
              FROM runner_control WHERE singleton_id = 1",
             [],
             |row| {
@@ -852,6 +870,7 @@ pub fn get_runner_control(connection: &Connection) -> Result<RunnerControlRecord
                     gmail_autopilot_id: row.get(4)?,
                     microsoft_autopilot_id: row.get(5)?,
                     watcher_last_tick_ms: row.get(6)?,
+                    missed_runs_count: row.get(7)?,
                 })
             },
         )
@@ -872,6 +891,7 @@ pub fn upsert_runner_control(
                  gmail_autopilot_id = ?5,
                  microsoft_autopilot_id = ?6,
                  watcher_last_tick_ms = ?7,
+                 missed_runs_count = ?8,
                  updated_at_ms = strftime('%s','now') * 1000
              WHERE singleton_id = 1",
             params![
@@ -881,7 +901,8 @@ pub fn upsert_runner_control(
                 payload.watcher_max_items,
                 payload.gmail_autopilot_id,
                 payload.microsoft_autopilot_id,
-                payload.watcher_last_tick_ms
+                payload.watcher_last_tick_ms,
+                payload.missed_runs_count
             ],
         )
         .map_err(|e| format!("Failed to update runner control: {e}"))?;

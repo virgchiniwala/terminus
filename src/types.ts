@@ -15,6 +15,7 @@ export interface HomeSnapshot {
     backlogCount?: number;
     watcherEnabled?: boolean;
     watcherLastTickMs?: number | null;
+    missedRunsCount?: number;
   };
 }
 
@@ -60,6 +61,7 @@ export interface RunnerControlRecord {
   gmailAutopilotId: string;
   microsoftAutopilotId: string;
   watcherLastTickMs: number | null;
+  missedRunsCount: number;
 }
 
 export interface AutopilotSendPolicyRecord {

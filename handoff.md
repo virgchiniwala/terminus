@@ -42,6 +42,10 @@ Last updated: 2026-02-22
   - new `triage.email` primitive in plan schema and runtime
   - inbox triage step is approval-gated and executes provider-backed archive action
   - triage execution receipt persisted as `email_triage_executed`
+- Runner cadence + reconciliation:
+  - missed runner cycles are detected from `watcher_last_tick_ms` and poll interval
+  - bounded catch-up loop runs up to 3 cycles before current tick execution
+  - runner state persists `missed_runs_count` and Home shows explicit missed/offline truth
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -52,7 +56,7 @@ Last updated: 2026-02-22
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P0 background runner + due-run scheduler + missed-run reconciliation
+  1. P0 background runner continuation (menu bar/window-closed execution path)
   2. P0 scoped Guide/Voice/Rules without chat-first drift
   3. P1 provider routing/caching and security hardening
 
