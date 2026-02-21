@@ -137,6 +137,136 @@ button {
   color: #526176;
 }
 
+.intent-open-button {
+  margin-top: 10px;
+  background: #edf4ff;
+  border-color: #b9cce7;
+}
+
+.run-notice {
+  margin-bottom: 14px;
+  border: 1px solid #cfe1c5;
+  background: #f5fbef;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.run-notice p {
+  margin: 0;
+  color: #2f5b28;
+}
+
+.intent-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 18, 31, 0.35);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  z-index: 120;
+}
+
+.intent-card {
+  width: min(860px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid #d7dfeb;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.intent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.intent-header h2 {
+  margin: 0;
+}
+
+.intent-close {
+  background: transparent;
+}
+
+.intent-help {
+  margin: 8px 0 10px;
+  color: #56647a;
+}
+
+.intent-input {
+  width: 100%;
+  min-height: 88px;
+  border: 1px solid #ccd7e6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  resize: vertical;
+  font: inherit;
+}
+
+.intent-actions {
+  margin-top: 10px;
+}
+
+.intent-primary {
+  background: #eaf2ff;
+  border-color: #b8cae5;
+  font-weight: 600;
+}
+
+.intent-error {
+  color: #8a3324;
+  margin-top: 8px;
+}
+
+.draft-preview {
+  margin-top: 14px;
+  border-top: 1px solid #e0e7f1;
+  padding-top: 14px;
+}
+
+.draft-kind {
+  margin: 0;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  color: #5f6f86;
+  letter-spacing: 0.05em;
+}
+
+.draft-reason {
+  margin: 8px 0 4px;
+}
+
+.draft-spend {
+  margin: 0 0 12px;
+  color: #4f6278;
+}
+
+.draft-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.draft-columns h3 {
+  margin: 0 0 6px;
+  font-size: 0.92rem;
+}
+
+.draft-columns ul {
+  margin: 0;
+  padding-left: 16px;
+  color: #4f6278;
+}
+
+@media (max-width: 760px) {
+  .draft-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Loading State */
 .loading-state {
   display: flex;

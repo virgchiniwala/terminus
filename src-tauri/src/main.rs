@@ -8,13 +8,40 @@ mod transport;
 mod web;
 
 use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
-use schema::{AutopilotPlan, ProviderId, RecipeKind};
+use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
+use serde::Serialize;
 use std::path::PathBuf;
 use tauri::Manager;
 
 #[derive(Default)]
 struct AppState {
     db_path: std::sync::Mutex<Option<PathBuf>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum IntentDraftKind {
+    OneOffRun,
+    DraftAutopilot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntentDraftPreview {
+    reads: Vec<String>,
+    writes: Vec<String>,
+    approvals_required: Vec<String>,
+    estimated_spend: String,
+    primary_cta: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntentDraftResponse {
+    kind: IntentDraftKind,
+    classification_reason: String,
+    plan: AutopilotPlan,
+    preview: IntentDraftPreview,
 }
 
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
@@ -196,6 +223,135 @@ fn parse_provider(value: &str) -> Result<ProviderId, String> {
     }
 }
 
+fn classify_intent_kind(intent: &str) -> (IntentDraftKind, String) {
+    let normalized = intent.to_ascii_lowercase();
+    let recurring_hints = [
+        "every",
+        "daily",
+        "weekly",
+        "monitor",
+        "watch",
+        "always",
+        "whenever",
+        "keep an eye",
+    ];
+    let should_recur = recurring_hints.iter().any(|hint| normalized.contains(hint))
+        || normalized.contains("inbox");
+
+    if should_recur {
+        (
+            IntentDraftKind::DraftAutopilot,
+            "Looks recurring, so Terminus prepared a Draft Autopilot.".to_string(),
+        )
+    } else {
+        (
+            IntentDraftKind::OneOffRun,
+            "Looks one-time, so Terminus prepared a one-off Run draft.".to_string(),
+        )
+    }
+}
+
+fn classify_recipe(intent: &str) -> RecipeKind {
+    let normalized = intent.to_ascii_lowercase();
+    if normalized.contains("inbox")
+        || normalized.contains("email")
+        || normalized.contains("reply")
+        || normalized.contains("triage")
+    {
+        return RecipeKind::InboxTriage;
+    }
+    if normalized.contains("monitor")
+        || normalized.contains("website")
+        || normalized.contains("web page")
+        || normalized.contains("http://")
+        || normalized.contains("https://")
+        || normalized.contains("url")
+    {
+        return RecipeKind::WebsiteMonitor;
+    }
+    RecipeKind::DailyBrief
+}
+
+fn describe_primitive_read(primitive: PrimitiveId) -> Option<String> {
+    match primitive {
+        PrimitiveId::ReadWeb => Some("Read website content from allowlisted domains".to_string()),
+        PrimitiveId::ReadSources => Some("Read configured sources for this brief".to_string()),
+        PrimitiveId::ReadForwardedEmail => {
+            Some("Read forwarded or pasted inbox content".to_string())
+        }
+        PrimitiveId::ReadVaultFile => Some("Read connected vault files".to_string()),
+        _ => None,
+    }
+}
+
+fn describe_primitive_write(primitive: PrimitiveId) -> Option<String> {
+    match primitive {
+        PrimitiveId::WriteOutcomeDraft => Some("Create an outcome draft".to_string()),
+        PrimitiveId::WriteEmailDraft => Some("Create an email draft".to_string()),
+        PrimitiveId::SendEmail => Some("Send an email".to_string()),
+        PrimitiveId::ScheduleRun => Some("Schedule this autopilot".to_string()),
+        PrimitiveId::NotifyUser => Some("Send a notification".to_string()),
+        _ => None,
+    }
+}
+
+fn preview_for_plan(kind: &IntentDraftKind, plan: &AutopilotPlan) -> IntentDraftPreview {
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    let mut approvals_required = Vec::new();
+
+    for step in &plan.steps {
+        if let Some(read) = describe_primitive_read(step.primitive) {
+            if !reads.contains(&read) {
+                reads.push(read);
+            }
+        }
+        if let Some(write) = describe_primitive_write(step.primitive) {
+            if !writes.contains(&write) {
+                writes.push(write);
+            }
+        }
+        if step.requires_approval {
+            approvals_required.push(step.label.clone());
+        }
+    }
+
+    IntentDraftPreview {
+        reads,
+        writes,
+        approvals_required,
+        estimated_spend: "About S$0.10–S$0.60 per run".to_string(),
+        primary_cta: match kind {
+            IntentDraftKind::OneOffRun => "Run now".to_string(),
+            IntentDraftKind::DraftAutopilot => "Run test".to_string(),
+        },
+    }
+}
+
+#[tauri::command]
+fn draft_intent(intent: String, provider: Option<String>) -> Result<IntentDraftResponse, String> {
+    let cleaned = intent.trim();
+    if cleaned.is_empty() {
+        return Err("Add a one-line intent to continue.".to_string());
+    }
+    let provider_id = match provider {
+        Some(raw) => parse_provider(&raw)?,
+        None => ProviderId::OpenAi,
+    };
+
+    let (kind, classification_reason) = classify_intent_kind(cleaned);
+    let recipe = classify_recipe(cleaned);
+    let plan = AutopilotPlan::from_intent(recipe, cleaned.to_string(), provider_id);
+    let preview = preview_for_plan(&kind, &plan);
+
+    Ok(IntentDraftResponse {
+        kind,
+        classification_reason,
+        plan,
+        preview,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
@@ -209,6 +365,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_home_snapshot,
+            draft_intent,
             start_recipe_run,
             run_tick,
             resume_due_runs,

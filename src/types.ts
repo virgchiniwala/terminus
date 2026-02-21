@@ -15,6 +15,25 @@ export interface HomeSnapshot {
   };
 }
 
+export type IntentDraftKind = "one_off_run" | "draft_autopilot";
+
+export interface IntentDraftPreview {
+  reads: string[];
+  writes: string[];
+  approvalsRequired: string[];
+  estimatedSpend: string;
+  primaryCta: string;
+}
+
+export interface IntentDraftResponse {
+  kind: IntentDraftKind;
+  classificationReason: string;
+  plan: AutopilotPlan;
+  preview: IntentDraftPreview;
+}
+
+export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
+
 export type RiskTier = "low" | "medium" | "high";
 
 export type PrimitiveId =
@@ -45,9 +64,13 @@ export interface PlanStep {
 
 export interface AutopilotPlan {
   schemaVersion: "1.0";
-  recipe: "website_monitor" | "inbox_triage" | "daily_brief";
+  recipe: RecipeKind;
   intent: string;
   provider: ProviderMetadata;
+  webSourceUrl?: string | null;
+  webAllowedDomains?: string[];
+  inboxSourceText?: string | null;
+  dailySources?: string[];
   allowedPrimitives: PrimitiveId[];
   steps: PlanStep[];
 }

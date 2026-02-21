@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-17
+Last updated: 2026-02-18
 
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
@@ -15,10 +15,21 @@ Last updated: 2026-02-17
   - adaptation dedupe by hash + no-op suppression
   - bounded memory-card growth via deterministic upserts
   - manual `compact_learning_data` command with retention enforcement
+- Universal Intake foundations:
+  - `draft_intent` backend command (intent -> classified object draft + preview)
+  - `⌘K` Intent Bar overlay in UI
+  - one-off vs draft-autopilot classification with reason string
+  - Draft Plan Card with read/write/approval/spend preview + `Run now` CTA
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
 - `npm run build` passes
+
+## Current Priority Track
+- Next phase follows updated strategy order:
+  1. P0.4 provider OAuth (Gmail + M365)
+  2. P0.5 inbox watcher (awake/background truth + dedupe + throttling)
+  3. P0.6 safe send/reply effectors with typed approvals and idempotency
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).
