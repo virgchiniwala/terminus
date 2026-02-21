@@ -287,6 +287,45 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (created_from_run_id) REFERENCES runs(id)
             );
 
+            CREATE TABLE IF NOT EXISTS email_oauth_config (
+              provider TEXT PRIMARY KEY,
+              client_id TEXT NOT NULL,
+              redirect_uri TEXT NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS email_oauth_sessions (
+              provider TEXT NOT NULL,
+              state TEXT NOT NULL,
+              code_verifier TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              expires_at_ms INTEGER NOT NULL,
+              PRIMARY KEY(provider, state)
+            );
+
+            CREATE TABLE IF NOT EXISTS email_connections (
+              provider TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              account_email TEXT,
+              scopes_json TEXT NOT NULL DEFAULT '[]',
+              connected_at_ms INTEGER,
+              updated_at_ms INTEGER NOT NULL,
+              last_error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS email_ingest_events (
+              id TEXT PRIMARY KEY,
+              provider TEXT NOT NULL,
+              provider_message_id TEXT NOT NULL,
+              dedupe_key TEXT NOT NULL UNIQUE,
+              autopilot_id TEXT NOT NULL,
+              subject TEXT NOT NULL DEFAULT '',
+              received_at_ms INTEGER NOT NULL,
+              run_id TEXT,
+              status TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
@@ -445,6 +484,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create memory card index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_oauth_sessions_provider_expiry ON email_oauth_sessions(provider, expires_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create oauth sessions index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_ingest_events_provider_created ON email_ingest_events(provider, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create email ingest events index: {e}"))?;
 
     Ok(())
 }

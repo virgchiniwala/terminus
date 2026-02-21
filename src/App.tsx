@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { HomeSnapshot, IntentDraftResponse, RecipeKind } from "./types";
+import type {
+  EmailConnectionRecord,
+  HomeSnapshot,
+  IntentDraftResponse,
+  OAuthStartResponse,
+  RecipeKind,
+} from "./types";
 
 const fallbackSnapshot: HomeSnapshot = {
   surfaces: [
@@ -92,6 +98,15 @@ export function App() {
   const [intentLoading, setIntentLoading] = useState(false);
   const [draft, setDraft] = useState<IntentDraftResponse | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
+  const [connections, setConnections] = useState<EmailConnectionRecord[]>([]);
+  const [connectionsMessage, setConnectionsMessage] = useState<string | null>(null);
+  const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
+  const [oauthClientId, setOauthClientId] = useState("");
+  const [oauthRedirectUri, setOauthRedirectUri] = useState("");
+  const [oauthSession, setOauthSession] = useState<OAuthStartResponse | null>(null);
+  const [oauthCode, setOauthCode] = useState("");
+  const [watcherAutopilotId, setWatcherAutopilotId] = useState("auto_inbox_watch");
+  const [watcherMaxItems, setWatcherMaxItems] = useState(10);
 
   const loadSnapshot = () => {
     setLoading(true);
@@ -119,6 +134,7 @@ export function App() {
 
   useEffect(() => {
     loadSnapshot();
+    loadConnections();
   }, []);
 
   useEffect(() => {
@@ -141,6 +157,26 @@ export function App() {
     }
     return draft.kind === "draft_autopilot" ? "Draft Autopilot" : "One-off Run";
   }, [draft]);
+
+  const loadConnections = () => {
+    invoke<EmailConnectionRecord[]>("list_email_connections")
+      .then((rows) => {
+        const normalized = rows.map((row: any) => ({
+          provider: row.provider,
+          status: row.status,
+          accountEmail: row.accountEmail ?? row.account_email ?? null,
+          scopes: row.scopes ?? [],
+          connectedAtMs: row.connectedAtMs ?? row.connected_at_ms ?? null,
+          updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? Date.now(),
+          lastError: row.lastError ?? row.last_error ?? null,
+        })) as EmailConnectionRecord[];
+        setConnections(normalized);
+      })
+      .catch((err) => {
+        console.error("Failed to load connections:", err);
+        setConnectionsMessage("Could not load provider connections.");
+      });
+  };
 
   const generateDraft = () => {
     const intent = intentInput.trim();
@@ -193,6 +229,102 @@ export function App() {
       .catch((err) => {
         console.error("Failed to start run:", err);
         setIntentError(typeof err === "string" ? err : "Could not start this run.");
+      });
+  };
+
+  const saveOauthSetup = () => {
+    setConnectionsMessage(null);
+    invoke("save_email_oauth_config", {
+      input: {
+        provider: oauthProvider,
+        clientId: oauthClientId,
+        redirectUri: oauthRedirectUri,
+      },
+    })
+      .then(() => {
+        setConnectionsMessage("Connection setup saved.");
+      })
+      .catch((err) => {
+        console.error("Failed to save oauth config:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not save setup.");
+      });
+  };
+
+  const startOauth = (provider: "gmail" | "microsoft365") => {
+    setConnectionsMessage(null);
+    invoke<OAuthStartResponse>("start_email_oauth", { provider })
+      .then((payload) => {
+        setOauthSession({
+          provider: payload.provider,
+          authUrl: payload.authUrl ?? (payload as any).auth_url,
+          state: payload.state,
+          expiresAtMs: payload.expiresAtMs ?? (payload as any).expires_at_ms,
+        });
+        setOauthCode("");
+      })
+      .catch((err) => {
+        console.error("Failed to start oauth:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not start connection.");
+      });
+  };
+
+  const completeOauth = () => {
+    if (!oauthSession) {
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<EmailConnectionRecord>("complete_email_oauth", {
+      input: {
+        provider: oauthSession.provider,
+        state: oauthSession.state,
+        code: oauthCode,
+      },
+    })
+      .then(() => {
+        setConnectionsMessage("Email provider connected.");
+        setOauthSession(null);
+        setOauthCode("");
+        loadConnections();
+      })
+      .catch((err) => {
+        console.error("Failed to complete oauth:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not complete connection.");
+      });
+  };
+
+  const disconnectProvider = (provider: "gmail" | "microsoft365") => {
+    setConnectionsMessage(null);
+    invoke("disconnect_email_provider", { provider })
+      .then(() => {
+        setConnectionsMessage("Provider disconnected.");
+        loadConnections();
+      })
+      .catch((err) => {
+        console.error("Failed to disconnect provider:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not disconnect provider.");
+      });
+  };
+
+  const runWatcherTick = (provider: "gmail" | "microsoft365") => {
+    setConnectionsMessage(null);
+    invoke<{ fetched: number; deduped: number; startedRuns: number; started_runs?: number }>(
+      "run_inbox_watcher_tick",
+      {
+        provider,
+        autopilotId: watcherAutopilotId,
+        maxItems: watcherMaxItems,
+      }
+    )
+      .then((summary: any) => {
+        const started = summary.startedRuns ?? summary.started_runs ?? 0;
+        setConnectionsMessage(
+          `Watcher tick complete: fetched ${summary.fetched}, deduped ${summary.deduped}, queued ${started}.`
+        );
+        loadSnapshot();
+      })
+      .catch((err) => {
+        console.error("Watcher tick failed:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Watcher tick failed.");
       });
   };
 
@@ -265,6 +397,119 @@ export function App() {
         <section className="runner-banner" aria-label="Runner status">
           <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
           <p>{snapshot.runner.statusLine}</p>
+        </section>
+
+        <section className="connection-panel" aria-label="Email connections">
+          <div className="connection-panel-header">
+            <h2>Email Connections</h2>
+            <p>Connect Gmail or Microsoft 365 once so inbox automations can run while your Mac is awake.</p>
+          </div>
+          <div className="connection-setup-grid">
+            <label>
+              Provider
+              <select
+                value={oauthProvider}
+                onChange={(event) => setOauthProvider(event.target.value as "gmail" | "microsoft365")}
+              >
+                <option value="gmail">Gmail</option>
+                <option value="microsoft365">Microsoft 365</option>
+              </select>
+            </label>
+            <label>
+              OAuth Client ID
+              <input
+                value={oauthClientId}
+                onChange={(event) => setOauthClientId(event.target.value)}
+                placeholder="Paste OAuth client id"
+              />
+            </label>
+            <label>
+              Redirect URI
+              <input
+                value={oauthRedirectUri}
+                onChange={(event) => setOauthRedirectUri(event.target.value)}
+                placeholder="https://your-app/callback"
+              />
+            </label>
+            <button type="button" className="intent-primary" onClick={saveOauthSetup}>
+              Save Setup
+            </button>
+          </div>
+          <div className="watcher-controls">
+            <label>
+              Inbox Autopilot ID
+              <input
+                value={watcherAutopilotId}
+                onChange={(event) => setWatcherAutopilotId(event.target.value)}
+                placeholder="auto_inbox_watch"
+              />
+            </label>
+            <label>
+              Max emails per tick
+              <input
+                type="number"
+                min={1}
+                max={25}
+                value={watcherMaxItems}
+                onChange={(event) => setWatcherMaxItems(Number(event.target.value) || 10)}
+              />
+            </label>
+          </div>
+          {connectionsMessage && <p className="connection-message">{connectionsMessage}</p>}
+
+          <div className="connection-cards">
+            {connections.map((record) => (
+              <article key={record.provider} className="connection-card">
+                <h3>{record.provider === "gmail" ? "Gmail" : "Microsoft 365"}</h3>
+                <p>Status: {record.status === "connected" ? "Connected" : "Disconnected"}</p>
+                {record.accountEmail && <p>Account: {record.accountEmail}</p>}
+                <div className="connection-actions">
+                  <button type="button" onClick={() => startOauth(record.provider)}>
+                    {record.status === "connected" ? "Reconnect" : "Connect"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => runWatcherTick(record.provider)}
+                    disabled={record.status !== "connected"}
+                  >
+                    Poll Inbox Now
+                  </button>
+                  {record.status === "connected" && (
+                    <button type="button" onClick={() => disconnectProvider(record.provider)}>
+                      Disconnect
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+
+          {oauthSession && (
+            <div className="oauth-flow">
+              <p>
+                Open this link to authorize {oauthSession.provider === "gmail" ? "Gmail" : "Microsoft 365"}:
+              </p>
+              <a href={oauthSession.authUrl} target="_blank" rel="noreferrer">
+                {oauthSession.authUrl}
+              </a>
+              <label>
+                Authorization code
+                <input
+                  value={oauthCode}
+                  onChange={(event) => setOauthCode(event.target.value)}
+                  placeholder="Paste code from callback"
+                />
+              </label>
+              <div className="connection-actions">
+                <button type="button" className="intent-primary" onClick={completeOauth}>
+                  Complete Connection
+                </button>
+                <button type="button" onClick={() => setOauthSession(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </main>
 

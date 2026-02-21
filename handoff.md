@@ -20,6 +20,11 @@ Last updated: 2026-02-18
   - `⌘K` Intent Bar overlay in UI
   - one-off vs draft-autopilot classification with reason string
   - Draft Plan Card with read/write/approval/spend preview + `Run now` CTA
+- Email connection foundations:
+  - OAuth config + session + connection tables in SQLite
+  - Keychain-backed OAuth token storage for Gmail and Microsoft 365
+  - Tauri commands: list/save/start/complete/disconnect provider connection
+  - Manual inbox watcher tick command with provider fetch + dedupe + run queueing
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -27,9 +32,9 @@ Last updated: 2026-02-18
 
 ## Current Priority Track
 - Next phase follows updated strategy order:
-  1. P0.4 provider OAuth (Gmail + M365)
-  2. P0.5 inbox watcher (awake/background truth + dedupe + throttling)
-  3. P0.6 safe send/reply effectors with typed approvals and idempotency
+  1. P0.5 completion: convert manual watcher tick into background/app-open cadence with clear running/paused truth
+  2. P0.6 safe send/reply effectors with typed approvals and idempotency
+  3. P0.7 minimal provider-backed triage actions
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).

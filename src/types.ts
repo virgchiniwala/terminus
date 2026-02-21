@@ -32,6 +32,23 @@ export interface IntentDraftResponse {
   preview: IntentDraftPreview;
 }
 
+export interface EmailConnectionRecord {
+  provider: "gmail" | "microsoft365";
+  status: "connected" | "disconnected";
+  accountEmail: string | null;
+  scopes: string[];
+  connectedAtMs: number | null;
+  updatedAtMs: number;
+  lastError: string | null;
+}
+
+export interface OAuthStartResponse {
+  provider: "gmail" | "microsoft365";
+  authUrl: string;
+  state: string;
+  expiresAtMs: number;
+}
+
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 
 export type RiskTier = "low" | "medium" | "high";

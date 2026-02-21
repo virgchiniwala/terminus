@@ -34,26 +34,27 @@ Last updated: 2026-02-18
 - Learning Layer: Evaluate -> Adapt -> Memory
 
 ## Now
-### P0.1 / P0.2 / P0.3 — Universal Intake Foundations
-Owner: Friday + Loki
-Status: Done
+### P0.4 / P0.5 (Foundations) — Email Connections + Watcher Tick
+Owner: Friday + Fury
+Status: In Progress
 Scope:
-- global Intent Bar entrypoint (`⌘K`) in desktop shell
-- intent classification to `one_off_run` vs `draft_autopilot`
-- calm Draft Plan Card preview (`will read / will create / approvals / spend / run now`)
+- Gmail + Microsoft 365 OAuth-ready connection flow
+- keychain-only OAuth token storage
+- provider connection status surfaced in app
+- manual inbox watcher tick command (real fetch + dedupe + run queue)
 Acceptance:
-- intent flow resolves to object drafts (no chat-thread end state)
-- one-line classifier reason shown and overridable by rerun intent
-- primary CTA starts run via existing tick runner path
+- OAuth setup can be saved and connection can be completed with auth code
+- no OAuth tokens persisted in SQLite
+- watcher tick dedupes by provider message id and enqueues inbox triage runs
 Verification:
 - `cargo test`
 - `npm run build`
-- manual `⌘K` flow test in app
+- manual: connect provider -> poll inbox -> confirm queued runs in Activity
 
 ## Next
-1. P0.4: Gmail + M365 OAuth connection (keychain-backed tokens)
-2. P0.5: inbox watcher + dedupe + throttling while app open/background
-3. P0.6: Safe Effector email send/reply policy gates + typed approval payloads
+1. P0.5 completion: scheduled/background watcher loop + throttling controls + clearer paused/running state
+2. P0.6: Safe Effector email send/reply policy gates + typed approval payloads
+3. P0.7: provider-backed triage actions (label/archive or folder/category)
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
