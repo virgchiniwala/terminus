@@ -46,6 +46,11 @@ Last updated: 2026-02-22
   - missed runner cycles are detected from `watcher_last_tick_ms` and poll interval
   - bounded catch-up loop runs up to 3 cycles before current tick execution
   - runner state persists `missed_runs_count` and Home shows explicit missed/offline truth
+- Background runner execution:
+  - tray icon enabled (`tray-icon` feature) with actions: open, run cycle now, quit
+  - window close is intercepted: if background mode is enabled, window hides instead of exiting
+  - backend thread ticks runner every ~10s when app process is alive and background mode is enabled
+  - tick execution continues to use existing bounded runner model and `resume_due_runs`
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -56,9 +61,9 @@ Last updated: 2026-02-22
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P0 background runner continuation (menu bar/window-closed execution path)
-  2. P0 scoped Guide/Voice/Rules without chat-first drift
-  3. P1 provider routing/caching and security hardening
+  1. P0 scoped Guide/Voice/Rules without chat-first drift
+  2. P1 provider routing/caching and security hardening
+  3. UX and copy cleanup for calm always-on truth
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).

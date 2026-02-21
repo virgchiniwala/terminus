@@ -37,26 +37,26 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### P0.8 / P0.9 — Runner cadence + missed-run reconciliation
+### P0.8 — Background runner window-closed execution
 Owner: Friday + Loki
 Status: Done (slice 1)
 Scope:
-- detect missed runner cycles when app was inactive or Mac was asleep/offline
-- run bounded catch-up cycles before current watcher tick
-- persist missed-run count in runner control and surface explicit runner truth on Home
+- keep app running in background when window closes and background mode is enabled
+- add menubar tray controls (`Open Terminus`, `Run Cycle Now`, `Quit`)
+- run bounded runner ticks from backend thread while app is alive and background mode is enabled
 Acceptance:
-- catch-up remains bounded (max 3 cycles per tick)
-- due runs continue to resume via existing tick boundary
-- Home clearly shows missed count and catch-up status line
+- closing main window hides to tray instead of exiting when background mode is on
+- background thread executes tick cycle without UI polling dependency
+- manual tray action can trigger a cycle immediately
 Verification:
 - `cargo test`
 - `npm run build`
-- manual: set long watcher interval gap -> run `tick_runner_cycle` -> verify missed count/status
+- manual: enable background mode -> close window -> verify tray remains and cycles continue
 
 ## Next
-1. P0.8 continuation: menubar/background agent execution while window is closed
-2. P0.10+: scoped Guide, Voice object, and rule extraction without chat-first drift
-3. P1.x: provider routing/caching hardening and security tightening
+1. P0.10+: scoped Guide, Voice object, and rule extraction without chat-first drift
+2. P1.x: provider routing/caching hardening and security tightening
+3. UX cleanup for runner state surfaces and missed-run messaging
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
