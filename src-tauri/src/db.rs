@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::Manager;
@@ -36,6 +36,19 @@ pub struct RunnerControlRecord {
     pub gmail_autopilot_id: String,
     pub microsoft_autopilot_id: String,
     pub watcher_last_tick_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutopilotSendPolicyRecord {
+    pub autopilot_id: String,
+    pub allow_sending: bool,
+    pub recipient_allowlist: Vec<String>,
+    pub max_sends_per_day: i64,
+    pub quiet_hours_start_local: i64,
+    pub quiet_hours_end_local: i64,
+    pub allow_outside_quiet_hours: bool,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +165,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               step_id TEXT NOT NULL,
               status TEXT NOT NULL,
               preview TEXT NOT NULL,
+              payload_type TEXT NOT NULL DEFAULT 'generic',
+              payload_json TEXT NOT NULL DEFAULT '{}',
               reason TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
@@ -353,6 +368,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               updated_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS autopilot_send_policy (
+              autopilot_id TEXT PRIMARY KEY,
+              allow_sending INTEGER NOT NULL DEFAULT 0,
+              recipient_allowlist_json TEXT NOT NULL DEFAULT '[]',
+              max_sends_per_day INTEGER NOT NULL DEFAULT 10,
+              quiet_hours_start_local INTEGER NOT NULL DEFAULT 18,
+              quiet_hours_end_local INTEGER NOT NULL DEFAULT 9,
+              allow_outside_quiet_hours INTEGER NOT NULL DEFAULT 0,
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
@@ -436,6 +463,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "web_snapshots",
         "updated_at",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "approvals",
+        "payload_type",
+        "TEXT NOT NULL DEFAULT 'generic'",
+    )?;
+    ensure_column(
+        connection,
+        "approvals",
+        "payload_json",
+        "TEXT NOT NULL DEFAULT '{}'",
     )?;
     ensure_column(connection, "decision_events", "client_event_id", "TEXT")?;
     ensure_column(
@@ -523,6 +562,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create email ingest events index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_state_updated ON runs(state, updated_at DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create runs state index: {e}"))?;
     connection
         .execute(
             "INSERT OR IGNORE INTO runner_control (
@@ -836,5 +881,93 @@ pub fn upsert_runner_control(
             ],
         )
         .map_err(|e| format!("Failed to update runner control: {e}"))?;
+    Ok(())
+}
+
+pub fn get_autopilot_send_policy(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<AutopilotSendPolicyRecord, String> {
+    let row: Option<(i64, String, i64, i64, i64, i64, i64)> = connection
+        .query_row(
+            "SELECT allow_sending, recipient_allowlist_json, max_sends_per_day,
+                    quiet_hours_start_local, quiet_hours_end_local, allow_outside_quiet_hours, updated_at_ms
+             FROM autopilot_send_policy
+             WHERE autopilot_id = ?1",
+            params![autopilot_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read send policy: {e}"))?;
+
+    let Some((allow_sending, allowlist_json, max_sends_per_day, start, end, allow_outside, updated_at_ms)) = row else {
+        return Ok(AutopilotSendPolicyRecord {
+            autopilot_id: autopilot_id.to_string(),
+            allow_sending: false,
+            recipient_allowlist: Vec::new(),
+            max_sends_per_day: 10,
+            quiet_hours_start_local: 18,
+            quiet_hours_end_local: 9,
+            allow_outside_quiet_hours: false,
+            updated_at_ms: 0,
+        });
+    };
+
+    let recipient_allowlist =
+        serde_json::from_str::<Vec<String>>(&allowlist_json).unwrap_or_default();
+    Ok(AutopilotSendPolicyRecord {
+        autopilot_id: autopilot_id.to_string(),
+        allow_sending: allow_sending == 1,
+        recipient_allowlist,
+        max_sends_per_day,
+        quiet_hours_start_local: start,
+        quiet_hours_end_local: end,
+        allow_outside_quiet_hours: allow_outside == 1,
+        updated_at_ms,
+    })
+}
+
+pub fn upsert_autopilot_send_policy(
+    connection: &Connection,
+    payload: &AutopilotSendPolicyRecord,
+) -> Result<(), String> {
+    let allowlist_json = serde_json::to_string(&payload.recipient_allowlist)
+        .map_err(|e| format!("Failed to serialize recipient allowlist: {e}"))?;
+    connection
+        .execute(
+            "INSERT INTO autopilot_send_policy (
+               autopilot_id, allow_sending, recipient_allowlist_json, max_sends_per_day,
+               quiet_hours_start_local, quiet_hours_end_local, allow_outside_quiet_hours, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(autopilot_id) DO UPDATE SET
+               allow_sending = excluded.allow_sending,
+               recipient_allowlist_json = excluded.recipient_allowlist_json,
+               max_sends_per_day = excluded.max_sends_per_day,
+               quiet_hours_start_local = excluded.quiet_hours_start_local,
+               quiet_hours_end_local = excluded.quiet_hours_end_local,
+               allow_outside_quiet_hours = excluded.allow_outside_quiet_hours,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                payload.autopilot_id,
+                if payload.allow_sending { 1 } else { 0 },
+                allowlist_json,
+                payload.max_sends_per_day,
+                payload.quiet_hours_start_local,
+                payload.quiet_hours_end_local,
+                if payload.allow_outside_quiet_hours { 1 } else { 0 },
+                payload.updated_at_ms,
+            ],
+        )
+        .map_err(|e| format!("Failed to upsert send policy: {e}"))?;
     Ok(())
 }

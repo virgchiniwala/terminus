@@ -72,6 +72,7 @@ pub struct AutopilotPlan {
     pub web_allowed_domains: Vec<String>,
     pub inbox_source_text: Option<String>,
     pub daily_sources: Vec<String>,
+    pub recipient_hints: Vec<String>,
     pub allowed_primitives: Vec<PrimitiveId>,
     pub steps: Vec<PlanStep>,
 }
@@ -120,7 +121,8 @@ impl AutopilotPlan {
         } else {
             Vec::new()
         };
-        let allowed_primitives = vec![
+        let wants_send = intent_mentions_send(&intent);
+        let mut allowed_primitives = vec![
             PrimitiveId::ReadWeb,
             PrimitiveId::ReadSources,
             PrimitiveId::ReadForwardedEmail,
@@ -129,54 +131,82 @@ impl AutopilotPlan {
             PrimitiveId::WriteEmailDraft,
             PrimitiveId::NotifyUser,
         ];
+        if wants_send {
+            allowed_primitives.push(PrimitiveId::SendEmail);
+        }
+        let recipient_hints = extract_emails(&intent);
 
         let steps = match recipe {
-            RecipeKind::WebsiteMonitor => vec![
-                PlanStep {
-                    id: "step_1".to_string(),
-                    label: "Read website content from allowlisted domain".to_string(),
-                    primitive: PrimitiveId::ReadWeb,
-                    requires_approval: false,
-                    risk_tier: RiskTier::Low,
-                },
-                PlanStep {
-                    id: "step_2".to_string(),
-                    label: "Create summary outcome draft".to_string(),
-                    primitive: PrimitiveId::WriteOutcomeDraft,
-                    requires_approval: true,
-                    risk_tier: RiskTier::Medium,
-                },
-                PlanStep {
-                    id: "step_3".to_string(),
-                    label: "Create email draft for approval queue".to_string(),
-                    primitive: PrimitiveId::WriteEmailDraft,
-                    requires_approval: true,
-                    risk_tier: RiskTier::Medium,
-                },
-            ],
-            RecipeKind::InboxTriage => vec![
-                PlanStep {
-                    id: "step_1".to_string(),
-                    label: "Read forwarded email or pasted message".to_string(),
-                    primitive: PrimitiveId::ReadForwardedEmail,
-                    requires_approval: false,
-                    risk_tier: RiskTier::Low,
-                },
-                PlanStep {
-                    id: "step_2".to_string(),
-                    label: "Draft reply options and triage labels".to_string(),
-                    primitive: PrimitiveId::WriteOutcomeDraft,
-                    requires_approval: false,
-                    risk_tier: RiskTier::Medium,
-                },
-                PlanStep {
-                    id: "step_3".to_string(),
-                    label: "Queue email draft for explicit approval".to_string(),
-                    primitive: PrimitiveId::WriteEmailDraft,
-                    requires_approval: true,
-                    risk_tier: RiskTier::Medium,
-                },
-            ],
+            RecipeKind::WebsiteMonitor => {
+                let mut steps = vec![
+                    PlanStep {
+                        id: "step_1".to_string(),
+                        label: "Read website content from allowlisted domain".to_string(),
+                        primitive: PrimitiveId::ReadWeb,
+                        requires_approval: false,
+                        risk_tier: RiskTier::Low,
+                    },
+                    PlanStep {
+                        id: "step_2".to_string(),
+                        label: "Create summary outcome draft".to_string(),
+                        primitive: PrimitiveId::WriteOutcomeDraft,
+                        requires_approval: true,
+                        risk_tier: RiskTier::Medium,
+                    },
+                    PlanStep {
+                        id: "step_3".to_string(),
+                        label: "Create email draft for approval queue".to_string(),
+                        primitive: PrimitiveId::WriteEmailDraft,
+                        requires_approval: true,
+                        risk_tier: RiskTier::Medium,
+                    },
+                ];
+                if wants_send {
+                    steps.push(PlanStep {
+                        id: "step_4".to_string(),
+                        label: "Send approved email through connected account".to_string(),
+                        primitive: PrimitiveId::SendEmail,
+                        requires_approval: true,
+                        risk_tier: RiskTier::High,
+                    });
+                }
+                steps
+            }
+            RecipeKind::InboxTriage => {
+                let mut steps = vec![
+                    PlanStep {
+                        id: "step_1".to_string(),
+                        label: "Read forwarded email or pasted message".to_string(),
+                        primitive: PrimitiveId::ReadForwardedEmail,
+                        requires_approval: false,
+                        risk_tier: RiskTier::Low,
+                    },
+                    PlanStep {
+                        id: "step_2".to_string(),
+                        label: "Draft reply options and triage labels".to_string(),
+                        primitive: PrimitiveId::WriteOutcomeDraft,
+                        requires_approval: false,
+                        risk_tier: RiskTier::Medium,
+                    },
+                    PlanStep {
+                        id: "step_3".to_string(),
+                        label: "Queue email draft for explicit approval".to_string(),
+                        primitive: PrimitiveId::WriteEmailDraft,
+                        requires_approval: true,
+                        risk_tier: RiskTier::Medium,
+                    },
+                ];
+                if wants_send {
+                    steps.push(PlanStep {
+                        id: "step_4".to_string(),
+                        label: "Send approved reply through connected account".to_string(),
+                        primitive: PrimitiveId::SendEmail,
+                        requires_approval: true,
+                        risk_tier: RiskTier::High,
+                    });
+                }
+                steps
+            }
             RecipeKind::DailyBrief => vec![
                 PlanStep {
                     id: "step_1".to_string(),
@@ -211,6 +241,7 @@ impl AutopilotPlan {
             web_allowed_domains,
             inbox_source_text,
             daily_sources,
+            recipient_hints,
             allowed_primitives,
             steps,
         }
@@ -255,6 +286,35 @@ fn extract_host(url: &str) -> Option<String> {
     } else {
         Some(host.to_ascii_lowercase())
     }
+}
+
+fn intent_mentions_send(input: &str) -> bool {
+    let normalized = input.to_ascii_lowercase();
+    normalized.contains("send")
+        || normalized.contains("ship this")
+        || normalized.contains("reply automatically")
+}
+
+fn extract_emails(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .filter_map(|token| {
+            let normalized = token
+                .trim_matches(|c: char| ",.;:!?()[]{}<>\"'".contains(c))
+                .to_ascii_lowercase();
+            if normalized.contains('@')
+                && normalized
+                    .split('@')
+                    .nth(1)
+                    .map(|domain| domain.contains('.'))
+                    .unwrap_or(false)
+            {
+                Some(normalized)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<String>>()
 }
 
 #[cfg(test)]

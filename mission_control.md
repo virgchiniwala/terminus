@@ -54,7 +54,7 @@ Verification:
 - manual: connect provider -> wait for cycle -> verify queued runs and backlog updates
 
 ## Next
-1. P0.6: Safe Effector email send/reply policy gates + typed approval payloads
+1. P0.6: Safe Effector email send/reply policy gates + typed approval payloads (in progress)
 2. P0.7: provider-backed triage actions (label/archive or folder/category)
 3. P0.8: menubar/background agent execution when window is closed
 
