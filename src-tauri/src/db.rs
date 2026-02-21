@@ -15,12 +15,27 @@ pub struct HomeSurface {
 pub struct RunnerStatus {
     pub mode: String,
     pub status_line: String,
+    pub backlog_count: i64,
+    pub watcher_enabled: bool,
+    pub watcher_last_tick_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HomeSnapshot {
     pub surfaces: Vec<HomeSurface>,
     pub runner: RunnerStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerControlRecord {
+    pub background_enabled: bool,
+    pub watcher_enabled: bool,
+    pub watcher_poll_seconds: i64,
+    pub watcher_max_items: i64,
+    pub gmail_autopilot_id: String,
+    pub microsoft_autopilot_id: String,
+    pub watcher_last_tick_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +341,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               created_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS runner_control (
+              singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+              background_enabled INTEGER NOT NULL DEFAULT 0,
+              watcher_enabled INTEGER NOT NULL DEFAULT 1,
+              watcher_poll_seconds INTEGER NOT NULL DEFAULT 60,
+              watcher_max_items INTEGER NOT NULL DEFAULT 10,
+              gmail_autopilot_id TEXT NOT NULL DEFAULT 'auto_inbox_watch_gmail',
+              microsoft_autopilot_id TEXT NOT NULL DEFAULT 'auto_inbox_watch_microsoft365',
+              watcher_last_tick_ms INTEGER,
+              updated_at_ms INTEGER NOT NULL
+            );
+
             -- Legacy compatibility from earlier bootstrap versions.
             CREATE TABLE IF NOT EXISTS activity (
               id TEXT PRIMARY KEY,
@@ -496,6 +523,15 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create email ingest events index: {e}"))?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO runner_control (
+               singleton_id, background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items,
+               gmail_autopilot_id, microsoft_autopilot_id, updated_at_ms
+             ) VALUES (1, 0, 1, 60, 10, 'auto_inbox_watch_gmail', 'auto_inbox_watch_microsoft365', strftime('%s','now') * 1000)",
+            [],
+        )
+        .map_err(|e| format!("Failed to seed runner control: {e}"))?;
 
     Ok(())
 }
@@ -690,6 +726,27 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             .map_err(|e| format!("Failed to count {table}: {e}"))
     };
 
+    let runner_control = get_runner_control(&connection)?;
+    let backlog_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM runs WHERE state IN ('ready', 'retrying', 'needs_approval')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count run backlog: {e}"))?;
+
+    let status_line = if runner_control.watcher_enabled {
+        if runner_control.background_enabled {
+            "Autopilots run while your Mac is awake. Inbox watcher is active."
+        } else {
+            "Autopilots run while the app is open. Inbox watcher is active."
+        }
+    } else if runner_control.background_enabled {
+        "Autopilots run while your Mac is awake. Inbox watcher is paused."
+    } else {
+        "Autopilots run only while the app is open. Inbox watcher is paused."
+    };
+
     Ok(HomeSnapshot {
         surfaces: vec![
             HomeSurface {
@@ -718,8 +775,66 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             },
         ],
         runner: RunnerStatus {
-            mode: "app_open".into(),
-            status_line: "Autopilots run only while the app is open.".into(),
+            mode: if runner_control.background_enabled {
+                "background".into()
+            } else {
+                "app_open".into()
+            },
+            status_line: status_line.to_string(),
+            backlog_count,
+            watcher_enabled: runner_control.watcher_enabled,
+            watcher_last_tick_ms: runner_control.watcher_last_tick_ms,
         },
     })
+}
+
+pub fn get_runner_control(connection: &Connection) -> Result<RunnerControlRecord, String> {
+    connection
+        .query_row(
+            "SELECT background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items, gmail_autopilot_id, microsoft_autopilot_id, watcher_last_tick_ms
+             FROM runner_control WHERE singleton_id = 1",
+            [],
+            |row| {
+                Ok(RunnerControlRecord {
+                    background_enabled: row.get::<_, i64>(0)? == 1,
+                    watcher_enabled: row.get::<_, i64>(1)? == 1,
+                    watcher_poll_seconds: row.get(2)?,
+                    watcher_max_items: row.get(3)?,
+                    gmail_autopilot_id: row.get(4)?,
+                    microsoft_autopilot_id: row.get(5)?,
+                    watcher_last_tick_ms: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Failed to read runner control: {e}"))
+}
+
+pub fn upsert_runner_control(
+    connection: &Connection,
+    payload: &RunnerControlRecord,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE runner_control
+             SET background_enabled = ?1,
+                 watcher_enabled = ?2,
+                 watcher_poll_seconds = ?3,
+                 watcher_max_items = ?4,
+                 gmail_autopilot_id = ?5,
+                 microsoft_autopilot_id = ?6,
+                 watcher_last_tick_ms = ?7,
+                 updated_at_ms = strftime('%s','now') * 1000
+             WHERE singleton_id = 1",
+            params![
+                if payload.background_enabled { 1 } else { 0 },
+                if payload.watcher_enabled { 1 } else { 0 },
+                payload.watcher_poll_seconds,
+                payload.watcher_max_items,
+                payload.gmail_autopilot_id,
+                payload.microsoft_autopilot_id,
+                payload.watcher_last_tick_ms
+            ],
+        )
+        .map_err(|e| format!("Failed to update runner control: {e}"))?;
+    Ok(())
 }

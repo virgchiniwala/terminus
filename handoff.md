@@ -25,6 +25,8 @@ Last updated: 2026-02-18
   - Keychain-backed OAuth token storage for Gmail and Microsoft 365
   - Tauri commands: list/save/start/complete/disconnect provider connection
   - Manual inbox watcher tick command with provider fetch + dedupe + run queueing
+  - Runner control model + throttled watcher cadence command (`tick_runner_cycle`)
+  - App-open polling loop in UI for watcher cadence visibility
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -32,9 +34,9 @@ Last updated: 2026-02-18
 
 ## Current Priority Track
 - Next phase follows updated strategy order:
-  1. P0.5 completion: convert manual watcher tick into background/app-open cadence with clear running/paused truth
-  2. P0.6 safe send/reply effectors with typed approvals and idempotency
-  3. P0.7 minimal provider-backed triage actions
+  1. P0.6 safe send/reply effectors with typed approvals and idempotency
+  2. P0.7 minimal provider-backed triage actions
+  3. P0.8 menubar/background runner for window-closed execution
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).

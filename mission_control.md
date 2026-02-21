@@ -34,27 +34,29 @@ Last updated: 2026-02-18
 - Learning Layer: Evaluate -> Adapt -> Memory
 
 ## Now
-### P0.4 / P0.5 (Foundations) — Email Connections + Watcher Tick
+### P0.4 / P0.5 — Email Connections + Watcher Cadence
 Owner: Friday + Fury
-Status: In Progress
+Status: Done
 Scope:
 - Gmail + Microsoft 365 OAuth-ready connection flow
 - keychain-only OAuth token storage
 - provider connection status surfaced in app
-- manual inbox watcher tick command (real fetch + dedupe + run queue)
+- throttled watcher cadence command + app-open polling loop
+- runner control model (background toggle, watcher toggle, interval, max items)
 Acceptance:
 - OAuth setup can be saved and connection can be completed with auth code
 - no OAuth tokens persisted in SQLite
 - watcher tick dedupes by provider message id and enqueues inbox triage runs
+- watcher cadence respects poll interval throttling and updates visible runner truth
 Verification:
 - `cargo test`
 - `npm run build`
-- manual: connect provider -> poll inbox -> confirm queued runs in Activity
+- manual: connect provider -> wait for cycle -> verify queued runs and backlog updates
 
 ## Next
-1. P0.5 completion: scheduled/background watcher loop + throttling controls + clearer paused/running state
-2. P0.6: Safe Effector email send/reply policy gates + typed approval payloads
-3. P0.7: provider-backed triage actions (label/archive or folder/category)
+1. P0.6: Safe Effector email send/reply policy gates + typed approval payloads
+2. P0.7: provider-backed triage actions (label/archive or folder/category)
+3. P0.8: menubar/background agent execution when window is closed
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution

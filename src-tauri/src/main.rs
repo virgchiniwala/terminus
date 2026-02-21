@@ -13,6 +13,7 @@ use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
 use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 #[derive(Default)]
@@ -44,6 +45,29 @@ struct IntentDraftResponse {
     classification_reason: String,
     plan: AutopilotPlan,
     preview: IntentDraftPreview,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerControlInput {
+    background_enabled: bool,
+    watcher_enabled: bool,
+    watcher_poll_seconds: i64,
+    watcher_max_items: i64,
+    gmail_autopilot_id: String,
+    microsoft_autopilot_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerCycleSummary {
+    watcher_status: String,
+    providers_polled: usize,
+    fetched: usize,
+    deduped: usize,
+    started_runs: usize,
+    failed: usize,
+    resumed_due_runs: usize,
 }
 
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
@@ -227,6 +251,116 @@ fn run_inbox_watcher_tick(
         &autopilot_id,
         max_items.unwrap_or(10),
     )
+}
+
+#[tauri::command]
+fn get_runner_control(state: tauri::State<AppState>) -> Result<db::RunnerControlRecord, String> {
+    let connection = open_connection(&state)?;
+    db::get_runner_control(&connection)
+}
+
+#[tauri::command]
+fn update_runner_control(
+    state: tauri::State<AppState>,
+    input: RunnerControlInput,
+) -> Result<db::RunnerControlRecord, String> {
+    if !(15..=900).contains(&input.watcher_poll_seconds) {
+        return Err("Watcher poll interval must be between 15 and 900 seconds.".to_string());
+    }
+    if !(1..=25).contains(&input.watcher_max_items) {
+        return Err("Watcher max emails must be between 1 and 25.".to_string());
+    }
+    if input.gmail_autopilot_id.trim().is_empty() || input.microsoft_autopilot_id.trim().is_empty()
+    {
+        return Err("Autopilot IDs cannot be empty.".to_string());
+    }
+
+    let connection = open_connection(&state)?;
+    let mut current = db::get_runner_control(&connection)?;
+    current.background_enabled = input.background_enabled;
+    current.watcher_enabled = input.watcher_enabled;
+    current.watcher_poll_seconds = input.watcher_poll_seconds;
+    current.watcher_max_items = input.watcher_max_items;
+    current.gmail_autopilot_id = input.gmail_autopilot_id.trim().to_string();
+    current.microsoft_autopilot_id = input.microsoft_autopilot_id.trim().to_string();
+    db::upsert_runner_control(&connection, &current)?;
+    db::get_runner_control(&connection)
+}
+
+#[tauri::command]
+fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary, String> {
+    let mut connection = open_connection(&state)?;
+    let mut control = db::get_runner_control(&connection)?;
+    let now = now_ms();
+
+    let mut summary = RunnerCycleSummary {
+        watcher_status: "idle".to_string(),
+        providers_polled: 0,
+        fetched: 0,
+        deduped: 0,
+        started_runs: 0,
+        failed: 0,
+        resumed_due_runs: 0,
+    };
+
+    if !control.watcher_enabled {
+        summary.watcher_status = "paused".to_string();
+    } else if let Some(last_tick) = control.watcher_last_tick_ms {
+        if now - last_tick < control.watcher_poll_seconds.saturating_mul(1000) {
+            summary.watcher_status = "throttled".to_string();
+        } else {
+            run_watchers(&mut connection, &control, &mut summary)?;
+            control.watcher_last_tick_ms = Some(now);
+            db::upsert_runner_control(&connection, &control)?;
+            summary.watcher_status = "ran".to_string();
+        }
+    } else {
+        run_watchers(&mut connection, &control, &mut summary)?;
+        control.watcher_last_tick_ms = Some(now);
+        db::upsert_runner_control(&connection, &control)?;
+        summary.watcher_status = "ran".to_string();
+    }
+
+    let resumed = RunnerEngine::resume_due_runs(&mut connection, 20).map_err(|e| e.to_string())?;
+    summary.resumed_due_runs = resumed.len();
+    Ok(summary)
+}
+
+fn run_watchers(
+    connection: &mut rusqlite::Connection,
+    control: &db::RunnerControlRecord,
+    summary: &mut RunnerCycleSummary,
+) -> Result<(), String> {
+    let connections = email_connections::list_connections(connection)?;
+    for provider in connections
+        .into_iter()
+        .filter(|record| record.status == "connected")
+    {
+        let autopilot_id = if provider.provider == "gmail" {
+            control.gmail_autopilot_id.as_str()
+        } else {
+            control.microsoft_autopilot_id.as_str()
+        };
+        let result = inbox_watcher::run_watcher_tick(
+            connection,
+            &provider.provider,
+            autopilot_id,
+            control.watcher_max_items as usize,
+        )?;
+        summary.providers_polled += 1;
+        summary.fetched += result.fetched;
+        summary.deduped += result.deduped;
+        summary.started_runs += result.started_runs;
+        summary.failed += result.failed;
+    }
+    Ok(())
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 #[tauri::command]
@@ -442,6 +576,9 @@ fn main() {
             complete_email_oauth,
             disconnect_email_provider,
             run_inbox_watcher_tick,
+            get_runner_control,
+            update_runner_control,
+            tick_runner_cycle,
             record_decision_event,
             compact_learning_data
         ])

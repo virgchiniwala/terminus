@@ -6,6 +6,7 @@ import type {
   IntentDraftResponse,
   OAuthStartResponse,
   RecipeKind,
+  RunnerControlRecord,
 } from "./types";
 
 const fallbackSnapshot: HomeSnapshot = {
@@ -28,13 +29,27 @@ function nowId(prefix: string): string {
 function normalizeSnapshot(raw: unknown): HomeSnapshot {
   const value = raw as {
     surfaces?: HomeSnapshot["surfaces"];
-    runner?: { mode?: "app_open" | "background"; statusLine?: string; status_line?: string };
+    runner?: {
+      mode?: "app_open" | "background";
+      statusLine?: string;
+      status_line?: string;
+      backlogCount?: number;
+      backlog_count?: number;
+      watcherEnabled?: boolean;
+      watcher_enabled?: boolean;
+      watcherLastTickMs?: number | null;
+      watcher_last_tick_ms?: number | null;
+    };
   };
   return {
     surfaces: value.surfaces ?? fallbackSnapshot.surfaces,
     runner: {
       mode: value.runner?.mode ?? "app_open",
       statusLine: value.runner?.statusLine ?? value.runner?.status_line ?? fallbackSnapshot.runner.statusLine,
+      backlogCount: value.runner?.backlogCount ?? value.runner?.backlog_count ?? 0,
+      watcherEnabled: value.runner?.watcherEnabled ?? value.runner?.watcher_enabled ?? true,
+      watcherLastTickMs:
+        value.runner?.watcherLastTickMs ?? value.runner?.watcher_last_tick_ms ?? null,
     },
   };
 }
@@ -107,6 +122,7 @@ export function App() {
   const [oauthCode, setOauthCode] = useState("");
   const [watcherAutopilotId, setWatcherAutopilotId] = useState("auto_inbox_watch");
   const [watcherMaxItems, setWatcherMaxItems] = useState(10);
+  const [runnerControl, setRunnerControl] = useState<RunnerControlRecord | null>(null);
 
   const loadSnapshot = () => {
     setLoading(true);
@@ -135,6 +151,20 @@ export function App() {
   useEffect(() => {
     loadSnapshot();
     loadConnections();
+    loadRunnerControl();
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      invoke("tick_runner_cycle")
+        .then(() => {
+          loadSnapshot();
+        })
+        .catch(() => {
+          // keep silent; runner status remains visible on Home
+        });
+    }, 10_000);
+    return () => window.clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -175,6 +205,50 @@ export function App() {
       .catch((err) => {
         console.error("Failed to load connections:", err);
         setConnectionsMessage("Could not load provider connections.");
+      });
+  };
+
+  const loadRunnerControl = () => {
+    invoke<RunnerControlRecord>("get_runner_control")
+      .then((payload: any) => {
+        setRunnerControl({
+          backgroundEnabled: payload.backgroundEnabled ?? payload.background_enabled ?? false,
+          watcherEnabled: payload.watcherEnabled ?? payload.watcher_enabled ?? true,
+          watcherPollSeconds: payload.watcherPollSeconds ?? payload.watcher_poll_seconds ?? 60,
+          watcherMaxItems: payload.watcherMaxItems ?? payload.watcher_max_items ?? 10,
+          gmailAutopilotId:
+            payload.gmailAutopilotId ?? payload.gmail_autopilot_id ?? "auto_inbox_watch_gmail",
+          microsoftAutopilotId:
+            payload.microsoftAutopilotId ??
+            payload.microsoft_autopilot_id ??
+            "auto_inbox_watch_microsoft365",
+          watcherLastTickMs: payload.watcherLastTickMs ?? payload.watcher_last_tick_ms ?? null,
+        });
+      })
+      .catch((err) => {
+        console.error("Failed to load runner control:", err);
+      });
+  };
+
+  const saveRunnerControl = (next: RunnerControlRecord) => {
+    invoke<RunnerControlRecord>("update_runner_control", {
+      input: {
+        backgroundEnabled: next.backgroundEnabled,
+        watcherEnabled: next.watcherEnabled,
+        watcherPollSeconds: next.watcherPollSeconds,
+        watcherMaxItems: next.watcherMaxItems,
+        gmailAutopilotId: next.gmailAutopilotId,
+        microsoftAutopilotId: next.microsoftAutopilotId,
+      },
+    })
+      .then(() => {
+        setRunnerControl(next);
+        setConnectionsMessage("Runner controls updated.");
+        loadSnapshot();
+      })
+      .catch((err) => {
+        console.error("Failed to update runner control:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not update runner controls.");
       });
   };
 
@@ -321,6 +395,7 @@ export function App() {
           `Watcher tick complete: fetched ${summary.fetched}, deduped ${summary.deduped}, queued ${started}.`
         );
         loadSnapshot();
+        loadRunnerControl();
       })
       .catch((err) => {
         console.error("Watcher tick failed:", err);
@@ -397,6 +472,7 @@ export function App() {
         <section className="runner-banner" aria-label="Runner status">
           <strong>Runner mode:</strong> {snapshot.runner.mode === "background" ? "Background" : "App Open"}
           <p>{snapshot.runner.statusLine}</p>
+          <p>Pending runs: {snapshot.runner.backlogCount ?? 0}</p>
         </section>
 
         <section className="connection-panel" aria-label="Email connections">
@@ -455,6 +531,70 @@ export function App() {
               />
             </label>
           </div>
+          {runnerControl && (
+            <div className="watcher-controls">
+              <label>
+                <span>Background runner</span>
+                <select
+                  value={runnerControl.backgroundEnabled ? "on" : "off"}
+                  onChange={(event) =>
+                    saveRunnerControl({
+                      ...runnerControl,
+                      backgroundEnabled: event.target.value === "on",
+                    })
+                  }
+                >
+                  <option value="off">Off</option>
+                  <option value="on">On</option>
+                </select>
+              </label>
+              <label>
+                <span>Inbox watcher</span>
+                <select
+                  value={runnerControl.watcherEnabled ? "on" : "off"}
+                  onChange={(event) =>
+                    saveRunnerControl({
+                      ...runnerControl,
+                      watcherEnabled: event.target.value === "on",
+                    })
+                  }
+                >
+                  <option value="on">Active</option>
+                  <option value="off">Paused</option>
+                </select>
+              </label>
+              <label>
+                <span>Watcher interval (seconds)</span>
+                <input
+                  type="number"
+                  min={15}
+                  max={900}
+                  value={runnerControl.watcherPollSeconds}
+                  onChange={(event) =>
+                    saveRunnerControl({
+                      ...runnerControl,
+                      watcherPollSeconds: Number(event.target.value) || 60,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                <span>Watcher max emails</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={25}
+                  value={runnerControl.watcherMaxItems}
+                  onChange={(event) =>
+                    saveRunnerControl({
+                      ...runnerControl,
+                      watcherMaxItems: Number(event.target.value) || 10,
+                    })
+                  }
+                />
+              </label>
+            </div>
+          )}
           {connectionsMessage && <p className="connection-message">{connectionsMessage}</p>}
 
           <div className="connection-cards">
