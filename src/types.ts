@@ -12,6 +12,9 @@ export interface HomeSnapshot {
   runner: {
     mode: "app_open" | "background";
     statusLine: string;
+    backlogCount?: number;
+    watcherEnabled?: boolean;
+    watcherLastTickMs?: number | null;
   };
 }
 
@@ -47,6 +50,16 @@ export interface OAuthStartResponse {
   authUrl: string;
   state: string;
   expiresAtMs: number;
+}
+
+export interface RunnerControlRecord {
+  backgroundEnabled: boolean;
+  watcherEnabled: boolean;
+  watcherPollSeconds: number;
+  watcherMaxItems: number;
+  gmailAutopilotId: string;
+  microsoftAutopilotId: string;
+  watcherLastTickMs: number | null;
 }
 
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
