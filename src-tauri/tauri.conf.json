@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://localhost:1420 http://127.0.0.1:1420 https://api.openai.com https://api.anthropic.com https://generativelanguage.googleapis.com;"
     }
   },
   "bundle": {

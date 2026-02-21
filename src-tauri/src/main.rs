@@ -9,10 +9,10 @@ mod schema;
 mod transport;
 mod web;
 
-use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
+use runner::{ApprovalRecord, ClarificationRecord, RunReceipt, RunRecord, RunnerEngine};
+use rusqlite::OptionalExtension;
 use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
 use serde::Serialize;
-use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -226,6 +226,25 @@ fn reject_run_approval(
 fn list_pending_approvals(state: tauri::State<AppState>) -> Result<Vec<ApprovalRecord>, String> {
     let connection = open_connection(&state)?;
     RunnerEngine::list_pending_approvals(&connection).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_pending_clarifications(
+    state: tauri::State<AppState>,
+) -> Result<Vec<ClarificationRecord>, String> {
+    let connection = open_connection(&state)?;
+    RunnerEngine::list_pending_clarifications(&connection).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn submit_clarification_answer(
+    state: tauri::State<AppState>,
+    clarification_id: String,
+    answer_json: String,
+) -> Result<RunRecord, String> {
+    let mut connection = open_connection(&state)?;
+    RunnerEngine::submit_clarification_answer(&mut connection, &clarification_id, &answer_json)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -708,9 +727,7 @@ fn classify_guidance(instruction: &str) -> (GuidanceMode, String, Option<String>
             None,
         );
     }
-    if lowered.contains("always")
-        || lowered.contains("from now on")
-        || lowered.starts_with("when ")
+    if lowered.contains("always") || lowered.contains("from now on") || lowered.starts_with("when ")
     {
         return (
             GuidanceMode::ProposedRule,
@@ -759,7 +776,9 @@ fn compute_missed_cycles(last_tick_ms: Option<i64>, now_ms_value: i64, poll_ms: 
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_guidance, compute_missed_cycles, normalize_guidance_instruction, GuidanceMode};
+    use super::{
+        classify_guidance, compute_missed_cycles, normalize_guidance_instruction, GuidanceMode,
+    };
 
     #[test]
     fn compute_missed_cycles_returns_zero_when_within_interval() {
@@ -1045,6 +1064,8 @@ fn main() {
             approve_run_approval,
             reject_run_approval,
             list_pending_approvals,
+            list_pending_clarifications,
+            submit_clarification_answer,
             get_run,
             get_terminal_receipt,
             list_email_connections,

@@ -15,7 +15,7 @@ const fallbackSnapshot: HomeSnapshot = {
   surfaces: [
     { title: "Autopilots", subtitle: "Create repeatable follow-through", count: 0, cta: "Create Autopilot" },
     { title: "Outcomes", subtitle: "Results from completed runs", count: 0, cta: "View Outcomes" },
-    { title: "Approvals", subtitle: "Drafts waiting for your go-ahead", count: 0, cta: "Open Queue" },
+    { title: "Approvals", subtitle: "Actions waiting for your go-ahead", count: 0, cta: "Open Queue" },
     { title: "Activity", subtitle: "What happened and why", count: 0, cta: "Open Activity" },
   ],
   runner: {
@@ -352,7 +352,7 @@ export function App() {
       })
       .catch((err) => {
         console.error("Failed to draft intent:", err);
-        setIntentError(typeof err === "string" ? err : "Could not prepare this draft yet.");
+        setIntentError(typeof err === "string" ? err : "Could not prepare this setup yet.");
       })
       .finally(() => {
         setIntentLoading(false);
@@ -936,7 +936,7 @@ export function App() {
                     <ul>{draft.preview.reads.map((item) => <li key={item}>{item}</li>)}</ul>
                   </div>
                   <div>
-                    <h3>Will create</h3>
+                    <h3>Will execute</h3>
                     <ul>{draft.preview.writes.map((item) => <li key={item}>{item}</li>)}</ul>
                   </div>
                   <div>

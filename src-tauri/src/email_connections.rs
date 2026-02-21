@@ -583,8 +583,8 @@ fn send_outbound_email_live(
             "Recipient is missing for this send action.",
         ));
     }
-    let token =
-        get_access_token(connection, request.provider).map_err(|e| EffectorError::non_retryable(&e))?;
+    let token = get_access_token(connection, request.provider)
+        .map_err(|e| EffectorError::non_retryable(&e))?;
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -688,7 +688,8 @@ fn apply_triage_action_live(
     provider_message_id: &str,
     action: TriageAction,
 ) -> Result<TriageResult, EffectorError> {
-    let token = get_access_token(connection, provider).map_err(|e| EffectorError::non_retryable(&e))?;
+    let token =
+        get_access_token(connection, provider).map_err(|e| EffectorError::non_retryable(&e))?;
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -706,7 +707,9 @@ fn apply_triage_action_live(
                 .json(&json!({"removeLabelIds": ["INBOX"]}))
                 .send()
                 .map_err(|_| {
-                    EffectorError::retryable("Could not reach Gmail triage endpoint. Try again shortly.")
+                    EffectorError::retryable(
+                        "Could not reach Gmail triage endpoint. Try again shortly.",
+                    )
                 })?;
             if response.status().as_u16() == 429 || response.status().is_server_error() {
                 return Err(EffectorError::retryable(

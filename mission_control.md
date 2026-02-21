@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-22
+Last updated: 2026-02-21
 
 ## Current State
 - Mode: Day
@@ -14,7 +14,7 @@ Last updated: 2026-02-22
 - Compose-first outbound behavior with gated sending
 - Secrets only in OS keychain
 - Shared runtime for all three MVP presets
-- Intent Bar may be conversational input, but outputs must always resolve to objects (run draft or autopilot draft)
+- Intent Bar may be conversational input, but outputs must always resolve to executable objects
 
 ## Provider Policy
 - Supported: OpenAI, Anthropic
@@ -37,27 +37,29 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### P0.10 — Scoped Guide command (safe guidance input)
-Owner: Friday + Loki
-Status: Done (slice 1)
+### PR2-PR3 Transition — Draft-to-Action canonicalization
+Owner: Friday + Fury + Loki
+Status: In progress
 Scope:
-- add scoped guidance command for `autopilot|run|approval|outcome`
-- classify guidance into `applied`, `proposed_rule`, or `needs_approval`
-- block risky capability-expanding instructions from being auto-applied
-- persist guidance events in SQLite with bounded instruction length
+- add canonical `actions` + `action_executions` storage
+- link approvals to `action_id` with idempotent approval paths
+- add clarification queue primitives (`clarifications`, answer/resume command)
+- reframe UI/home copy from draft review to action authorization
+- add provider call observability table hooks (`provider_calls`)
 Acceptance:
-- guidance requires explicit scope and scope id
-- risky instructions are stored but returned as `needs_approval` with no capability mutation
-- recurring phrasing is stored as rule proposal rather than silent mutation
+- no core home/approval copy describes drafts as primary user outcome
+- action rows persist for approval-gated steps with idempotency key
+- approval rows include `action_id`
+- clarification answer resumes the same run
+- provider calls are logged for LLM steps
 Verification:
-- `cargo test`
+- `cd src-tauri && cargo test`
 - `npm run build`
-- manual: submit scope+instruction from Guide panel and verify response mode/message
 
 ## Next
-1. P0.11/P0.12: Voice object + “Make this a rule” approval flow
-2. P1.x: provider routing/caching hardening and security tightening
-3. UX cleanup for calm language across approvals/outcomes
+1. PR4: Completed outcome semantics on outcome surfaces
+2. PR5: Single-slot clarification UX polish
+3. PR6/PR7: deterministic provider scaffolding + CSP/redaction hardening
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
