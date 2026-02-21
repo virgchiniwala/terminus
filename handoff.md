@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-22
+Last updated: 2026-02-21
 
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
@@ -57,6 +57,12 @@ Last updated: 2026-02-22
   - risky instructions (capability/policy expansion attempts) are blocked from auto-apply and returned as `needs_approval`
   - persisted `guidance_events` table stores scope, mode, bounded instruction, and result JSON
   - current UI includes a minimal Guide panel for scoped input and response messaging
+- Transition foundations (draft-to-action canonicalization):
+  - new `actions` and `action_executions` tables with idempotency keys
+  - `approvals.action_id` support (approval rows can reference executable actions)
+  - runner action interfaces: `ActionType`, `ActionRecord`, `ActionExecutionRecord`, `execute_action(...)`
+  - clarification queue foundation: `clarifications` table, `list_pending_clarifications`, `submit_clarification_answer`
+  - provider observability foundation: `provider_calls` table + provider dispatch logging hooks in runner
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes

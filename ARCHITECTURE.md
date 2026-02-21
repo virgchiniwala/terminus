@@ -1,6 +1,6 @@
 # Architecture Overview
 
-**Last Updated:** 2026-02-13  
+**Last Updated:** 2026-02-21  
 **Version:** MVP (v0.1.0)
 
 ---
@@ -11,11 +11,12 @@ Terminus is a **Personal AI OS** built as a native desktop app (Tauri) with a Ru
 
 ### Core Principles
 
-1. **Safety First** - All actions require explicit approval; no silent side-effects
-2. **Billing-Safe** - Integer cent accounting, enforced spend caps
-3. **Transparent** - Always show what will happen before it happens
-4. **Calm UX** - Object-first UI (not chat-based), minimal noise
-5. **Local-First** - All execution and secrets stay on device
+1. **Action-First Completion** - Primary outputs are completed outcomes and executable actions.
+2. **Safety First** - Risky actions require explicit approval; no silent side-effects.
+3. **Billing-Safe** - Integer cent accounting, enforced spend caps.
+4. **Transparent** - Receipts explain what executed, what was blocked, and why.
+5. **Calm UX** - Object-first UI (not chat-based), minimal noise.
+6. **Local-First** - All execution and secrets stay on device.
 
 ---
 
@@ -37,6 +38,12 @@ Terminus is a **Personal AI OS** built as a native desktop app (Tauri) with a Ru
 │  │  - Tick-based execution         │    │
 │  │  - Retry with backoff           │    │
 │  │  - Approval orchestration       │    │
+│  │  - Clarification queue          │    │
+│  └────────────────────────────────┘    │
+│  ┌────────────────────────────────┐    │
+│  │   Action Layer                 │    │
+│  │  - Typed executable actions    │    │
+│  │  - Idempotent execution logs   │    │
 │  └────────────────────────────────┘    │
 │  ┌────────────────────────────────┐    │
 │  │   Provider Layer                │    │
@@ -222,12 +229,13 @@ CREATE TABLE activities (
 );
 ```
 
-**approvals** - Pending decisions
+**approvals** - Pending action decisions
 ```sql
 CREATE TABLE approvals (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   step_id TEXT NOT NULL,
+  action_id TEXT,
   status TEXT NOT NULL, -- pending/approved/rejected
   preview TEXT,
   created_at INTEGER,
@@ -236,13 +244,19 @@ CREATE TABLE approvals (
 );
 ```
 
-**outcomes** - Side-effect results
+**actions / action_executions** - Canonical executable work
+```sql
+CREATE TABLE actions (...);
+CREATE TABLE action_executions (...);
+```
+
+**outcomes** - Completed outcome cards + receipts
 ```sql
 CREATE TABLE outcomes (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   step_id TEXT,
-  kind TEXT NOT NULL, -- outcome_draft/receipt/etc
+  kind TEXT NOT NULL, -- completed_outcome/receipt/internal_payload
   content TEXT NOT NULL,
   created_at INTEGER,
   FOREIGN KEY (run_id) REFERENCES runs(id)
@@ -297,10 +311,10 @@ pub struct PlanStep {
 
 Actions that steps can perform:
 - `ReadWebsite` - Fetch URL content
-- `WriteOutcomeDraft` - Compose result (no send)
+- `WriteOutcomeDraft` - Internal payload generation (compatibility only)
 - `SendEmail` - Send email (approval required)
 
-New primitives are **deny-by-default** and require explicit allowlisting.
+New primitives are **deny-by-default** and require explicit allowlisting. Primary user-facing completion remains executed outcomes, pending approvals, or blocked clarification cards.
 
 ---
 

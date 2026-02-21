@@ -180,6 +180,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               id TEXT PRIMARY KEY,
               run_id TEXT NOT NULL,
               step_id TEXT NOT NULL,
+              action_id TEXT,
               status TEXT NOT NULL,
               preview TEXT NOT NULL,
               payload_type TEXT NOT NULL DEFAULT 'generic',
@@ -190,6 +191,64 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               decided_at INTEGER,
               UNIQUE (run_id, step_id),
               FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS actions (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              step_id TEXT NOT NULL,
+              action_type TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              requires_approval INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL UNIQUE,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS action_executions (
+              id TEXT PRIMARY KEY,
+              action_id TEXT NOT NULL,
+              attempt INTEGER NOT NULL,
+              executed_at_ms INTEGER NOT NULL,
+              result_status TEXT NOT NULL,
+              result_json TEXT NOT NULL,
+              latency_ms INTEGER,
+              retry_at_ms INTEGER,
+              UNIQUE(action_id, attempt),
+              FOREIGN KEY (action_id) REFERENCES actions(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS clarifications (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              step_id TEXT NOT NULL,
+              field_key TEXT NOT NULL,
+              question TEXT NOT NULL,
+              options_json TEXT,
+              answer_json TEXT,
+              status TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS provider_calls (
+              id TEXT PRIMARY KEY,
+              run_id TEXT,
+              step_id TEXT,
+              provider TEXT NOT NULL,
+              model TEXT NOT NULL,
+              request_kind TEXT NOT NULL,
+              input_chars INTEGER,
+              output_chars INTEGER,
+              input_tokens_est INTEGER,
+              output_tokens_est INTEGER,
+              cache_hit INTEGER,
+              latency_ms INTEGER,
+              cost_cents_est INTEGER,
+              created_at_ms INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS outcomes (
@@ -492,7 +551,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "last_text_excerpt",
         "TEXT NOT NULL DEFAULT ''",
     )?;
-    ensure_column(connection, "email_ingest_events", "provider_thread_id", "TEXT")?;
+    ensure_column(
+        connection,
+        "email_ingest_events",
+        "provider_thread_id",
+        "TEXT",
+    )?;
     ensure_column(connection, "email_ingest_events", "sender_email", "TEXT")?;
     ensure_column(
         connection,
@@ -518,6 +582,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "payload_json",
         "TEXT NOT NULL DEFAULT '{}'",
     )?;
+    ensure_column(connection, "approvals", "action_id", "TEXT")?;
     ensure_column(connection, "decision_events", "client_event_id", "TEXT")?;
     ensure_column(
         connection,
@@ -616,6 +681,36 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create runs state index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_actions_run_step ON actions(run_id, step_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create actions run-step index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_actions_status_updated ON actions(status, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create actions status index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_action_executions_action_attempt ON action_executions(action_id, attempt DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create action executions index: {e}"))?;
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_clarifications_single_pending ON clarifications(run_id, step_id, status) WHERE status = 'pending'",
+            [],
+        )
+        .map_err(|e| format!("Failed to create clarifications pending index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_provider_calls_run_step ON provider_calls(run_id, step_id, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create provider calls index: {e}"))?;
     connection
         .execute(
             "INSERT OR IGNORE INTO runner_control (
@@ -894,7 +989,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             },
             HomeSurface {
                 title: "Approvals".into(),
-                subtitle: "Drafts waiting for your go-ahead".into(),
+                subtitle: "Actions waiting for your go-ahead".into(),
                 count: count("approvals")?,
                 cta: "Open Queue".into(),
             },
@@ -1000,7 +1095,16 @@ pub fn get_autopilot_send_policy(
         .optional()
         .map_err(|e| format!("Failed to read send policy: {e}"))?;
 
-    let Some((allow_sending, allowlist_json, max_sends_per_day, start, end, allow_outside, updated_at_ms)) = row else {
+    let Some((
+        allow_sending,
+        allowlist_json,
+        max_sends_per_day,
+        start,
+        end,
+        allow_outside,
+        updated_at_ms,
+    )) = row
+    else {
         return Ok(AutopilotSendPolicyRecord {
             autopilot_id: autopilot_id.to_string(),
             allow_sending: false,

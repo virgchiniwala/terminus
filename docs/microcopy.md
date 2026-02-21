@@ -1,4 +1,7 @@
 # UI Microcopy — Personal AI OS
+Last updated: 2026-02-21
+
+> Product invariant: Terminus presents completed outcomes and executable approvals. Draft text may exist internally but is not the primary completion artifact.
 
 **Voice:** Calm, confident, human. We explain what will happen before it happens. We show, don't tell. We earn trust through clarity, not marketing speak.
 
@@ -12,7 +15,7 @@
 2. **Show cost and permissions upfront.** Trust = transparency.
 3. **Errors suggest one-click fixes.** Never dead-end the user.
 4. **Celebrate small wins.** "Your first automation just ran perfectly." feels good.
-5. **Default to safe.** Drafts, previews, read-only until explicitly approved.
+5. **Default to safe.** Actions stay gated until explicitly approved.
 
 ---
 

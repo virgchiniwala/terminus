@@ -1,9 +1,9 @@
+use crate::db;
+use crate::email_connections::{self, EmailProvider, OutboundEmailRequest, TriageAction};
 use crate::learning::{
     self, AdaptationSummary, DecisionEventMetadata, DecisionEventType, RunEvaluationSummary,
     RuntimeProfile,
 };
-use crate::email_connections::{self, EmailProvider, OutboundEmailRequest, TriageAction};
-use crate::db;
 use crate::primitives::PrimitiveGuard;
 use crate::providers::{
     ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
@@ -117,11 +117,92 @@ pub struct ApprovalRecord {
     pub id: String,
     pub run_id: String,
     pub step_id: String,
+    pub action_id: Option<String>,
     pub status: String,
     pub preview: String,
     pub payload_type: String,
     pub payload_json: String,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarificationRecord {
+    pub id: String,
+    pub run_id: String,
+    pub step_id: String,
+    pub field_key: String,
+    pub question: String,
+    pub options_json: Option<String>,
+    pub answer_json: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionType {
+    DeliverNotificationAction,
+    CreateOutcomeAction,
+    EmailTriageAction,
+    EmailSendAction,
+}
+
+impl ActionType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::DeliverNotificationAction => "deliver_notification",
+            Self::CreateOutcomeAction => "create_outcome",
+            Self::EmailTriageAction => "email_triage",
+            Self::EmailSendAction => "email_send",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ActionStatus {
+    PendingApproval,
+    Ready,
+    Executed,
+    Failed,
+    Canceled,
+}
+
+impl ActionStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingApproval => "pending_approval",
+            Self::Ready => "ready",
+            Self::Executed => "executed",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRecord {
+    pub id: String,
+    pub run_id: String,
+    pub step_id: String,
+    pub action_type: ActionType,
+    pub payload_json: String,
+    pub requires_approval: bool,
+    pub status: String,
+    pub idempotency_key: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionExecutionRecord {
+    pub id: String,
+    pub action_id: String,
+    pub attempt: i64,
+    pub executed_at_ms: i64,
+    pub result_status: String,
+    pub result_json: String,
+    pub latency_ms: Option<i64>,
+    pub retry_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,6 +547,12 @@ impl RunnerEngine {
         approval_id: &str,
     ) -> Result<RunRecord, RunnerError> {
         let approval = Self::get_approval(connection, approval_id)?;
+        if approval.status == "approved" {
+            if let Some(action_id) = approval.action_id.as_deref() {
+                Self::execute_action(connection, action_id)?;
+            }
+            return Self::get_run_with_learning(connection, &approval.run_id);
+        }
         if approval.status != "pending" {
             return Err(RunnerError::Human(
                 "Approval is no longer pending.".to_string(),
@@ -479,6 +566,8 @@ impl RunnerEngine {
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
         let now = decision_now;
+        let has_action = approval.action_id.is_some();
+        let skip_step_after_approval = false;
 
         tx.execute(
             "
@@ -497,13 +586,19 @@ impl RunnerEngine {
             UPDATE runs
             SET state = 'ready',
                 soft_cap_approved = CASE WHEN ?1 THEN 1 ELSE soft_cap_approved END,
+                current_step_index = CASE WHEN ?2 THEN current_step_index + 1 ELSE current_step_index END,
                 failure_reason = NULL,
                 next_retry_backoff_ms = NULL,
                 next_retry_at_ms = NULL,
-                updated_at = ?2
-            WHERE id = ?3
+                updated_at = ?3
+            WHERE id = ?4
             ",
-            params![is_soft_cap_approval, now, approval.run_id],
+            params![
+                is_soft_cap_approval,
+                has_action && skip_step_after_approval,
+                now,
+                approval.run_id
+            ],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
@@ -526,6 +621,11 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
+        if skip_step_after_approval {
+            if let Some(action_id) = approval.action_id.as_deref() {
+                Self::execute_action(connection, action_id)?;
+            }
+        }
         let run_after_approval = Self::get_run(connection, &approval.run_id)?;
         learning::record_decision_event(
             connection,
@@ -549,6 +649,8 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         if is_soft_cap_approval {
+            Self::run_tick_internal(connection, &approval.run_id, None)
+        } else if has_action && skip_step_after_approval {
             Self::run_tick_internal(connection, &approval.run_id, None)
         } else {
             Self::run_tick_internal(connection, &approval.run_id, Some(&approval.step_id))
@@ -674,7 +776,7 @@ impl RunnerEngine {
         let mut stmt = connection
             .prepare(
                 "
-                SELECT id, run_id, step_id, status, preview, payload_type, payload_json, reason
+                SELECT id, run_id, step_id, action_id, status, preview, payload_type, payload_json, reason
                 FROM approvals
                 WHERE status = 'pending'
                 ORDER BY created_at ASC
@@ -688,11 +790,12 @@ impl RunnerEngine {
                     id: row.get(0)?,
                     run_id: row.get(1)?,
                     step_id: row.get(2)?,
-                    status: row.get(3)?,
-                    preview: row.get(4)?,
-                    payload_type: row.get(5)?,
-                    payload_json: row.get(6)?,
-                    reason: row.get(7)?,
+                    action_id: row.get(3)?,
+                    status: row.get(4)?,
+                    preview: row.get(5)?,
+                    payload_type: row.get(6)?,
+                    payload_json: row.get(7)?,
+                    reason: row.get(8)?,
                 })
             })
             .map_err(|e| RunnerError::Db(e.to_string()))?;
@@ -702,6 +805,117 @@ impl RunnerEngine {
             approvals.push(row.map_err(|e| RunnerError::Db(e.to_string()))?);
         }
         Ok(approvals)
+    }
+
+    pub fn list_pending_clarifications(
+        connection: &Connection,
+    ) -> Result<Vec<ClarificationRecord>, RunnerError> {
+        let mut stmt = connection
+            .prepare(
+                "
+                SELECT id, run_id, step_id, field_key, question, options_json, answer_json, status
+                FROM clarifications
+                WHERE status = 'pending'
+                ORDER BY created_at_ms ASC
+                ",
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ClarificationRecord {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    step_id: row.get(2)?,
+                    field_key: row.get(3)?,
+                    question: row.get(4)?,
+                    options_json: row.get(5)?,
+                    answer_json: row.get(6)?,
+                    status: row.get(7)?,
+                })
+            })
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| RunnerError::Db(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    pub fn submit_clarification_answer(
+        connection: &mut Connection,
+        clarification_id: &str,
+        answer_json: &str,
+    ) -> Result<RunRecord, RunnerError> {
+        let row: (String, String, String) = connection
+            .query_row(
+                "SELECT run_id, status, field_key FROM clarifications WHERE id = ?1",
+                params![clarification_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let (run_id, status, field_key) = row;
+        if status != "pending" {
+            return Err(RunnerError::Human(
+                "Clarification is no longer pending.".to_string(),
+            ));
+        }
+        let tx = connection
+            .transaction()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let now = now_ms();
+        tx.execute(
+            "UPDATE clarifications
+             SET status = 'answered', answer_json = ?1, updated_at_ms = ?2
+             WHERE id = ?3",
+            params![truncate_chars(answer_json, 512), now, clarification_id],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        if field_key == "inbox_source_text" {
+            tx.execute(
+                "UPDATE runs
+                 SET plan_json = json_set(plan_json, '$.inboxSourceText', ?1),
+                     state = 'ready',
+                     failure_reason = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3",
+                params![answer_json, now, run_id],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        } else if field_key == "web_source_url" {
+            tx.execute(
+                "UPDATE runs
+                 SET plan_json = json_set(plan_json, '$.webSourceUrl', ?1),
+                     state = 'ready',
+                     failure_reason = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3",
+                params![answer_json, now, run_id],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        } else {
+            tx.execute(
+                "UPDATE runs
+                 SET state = 'ready',
+                     failure_reason = NULL,
+                     updated_at = ?1
+                 WHERE id = ?2",
+                params![now, run_id],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        }
+        tx.execute(
+            "INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
+             VALUES (?1, ?2, 'clarification_answered', 'blocked', 'ready', ?3, ?4)",
+            params![
+                make_id("activity"),
+                run_id,
+                "Clarification answered. Run is ready to continue.",
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
+        Self::run_tick(connection, &run_id)
     }
 
     pub fn get_run(connection: &Connection, run_id: &str) -> Result<RunRecord, RunnerError> {
@@ -998,6 +1212,50 @@ impl RunnerEngine {
                 )?;
             }
             Err(error) => {
+                if !error.retryable {
+                    let clarification = if step.primitive == PrimitiveId::ReadWeb
+                        && run
+                            .plan
+                            .web_source_url
+                            .as_deref()
+                            .unwrap_or("")
+                            .trim()
+                            .is_empty()
+                    {
+                        Some((
+                            "web_source_url",
+                            "One thing I need to proceed: which website should I monitor?",
+                        ))
+                    } else if step.primitive == PrimitiveId::ReadForwardedEmail
+                        && run
+                            .plan
+                            .inbox_source_text
+                            .as_deref()
+                            .unwrap_or("")
+                            .trim()
+                            .is_empty()
+                    {
+                        Some((
+                            "inbox_source_text",
+                            "One thing I need to proceed: paste the email text to triage.",
+                        ))
+                    } else if step.primitive == PrimitiveId::SendEmail
+                        && error.user_reason.contains("No recipient matched")
+                    {
+                        Some((
+                            "recipient",
+                            "One thing I need to proceed: which allowed recipient should receive this?",
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some((field_key, question)) = clarification {
+                        Self::pause_for_clarification(
+                            connection, &run, &step, field_key, question, None,
+                        )?;
+                        return Self::get_run_with_learning(connection, run_id);
+                    }
+                }
                 if error.retryable && run.retry_count < run.max_retries {
                     let next_retry = run.retry_count + 1;
                     let backoff_ms = compute_backoff_ms(next_retry as u32) as i64;
@@ -1163,7 +1421,6 @@ impl RunnerEngine {
                     });
                 }
 
-                let runtime = ProviderRuntime::default();
                 let memory_context =
                     learning::build_memory_context(connection, &run.autopilot_id, run.plan.recipe)
                         .map_err(|e| StepExecutionError {
@@ -1205,7 +1462,8 @@ impl RunnerEngine {
                     }),
                     correlation_id: Some(format!("{}:{}", run.id, step.id)),
                 };
-                let response = runtime.dispatch(&request).map_err(map_provider_error)?;
+                let response =
+                    Self::dispatch_provider_call(connection, run, step, "daily_summary", &request)?;
                 let parsed = parse_daily_summary_output(
                     &response.text,
                     &sources_artifact.sources_hash,
@@ -1397,7 +1655,6 @@ impl RunnerEngine {
                 })
             }
             PrimitiveId::WriteOutcomeDraft | PrimitiveId::WriteEmailDraft => {
-                let runtime = ProviderRuntime::default();
                 let memory_context =
                     learning::build_memory_context(connection, &run.autopilot_id, run.plan.recipe)
                         .map_err(|e| StepExecutionError {
@@ -1438,7 +1695,13 @@ impl RunnerEngine {
                     correlation_id: Some(format!("{}:{}", run.id, step.id)),
                 };
 
-                let response = runtime.dispatch(&request).map_err(map_provider_error)?;
+                let response = Self::dispatch_provider_call(
+                    connection,
+                    run,
+                    step,
+                    "generate_action",
+                    &request,
+                )?;
                 learning::persist_memory_usage(
                     connection,
                     &run.id,
@@ -1544,12 +1807,13 @@ impl RunnerEngine {
                 })
             }
             PrimitiveId::TriageEmail => {
-                let context = Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
-                    StepExecutionError {
-                        retryable: false,
-                        user_reason: e.to_string(),
-                    }
-                })?;
+                let context =
+                    Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
+                        StepExecutionError {
+                            retryable: false,
+                            user_reason: e.to_string(),
+                        }
+                    })?;
                 let Some(context) = context else {
                     return Ok(StepExecutionResult {
                         user_message:
@@ -1655,10 +1919,12 @@ impl RunnerEngine {
                         failure_reason_override: None,
                     });
                 }
-                let policy = db::get_autopilot_send_policy(connection, &run.autopilot_id)
-                    .map_err(|e| StepExecutionError {
-                        retryable: false,
-                        user_reason: e,
+                let policy =
+                    db::get_autopilot_send_policy(connection, &run.autopilot_id).map_err(|e| {
+                        StepExecutionError {
+                            retryable: false,
+                            user_reason: e,
+                        }
                     })?;
                 if !policy.allow_sending {
                     return Err(StepExecutionError {
@@ -1683,17 +1949,17 @@ impl RunnerEngine {
                 {
                     return Err(StepExecutionError {
                         retryable: false,
-                        user_reason:
-                            "Sending is paused during quiet hours for this Autopilot."
-                                .to_string(),
+                        user_reason: "Sending is paused during quiet hours for this Autopilot."
+                            .to_string(),
                     });
                 }
-                let sends_today = Self::count_sent_today(connection, &run.autopilot_id).map_err(
-                    |e| StepExecutionError {
-                        retryable: false,
-                        user_reason: e.to_string(),
-                    },
-                )?;
+                let sends_today =
+                    Self::count_sent_today(connection, &run.autopilot_id).map_err(|e| {
+                        StepExecutionError {
+                            retryable: false,
+                            user_reason: e.to_string(),
+                        }
+                    })?;
                 if sends_today >= policy.max_sends_per_day {
                     return Err(StepExecutionError {
                         retryable: false,
@@ -1722,12 +1988,13 @@ impl RunnerEngine {
                         user_reason: "No email draft was found for this run.".to_string(),
                     })?;
                 let subject = infer_subject_from_draft(&draft_body);
-                let context = Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
-                    StepExecutionError {
-                        retryable: false,
-                        user_reason: e.to_string(),
-                    }
-                })?;
+                let context =
+                    Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
+                        StepExecutionError {
+                            retryable: false,
+                            user_reason: e.to_string(),
+                        }
+                    })?;
                 let provider = context
                     .as_ref()
                     .map(|ctx| ctx.provider)
@@ -1803,19 +2070,23 @@ impl RunnerEngine {
         response: &ProviderResponse,
     ) -> Result<(), StepExecutionError> {
         let kind = if step.primitive == PrimitiveId::WriteEmailDraft {
-            "email_draft"
+            "action_payload_email"
         } else {
-            "outcome_draft"
+            "action_payload_outcome"
         };
-
-        let content = redact_text(&response.text);
+        let content = serde_json::json!({
+            "text": redact_text(&response.text),
+            "step_label": step.label,
+            "primitive": format!("{:?}", step.primitive).to_ascii_lowercase(),
+        })
+        .to_string();
         connection
             .execute(
                 "
                 INSERT INTO outcomes (
                   id, run_id, step_id, kind, status, content,
                   created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, 'drafted', ?5, ?6, ?6)
+                ) VALUES (?1, ?2, ?3, ?4, 'captured', ?5, ?6, ?6)
                 ON CONFLICT(run_id, step_id, kind)
                 DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
                 ",
@@ -1824,6 +2095,37 @@ impl RunnerEngine {
             .map_err(|_| StepExecutionError {
                 retryable: true,
                 user_reason: "Couldn't save generated output yet.".to_string(),
+            })?;
+
+        // Transitional compatibility for legacy consumers/tests still reading draft kinds.
+        let legacy_kind = if step.primitive == PrimitiveId::WriteEmailDraft {
+            "email_draft"
+        } else {
+            "outcome_draft"
+        };
+        let legacy_text = response.text.clone();
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content,
+                  created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, 'captured', ?5, ?6, ?6)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![
+                    make_id("outcome"),
+                    run.id,
+                    step.id,
+                    legacy_kind,
+                    redact_text(&legacy_text),
+                    now_ms()
+                ],
+            )
+            .map_err(|_| StepExecutionError {
+                retryable: true,
+                user_reason: "Couldn't save compatibility output yet.".to_string(),
             })?;
 
         Ok(())
@@ -1971,14 +2273,25 @@ impl RunnerEngine {
         connection: &Connection,
         run_id: &str,
     ) -> Result<Option<String>, RunnerError> {
-        connection
+        let payload: Option<String> = connection
             .query_row(
-                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'email_draft' ORDER BY updated_at DESC LIMIT 1",
+                "SELECT content FROM outcomes
+                 WHERE run_id = ?1 AND kind IN ('action_payload_email', 'email_draft')
+                 ORDER BY updated_at DESC LIMIT 1",
                 params![run_id],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| RunnerError::Db(e.to_string()))
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        if let Some(raw) = payload {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+                    return Ok(Some(text.to_string()));
+                }
+            }
+            return Ok(Some(raw));
+        }
+        Ok(None)
     }
 
     fn count_sent_today(connection: &Connection, autopilot_id: &str) -> Result<i64, RunnerError> {
@@ -2581,18 +2894,19 @@ impl RunnerEngine {
     ) -> Result<ApprovalRecord, RunnerError> {
         connection
             .query_row(
-                "SELECT id, run_id, step_id, status, preview, payload_type, payload_json, reason FROM approvals WHERE id = ?1",
+                "SELECT id, run_id, step_id, action_id, status, preview, payload_type, payload_json, reason FROM approvals WHERE id = ?1",
                 params![approval_id],
                 |row| {
                     Ok(ApprovalRecord {
                         id: row.get(0)?,
                         run_id: row.get(1)?,
                         step_id: row.get(2)?,
-                        status: row.get(3)?,
-                        preview: row.get(4)?,
-                        payload_type: row.get(5)?,
-                        payload_json: row.get(6)?,
-                        reason: row.get(7)?,
+                        action_id: row.get(3)?,
+                        status: row.get(4)?,
+                        preview: row.get(5)?,
+                        payload_type: row.get(6)?,
+                        payload_json: row.get(7)?,
+                        reason: row.get(8)?,
                     })
                 },
             )
@@ -2619,28 +2933,271 @@ impl RunnerEngine {
             .map_err(|e| RunnerError::Db(e.to_string()))
     }
 
+    fn create_action_for_step_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        run_id: &str,
+        step_id: &str,
+        action_type: ActionType,
+        payload_json: &str,
+        requires_approval: bool,
+        status: ActionStatus,
+    ) -> Result<String, RunnerError> {
+        let idempotency_key = format!("{run_id}:{step_id}:{}", action_type.as_str());
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT id FROM actions WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        let action_id = make_id("action");
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO actions (
+               id, run_id, step_id, action_type, payload_json, requires_approval, status, idempotency_key, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                action_id,
+                run_id,
+                step_id,
+                action_type.as_str(),
+                payload_json,
+                if requires_approval { 1 } else { 0 },
+                status.as_str(),
+                idempotency_key,
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(action_id)
+    }
+
+    pub fn execute_action(
+        connection: &mut Connection,
+        action_id: &str,
+    ) -> Result<ActionExecutionRecord, RunnerError> {
+        let tx = connection
+            .transaction()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let record = Self::execute_action_in_tx(&tx, action_id)?;
+        tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(record)
+    }
+
+    fn execute_action_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        action_id: &str,
+    ) -> Result<ActionExecutionRecord, RunnerError> {
+        let action: ActionRecord = tx
+            .query_row(
+                "SELECT id, run_id, step_id, action_type, payload_json, requires_approval, status, idempotency_key, created_at_ms, updated_at_ms
+                 FROM actions WHERE id = ?1",
+                params![action_id],
+                |row| {
+                    Ok(ActionRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        step_id: row.get(2)?,
+                        action_type: parse_action_type(&row.get::<_, String>(3)?).map_err(|e| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+                        })?,
+                        payload_json: row.get(4)?,
+                        requires_approval: row.get::<_, i64>(5)? == 1,
+                        status: row.get(6)?,
+                        idempotency_key: row.get(7)?,
+                        created_at_ms: row.get(8)?,
+                        updated_at_ms: row.get(9)?,
+                    })
+                },
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        if action.status == ActionStatus::Executed.as_str() {
+            let last = tx
+                .query_row(
+                    "SELECT id, action_id, attempt, executed_at_ms, result_status, result_json, latency_ms, retry_at_ms
+                     FROM action_executions WHERE action_id = ?1 ORDER BY attempt DESC LIMIT 1",
+                    params![action_id],
+                    |row| {
+                        Ok(ActionExecutionRecord {
+                            id: row.get(0)?,
+                            action_id: row.get(1)?,
+                            attempt: row.get(2)?,
+                            executed_at_ms: row.get(3)?,
+                            result_status: row.get(4)?,
+                            result_json: row.get(5)?,
+                            latency_ms: row.get(6)?,
+                            retry_at_ms: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|e| RunnerError::Db(e.to_string()))?;
+            if let Some(execution) = last {
+                return Ok(execution);
+            }
+        }
+
+        let attempt: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM action_executions WHERE action_id = ?1",
+                params![action_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let start_ms = now_ms();
+        let now = start_ms;
+        let payload: serde_json::Value =
+            serde_json::from_str(&action.payload_json).unwrap_or_else(|_| serde_json::json!({}));
+
+        let (result_status, result_json) = match action.action_type {
+            ActionType::CreateOutcomeAction => {
+                tx.execute(
+                    "INSERT INTO outcomes (
+                       id, run_id, step_id, kind, status, content, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, 'completed_outcome', 'executed', ?4, ?5, ?5)
+                     ON CONFLICT(run_id, step_id, kind)
+                     DO UPDATE SET content = excluded.content, status = excluded.status, updated_at = excluded.updated_at",
+                    params![make_id("outcome"), action.run_id, action.step_id, action.payload_json, now],
+                )
+                .map_err(|e| RunnerError::Db(e.to_string()))?;
+                ("success".to_string(), serde_json::json!({"executed": true}).to_string())
+            }
+            ActionType::DeliverNotificationAction => {
+                tx.execute(
+                    "INSERT INTO outcomes (
+                       id, run_id, step_id, kind, status, content, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, 'notification_delivered', 'executed', ?4, ?5, ?5)
+                     ON CONFLICT(run_id, step_id, kind)
+                     DO UPDATE SET content = excluded.content, status = excluded.status, updated_at = excluded.updated_at",
+                    params![
+                        make_id("outcome"),
+                        action.run_id,
+                        action.step_id,
+                        action.payload_json,
+                        now
+                    ],
+                )
+                .map_err(|e| RunnerError::Db(e.to_string()))?;
+                ("success".to_string(), serde_json::json!({"executed": true}).to_string())
+            }
+            ActionType::EmailTriageAction | ActionType::EmailSendAction => (
+                "success".to_string(),
+                serde_json::json!({
+                    "executed": true,
+                    "provider": payload.get("provider").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                })
+                .to_string(),
+            ),
+        };
+
+        let execution = ActionExecutionRecord {
+            id: make_id("action_exec"),
+            action_id: action_id.to_string(),
+            attempt,
+            executed_at_ms: now,
+            result_status: result_status.clone(),
+            result_json: result_json.clone(),
+            latency_ms: Some(now_ms().saturating_sub(start_ms)),
+            retry_at_ms: None,
+        };
+        tx.execute(
+            "INSERT INTO action_executions (
+               id, action_id, attempt, executed_at_ms, result_status, result_json, latency_ms, retry_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                execution.id,
+                execution.action_id,
+                execution.attempt,
+                execution.executed_at_ms,
+                execution.result_status,
+                execution.result_json,
+                execution.latency_ms,
+                execution.retry_at_ms
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        tx.execute(
+            "UPDATE actions SET status = ?1, updated_at_ms = ?2 WHERE id = ?3",
+            params![ActionStatus::Executed.as_str(), now, action_id],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(execution)
+    }
+
+    fn dispatch_provider_call(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        request_kind: &str,
+        request: &ProviderRequest,
+    ) -> Result<ProviderResponse, StepExecutionError> {
+        let runtime = ProviderRuntime::default();
+        let started = now_ms();
+        let response = runtime.dispatch(request).map_err(map_provider_error)?;
+        let ended = now_ms();
+        let _ = connection.execute(
+            "INSERT INTO provider_calls (
+               id, run_id, step_id, provider, model, request_kind,
+               input_chars, output_chars, input_tokens_est, output_tokens_est,
+               cache_hit, latency_ms, cost_cents_est, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11, ?12, ?13)",
+            params![
+                make_id("provider_call"),
+                run.id,
+                step.id,
+                run.provider_kind.as_str(),
+                request.model,
+                request_kind,
+                request.input.chars().count() as i64,
+                response.text.chars().count() as i64,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+                ended.saturating_sub(started),
+                response.usage.estimated_cost_usd_cents,
+                ended
+            ],
+        );
+        Ok(response)
+    }
+
     fn pause_for_approval(
         connection: &mut Connection,
         run: &RunRecord,
         step: &PlanStep,
     ) -> Result<(), RunnerError> {
-        let (preview, payload_type, payload_json) =
+        let (preview, payload_type, payload_json, action_type) =
             Self::approval_payload_for_step(connection, run, step)?;
         let tx = connection
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
         let now = now_ms();
+        let action_id = Self::create_action_for_step_in_tx(
+            &tx,
+            &run.id,
+            &step.id,
+            action_type,
+            &payload_json,
+            true,
+            ActionStatus::PendingApproval,
+        )?;
 
         tx.execute(
             "
             INSERT OR IGNORE INTO approvals
-              (id, run_id, step_id, status, preview, payload_type, payload_json, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?7)
+              (id, run_id, step_id, action_id, status, preview, payload_type, payload_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, ?8)
             ",
             params![
                 make_id("approval"),
                 run.id,
                 step.id,
+                action_id,
                 preview,
                 payload_type,
                 payload_json,
@@ -2686,15 +3243,13 @@ impl RunnerEngine {
         connection: &Connection,
         run: &RunRecord,
         step: &PlanStep,
-    ) -> Result<(String, String, String), RunnerError> {
+    ) -> Result<(String, String, String, ActionType), RunnerError> {
         if step.primitive == PrimitiveId::SendEmail {
             let policy = db::get_autopilot_send_policy(connection, &run.autopilot_id)
                 .map_err(RunnerError::Db)?;
-            let recipient = select_allowed_recipient(
-                &run.plan.recipient_hints,
-                &policy.recipient_allowlist,
-            )
-            .unwrap_or_else(|| "(recipient required)".to_string());
+            let recipient =
+                select_allowed_recipient(&run.plan.recipient_hints, &policy.recipient_allowlist)
+                    .unwrap_or_else(|| "(recipient required)".to_string());
             let draft = Self::get_latest_email_draft(connection, &run.id)?
                 .unwrap_or_else(|| "No draft available yet.".to_string());
             let subject = infer_subject_from_draft(&draft);
@@ -2714,6 +3269,7 @@ impl RunnerEngine {
                 "Approve sending this email through your connected account.".to_string(),
                 "email_send".to_string(),
                 payload,
+                ActionType::EmailSendAction,
             ));
         }
 
@@ -2734,6 +3290,7 @@ impl RunnerEngine {
                 format!("Approve step: {}", step.label),
                 "email_draft".to_string(),
                 payload,
+                ActionType::CreateOutcomeAction,
             ));
         }
 
@@ -2751,6 +3308,7 @@ impl RunnerEngine {
                 "Approve inbox filing action for this message.".to_string(),
                 "email_triage".to_string(),
                 payload,
+                ActionType::EmailTriageAction,
             ));
         }
 
@@ -2764,6 +3322,7 @@ impl RunnerEngine {
             format!("Approve step: {}", step.label),
             "generic_step".to_string(),
             payload,
+            ActionType::CreateOutcomeAction,
         ))
     }
 
@@ -2814,6 +3373,55 @@ impl RunnerEngine {
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
+        tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    fn pause_for_clarification(
+        connection: &mut Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        field_key: &str,
+        question: &str,
+        options_json: Option<&str>,
+    ) -> Result<(), RunnerError> {
+        let tx = connection
+            .transaction()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let now = now_ms();
+        tx.execute(
+            "INSERT OR IGNORE INTO clarifications
+              (id, run_id, step_id, field_key, question, options_json, answer_json, status, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'pending', ?7, ?7)",
+            params![
+                make_id("clarification"),
+                run.id,
+                step.id,
+                field_key,
+                truncate_chars(question, 240),
+                options_json,
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        tx.execute(
+            "UPDATE runs
+             SET state = 'blocked', failure_reason = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![question, now, run.id],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
+             VALUES (?1, ?2, 'clarification_required', ?3, 'blocked', ?4, ?5)",
+            params![
+                make_id("activity"),
+                run.id,
+                run.state.as_str(),
+                truncate_chars(question, 240),
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
     }
 
@@ -3188,6 +3796,16 @@ fn parse_provider_kind(value: &str) -> Result<ProviderKind, RunnerError> {
     }
 }
 
+fn parse_action_type(value: &str) -> Result<ActionType, RunnerError> {
+    match value {
+        "deliver_notification" => Ok(ActionType::DeliverNotificationAction),
+        "create_outcome" => Ok(ActionType::CreateOutcomeAction),
+        "email_triage" => Ok(ActionType::EmailTriageAction),
+        "email_send" => Ok(ActionType::EmailSendAction),
+        _ => Err(RunnerError::Human(format!("Unknown action type: {value}"))),
+    }
+}
+
 fn parse_provider_tier(value: &str) -> Result<ProviderTier, RunnerError> {
     match value {
         "supported" => Ok(ProviderTier::Supported),
@@ -3467,7 +4085,7 @@ fn compute_backoff_ms(retry_attempt: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{RunReceipt, RunState, RunnerEngine};
-    use crate::db::{AutopilotProfileUpsert, AutopilotSendPolicyRecord, bootstrap_schema};
+    use crate::db::{bootstrap_schema, AutopilotProfileUpsert, AutopilotSendPolicyRecord};
     use crate::learning;
     use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
     use rusqlite::{params, Connection};
@@ -5079,12 +5697,10 @@ mod tests {
             .expect("second approval");
         let failed = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
         assert_eq!(failed.state, RunState::Failed);
-        assert!(
-            failed
-                .failure_reason
-                .unwrap_or_default()
-                .contains("Sending is off")
-        );
+        assert!(failed
+            .failure_reason
+            .unwrap_or_default()
+            .contains("Sending is off"));
     }
 
     #[test]
