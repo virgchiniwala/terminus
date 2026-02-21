@@ -1,4 +1,6 @@
 mod db;
+mod email_connections;
+mod inbox_watcher;
 mod learning;
 mod primitives;
 mod providers;
@@ -165,6 +167,66 @@ fn get_terminal_receipt(
 ) -> Result<Option<RunReceipt>, String> {
     let connection = open_connection(&state)?;
     RunnerEngine::get_terminal_receipt(&connection, &run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_email_connections(
+    state: tauri::State<AppState>,
+) -> Result<Vec<email_connections::EmailConnectionRecord>, String> {
+    let connection = open_connection(&state)?;
+    email_connections::list_connections(&connection)
+}
+
+#[tauri::command]
+fn save_email_oauth_config(
+    state: tauri::State<AppState>,
+    input: email_connections::OAuthConfigInput,
+) -> Result<(), String> {
+    let connection = open_connection(&state)?;
+    email_connections::upsert_oauth_config(&connection, input)
+}
+
+#[tauri::command]
+fn start_email_oauth(
+    state: tauri::State<AppState>,
+    provider: String,
+) -> Result<email_connections::OAuthStartResponse, String> {
+    let connection = open_connection(&state)?;
+    email_connections::start_oauth(&connection, &provider)
+}
+
+#[tauri::command]
+fn complete_email_oauth(
+    state: tauri::State<AppState>,
+    input: email_connections::OAuthCompleteInput,
+) -> Result<email_connections::EmailConnectionRecord, String> {
+    let connection = open_connection(&state)?;
+    email_connections::complete_oauth(&connection, input)
+}
+
+#[tauri::command]
+fn disconnect_email_provider(
+    state: tauri::State<AppState>,
+    provider: String,
+) -> Result<(), String> {
+    let connection = open_connection(&state)?;
+    email_connections::disconnect(&connection, &provider)
+}
+
+#[tauri::command]
+fn run_inbox_watcher_tick(
+    state: tauri::State<AppState>,
+    provider: String,
+    autopilot_id: String,
+    max_items: Option<usize>,
+) -> Result<inbox_watcher::InboxWatcherTickSummary, String> {
+    let mut connection = open_connection(&state)?;
+    inbox_watcher::run_watcher_tick(
+        &mut connection,
+        &provider,
+        &autopilot_id,
+        max_items.unwrap_or(10),
+    )
 }
 
 #[tauri::command]
@@ -374,6 +436,12 @@ fn main() {
             list_pending_approvals,
             get_run,
             get_terminal_receipt,
+            list_email_connections,
+            save_email_oauth_config,
+            start_email_oauth,
+            complete_email_oauth,
+            disconnect_email_provider,
+            run_inbox_watcher_tick,
             record_decision_event,
             compact_learning_data
         ])
