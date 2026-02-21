@@ -51,6 +51,12 @@ Last updated: 2026-02-22
   - window close is intercepted: if background mode is enabled, window hides instead of exiting
   - backend thread ticks runner every ~10s when app process is alive and background mode is enabled
   - tick execution continues to use existing bounded runner model and `resume_due_runs`
+- Scoped Guide foundations:
+  - new `submit_guidance` Tauri command with explicit scope (`autopilot|run|approval|outcome`)
+  - guidance classification modes: `applied`, `proposed_rule`, `needs_approval`
+  - risky instructions (capability/policy expansion attempts) are blocked from auto-apply and returned as `needs_approval`
+  - persisted `guidance_events` table stores scope, mode, bounded instruction, and result JSON
+  - current UI includes a minimal Guide panel for scoped input and response messaging
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -61,9 +67,9 @@ Last updated: 2026-02-22
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P0 scoped Guide/Voice/Rules without chat-first drift
+  1. P0.11/P0.12 Voice object + rule extraction approval flow
   2. P1 provider routing/caching and security hardening
-  3. UX and copy cleanup for calm always-on truth
+  3. UX and copy cleanup for calm language and trust clarity
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).

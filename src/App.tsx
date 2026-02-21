@@ -133,6 +133,10 @@ export function App() {
   const [sendPolicyAutopilotId, setSendPolicyAutopilotId] = useState("auto_inbox_watch_gmail");
   const [sendPolicyAllowlistInput, setSendPolicyAllowlistInput] = useState("");
   const [sendPolicy, setSendPolicy] = useState<AutopilotSendPolicyRecord | null>(null);
+  const [guideScopeType, setGuideScopeType] = useState<"autopilot" | "run" | "approval" | "outcome">("autopilot");
+  const [guideScopeId, setGuideScopeId] = useState("");
+  const [guideInstruction, setGuideInstruction] = useState("");
+  const [guideMessage, setGuideMessage] = useState<string | null>(null);
 
   const loadSnapshot = () => {
     setLoading(true);
@@ -484,6 +488,27 @@ export function App() {
       });
   };
 
+  const submitGuide = () => {
+    setGuideMessage(null);
+    invoke<{ mode: string; message: string; proposedRule?: string | null }>("submit_guidance", {
+      input: {
+        scopeType: guideScopeType,
+        scopeId: guideScopeId,
+        instruction: guideInstruction,
+      },
+    })
+      .then((payload: any) => {
+        const msg = payload?.proposedRule
+          ? `${payload.message} Proposed rule: ${payload.proposedRule}`
+          : payload?.message ?? "Guidance saved.";
+        setGuideMessage(msg);
+      })
+      .catch((err) => {
+        console.error("Failed to submit guidance:", err);
+        setGuideMessage(typeof err === "string" ? err : "Could not save guidance.");
+      });
+  };
+
   if (loading) {
     return (
       <main className="app-shell loading-state" aria-label="Loading Terminus" aria-busy="true">
@@ -757,6 +782,45 @@ export function App() {
             </div>
           )}
           {connectionsMessage && <p className="connection-message">{connectionsMessage}</p>}
+          <div className="watcher-controls">
+            <label>
+              <span>Guide scope</span>
+              <select
+                value={guideScopeType}
+                onChange={(event) =>
+                  setGuideScopeType(event.target.value as "autopilot" | "run" | "approval" | "outcome")
+                }
+              >
+                <option value="autopilot">Autopilot</option>
+                <option value="run">Run</option>
+                <option value="approval">Approval</option>
+                <option value="outcome">Outcome</option>
+              </select>
+            </label>
+            <label>
+              <span>Scope ID</span>
+              <input
+                value={guideScopeId}
+                onChange={(event) => setGuideScopeId(event.target.value)}
+                placeholder="autopilot_123 / run_123 / ..."
+              />
+            </label>
+            <label>
+              <span>Guide instruction</span>
+              <input
+                value={guideInstruction}
+                onChange={(event) => setGuideInstruction(event.target.value)}
+                placeholder="One thing to change for this item"
+              />
+            </label>
+            <label>
+              <span>&nbsp;</span>
+              <button type="button" onClick={submitGuide}>
+                Apply Guide
+              </button>
+            </label>
+          </div>
+          {guideMessage && <p className="connection-message">{guideMessage}</p>}
 
           <div className="connection-cards">
             {connections.map((record) => (
