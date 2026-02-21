@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-18
+Last updated: 2026-02-22
 
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
@@ -20,6 +20,9 @@ Last updated: 2026-02-18
   - `⌘K` Intent Bar overlay in UI
   - one-off vs draft-autopilot classification with reason string
   - Draft Plan Card with read/write/approval/spend preview + `Run now` CTA
+  - one-tap classification override in Intent Bar (`Make recurring` / `Run once`)
+  - optional `forcedKind` support in `draft_intent` command for deterministic overrides
+  - intake copy shifted toward setup/action semantics instead of draft-first labels
 - Email connection foundations:
   - OAuth config + session + connection tables in SQLite
   - Keychain-backed OAuth token storage for Gmail and Microsoft 365
@@ -32,16 +35,26 @@ Last updated: 2026-02-18
   - typed approval payload fields on approvals (`payload_type`, `payload_json`)
   - `send.email` runner path enforces allowlist, max/day, quiet hours, and explicit enablement
   - send receipts persisted as `email_sent` outcomes with idempotent upsert by run/step/kind
+  - send execution now routes through provider-backed email effectors (mock/local-http mode)
+  - sender/thread ingest context is persisted (`provider_thread_id`, `sender_email`) for outbound execution
+  - `send.email` uses connected inbox provider context and persists provider message/thread ids in receipts
+- Inbox triage execution:
+  - new `triage.email` primitive in plan schema and runtime
+  - inbox triage step is approval-gated and executes provider-backed archive action
+  - triage execution receipt persisted as `email_triage_executed`
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
 - `npm run build` passes
 
 ## Current Priority Track
-- Next phase follows updated strategy order:
-  1. P0.6 complete safe send/reply effectors with provider-backed delivery + richer typed payload rendering
-  2. P0.7 minimal provider-backed triage actions
-  3. P0.8 menubar/background runner for window-closed execution
+- Canonical priority docs:
+  - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
+  - `tasks/TERMINUS_TASKLIST_v3.md`
+- Active track (top-down):
+  1. P0 background runner + due-run scheduler + missed-run reconciliation
+  2. P0 scoped Guide/Voice/Rules without chat-first drift
+  3. P1 provider routing/caching and security hardening
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).
@@ -66,9 +79,9 @@ Last updated: 2026-02-18
 
 ## Operational Truths
 - Local-first runtime
-- Runs execute while app is open (and additional awake/background behavior is policy-gated)
-- Inbox triage ingestion in MVP is paste/forward only
-- Compose-first outbound policy remains default
+- Runs execute while app is open; background mode and awake-state truth are explicit product surfaces
+- Inbox automation path is provider-connected watcher + dedupe
+- Compose-first outbound policy remains default; send remains policy-gated
 
 ## Immediate Risks to Watch
 - Clone drift toward chat-first or harness-first UI

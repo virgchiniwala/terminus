@@ -1,10 +1,12 @@
 # WORKFLOW_FOR_FRESH_SESSIONS.md
-Last updated: 2026-02-17
+Last updated: 2026-02-22
 
 ## Session Start Checklist
 1. Read these in order:
    - `docs/Terminus_CONTEXT.md`
    - `docs/plan.md`
+   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
+   - `tasks/TERMINUS_TASKLIST_v3.md`
    - `docs/PRINCIPLES_AND_CONSTRAINTS.md`
    - `docs/PRIMITIVES.md`
    - `docs/PLAN_SCHEMA.md`
@@ -26,6 +28,7 @@ Last updated: 2026-02-17
    - acceptance criteria
    - verification steps
    - non-goals
+   - explicit mapping to task IDs in `tasks/TERMINUS_TASKLIST_v3.md`
 
 5. Execute only approved scope.
 

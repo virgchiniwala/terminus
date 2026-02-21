@@ -12,6 +12,60 @@ use url::Url;
 const KEYCHAIN_ACCOUNT: &str = "Terminus";
 const OAUTH_SESSION_TTL_MS: i64 = 10 * 60 * 1000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectorMode {
+    Mock,
+    LocalHttp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriageAction {
+    Archive,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboundEmailRequest<'a> {
+    pub provider: EmailProvider,
+    pub recipient: &'a str,
+    pub subject: &'a str,
+    pub body: &'a str,
+    pub thread_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboundEmailResult {
+    pub provider_message_id: String,
+    pub provider_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageResult {
+    pub provider_message_id: String,
+    pub action: TriageAction,
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectorError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl EffectorError {
+    fn retryable(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            retryable: true,
+        }
+    }
+
+    fn non_retryable(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            retryable: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EmailProvider {
@@ -82,6 +136,47 @@ impl EmailProvider {
         match self {
             Self::Gmail => "terminus.gmail.oauth_tokens",
             Self::Microsoft365 => "terminus.microsoft365.oauth_tokens",
+        }
+    }
+}
+
+pub fn current_effector_mode() -> EffectorMode {
+    match std::env::var("TERMINUS_EMAIL_EFFECTOR")
+        .unwrap_or_else(|_| "local_http".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mock" => EffectorMode::Mock,
+        _ => EffectorMode::LocalHttp,
+    }
+}
+
+pub fn send_outbound_email(
+    connection: &Connection,
+    request: OutboundEmailRequest<'_>,
+) -> Result<OutboundEmailResult, EffectorError> {
+    match current_effector_mode() {
+        EffectorMode::Mock => Ok(OutboundEmailResult {
+            provider_message_id: format!("mock_sent_{}", now_ms()),
+            provider_thread_id: request.thread_id.map(|v| v.to_string()),
+        }),
+        EffectorMode::LocalHttp => send_outbound_email_live(connection, request),
+    }
+}
+
+pub fn apply_triage_action(
+    connection: &Connection,
+    provider: EmailProvider,
+    provider_message_id: &str,
+    action: TriageAction,
+) -> Result<TriageResult, EffectorError> {
+    match current_effector_mode() {
+        EffectorMode::Mock => Ok(TriageResult {
+            provider_message_id: provider_message_id.to_string(),
+            action,
+        }),
+        EffectorMode::LocalHttp => {
+            apply_triage_action_live(connection, provider, provider_message_id, action)
         }
     }
 }
@@ -477,6 +572,185 @@ pub fn get_access_token(
     )
     .map_err(|e| e.message)?;
     Ok(next_access.to_string())
+}
+
+fn send_outbound_email_live(
+    connection: &Connection,
+    request: OutboundEmailRequest<'_>,
+) -> Result<OutboundEmailResult, EffectorError> {
+    if request.recipient.trim().is_empty() {
+        return Err(EffectorError::non_retryable(
+            "Recipient is missing for this send action.",
+        ));
+    }
+    let token =
+        get_access_token(connection, request.provider).map_err(|e| EffectorError::non_retryable(&e))?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| EffectorError::retryable("Could not initialize secure network client."))?;
+
+    match request.provider {
+        EmailProvider::Gmail => {
+            let mut mime = format!(
+                "To: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{}",
+                request.recipient.trim(),
+                request.subject.trim(),
+                request.body
+            );
+            if mime.len() > 120_000 {
+                mime.truncate(120_000);
+            }
+            let raw = URL_SAFE_NO_PAD.encode(mime.as_bytes());
+            let mut payload = json!({ "raw": raw });
+            if let Some(thread_id) = request.thread_id {
+                if !thread_id.trim().is_empty() {
+                    payload["threadId"] = Value::String(thread_id.trim().to_string());
+                }
+            }
+            let response = client
+                .post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
+                .bearer_auth(&token)
+                .json(&payload)
+                .send()
+                .map_err(|_| {
+                    EffectorError::retryable(
+                        "Could not reach Gmail send endpoint. Try again shortly.",
+                    )
+                })?;
+            if response.status().as_u16() == 429 || response.status().is_server_error() {
+                return Err(EffectorError::retryable(
+                    "Gmail is temporarily unavailable. Terminus will retry.",
+                ));
+            }
+            if !response.status().is_success() {
+                return Err(EffectorError::non_retryable(
+                    "Gmail rejected this send action. Check recipient and permissions.",
+                ));
+            }
+            let json = response
+                .json::<Value>()
+                .map_err(|_| EffectorError::retryable("Could not parse Gmail send response."))?;
+            Ok(OutboundEmailResult {
+                provider_message_id: json
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gmail_sent_unknown")
+                    .to_string(),
+                provider_thread_id: json
+                    .get("threadId")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string()),
+            })
+        }
+        EmailProvider::Microsoft365 => {
+            let payload = json!({
+                "message": {
+                    "subject": request.subject,
+                    "body": { "contentType": "Text", "content": request.body },
+                    "toRecipients": [
+                        { "emailAddress": { "address": request.recipient.trim() } }
+                    ]
+                },
+                "saveToSentItems": true
+            });
+            let response = client
+                .post("https://graph.microsoft.com/v1.0/me/sendMail")
+                .bearer_auth(&token)
+                .json(&payload)
+                .send()
+                .map_err(|_| {
+                    EffectorError::retryable(
+                        "Could not reach Microsoft 365 send endpoint. Try again shortly.",
+                    )
+                })?;
+            if response.status().as_u16() == 429 || response.status().is_server_error() {
+                return Err(EffectorError::retryable(
+                    "Microsoft 365 is temporarily unavailable. Terminus will retry.",
+                ));
+            }
+            if !(response.status().is_success() || response.status().as_u16() == 202) {
+                return Err(EffectorError::non_retryable(
+                    "Microsoft 365 rejected this send action. Check recipient and permissions.",
+                ));
+            }
+            Ok(OutboundEmailResult {
+                provider_message_id: format!("graph_sent_{}", now_ms()),
+                provider_thread_id: request.thread_id.map(|v| v.to_string()),
+            })
+        }
+    }
+}
+
+fn apply_triage_action_live(
+    connection: &Connection,
+    provider: EmailProvider,
+    provider_message_id: &str,
+    action: TriageAction,
+) -> Result<TriageResult, EffectorError> {
+    let token = get_access_token(connection, provider).map_err(|e| EffectorError::non_retryable(&e))?;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| EffectorError::retryable("Could not initialize secure network client."))?;
+
+    match (provider, action) {
+        (EmailProvider::Gmail, TriageAction::Archive) => {
+            let endpoint = format!(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}/modify",
+                provider_message_id
+            );
+            let response = client
+                .post(endpoint)
+                .bearer_auth(&token)
+                .json(&json!({"removeLabelIds": ["INBOX"]}))
+                .send()
+                .map_err(|_| {
+                    EffectorError::retryable("Could not reach Gmail triage endpoint. Try again shortly.")
+                })?;
+            if response.status().as_u16() == 429 || response.status().is_server_error() {
+                return Err(EffectorError::retryable(
+                    "Gmail triage is temporarily unavailable. Terminus will retry.",
+                ));
+            }
+            if !response.status().is_success() {
+                return Err(EffectorError::non_retryable(
+                    "Gmail rejected this triage action.",
+                ));
+            }
+        }
+        (EmailProvider::Microsoft365, TriageAction::Archive) => {
+            let endpoint = format!(
+                "https://graph.microsoft.com/v1.0/me/messages/{}/move",
+                provider_message_id
+            );
+            let response = client
+                .post(endpoint)
+                .bearer_auth(&token)
+                .json(&json!({ "destinationId": "archive" }))
+                .send()
+                .map_err(|_| {
+                    EffectorError::retryable(
+                        "Could not reach Microsoft 365 triage endpoint. Try again shortly.",
+                    )
+                })?;
+            if response.status().as_u16() == 429 || response.status().is_server_error() {
+                return Err(EffectorError::retryable(
+                    "Microsoft 365 triage is temporarily unavailable. Terminus will retry.",
+                ));
+            }
+            if !response.status().is_success() {
+                return Err(EffectorError::non_retryable(
+                    "Microsoft 365 rejected this triage action.",
+                ));
+            }
+        }
+    }
+
+    Ok(TriageResult {
+        provider_message_id: provider_message_id.to_string(),
+        action,
+    })
 }
 
 fn load_oauth_config(

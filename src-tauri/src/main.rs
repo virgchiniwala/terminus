@@ -482,6 +482,14 @@ fn parse_provider(value: &str) -> Result<ProviderId, String> {
     }
 }
 
+fn parse_intent_kind(value: &str) -> Result<IntentDraftKind, String> {
+    match value {
+        "one_off_run" => Ok(IntentDraftKind::OneOffRun),
+        "draft_autopilot" => Ok(IntentDraftKind::DraftAutopilot),
+        _ => Err(format!("Unknown intent kind: {value}")),
+    }
+}
+
 fn classify_intent_kind(intent: &str) -> (IntentDraftKind, String) {
     let normalized = intent.to_ascii_lowercase();
     let recurring_hints = [
@@ -500,12 +508,12 @@ fn classify_intent_kind(intent: &str) -> (IntentDraftKind, String) {
     if should_recur {
         (
             IntentDraftKind::DraftAutopilot,
-            "Looks recurring, so Terminus prepared a Draft Autopilot.".to_string(),
+            "Looks recurring, so Terminus prepared an Autopilot setup.".to_string(),
         )
     } else {
         (
             IntentDraftKind::OneOffRun,
-            "Looks one-time, so Terminus prepared a one-off Run draft.".to_string(),
+            "Looks one-time, so Terminus prepared a one-off Run.".to_string(),
         )
     }
 }
@@ -545,8 +553,9 @@ fn describe_primitive_read(primitive: PrimitiveId) -> Option<String> {
 
 fn describe_primitive_write(primitive: PrimitiveId) -> Option<String> {
     match primitive {
-        PrimitiveId::WriteOutcomeDraft => Some("Create an outcome draft".to_string()),
-        PrimitiveId::WriteEmailDraft => Some("Create an email draft".to_string()),
+        PrimitiveId::TriageEmail => Some("Apply inbox filing action".to_string()),
+        PrimitiveId::WriteOutcomeDraft => Some("Prepare a completed outcome".to_string()),
+        PrimitiveId::WriteEmailDraft => Some("Prepare an approval-ready message".to_string()),
         PrimitiveId::SendEmail => Some("Send an email".to_string()),
         PrimitiveId::ScheduleRun => Some("Schedule this autopilot".to_string()),
         PrimitiveId::NotifyUser => Some("Send a notification".to_string()),
@@ -588,7 +597,11 @@ fn preview_for_plan(kind: &IntentDraftKind, plan: &AutopilotPlan) -> IntentDraft
 }
 
 #[tauri::command]
-fn draft_intent(intent: String, provider: Option<String>) -> Result<IntentDraftResponse, String> {
+fn draft_intent(
+    intent: String,
+    provider: Option<String>,
+    forced_kind: Option<String>,
+) -> Result<IntentDraftResponse, String> {
     let cleaned = intent.trim();
     if cleaned.is_empty() {
         return Err("Add a one-line intent to continue.".to_string());
@@ -598,7 +611,22 @@ fn draft_intent(intent: String, provider: Option<String>) -> Result<IntentDraftR
         None => ProviderId::OpenAi,
     };
 
-    let (kind, classification_reason) = classify_intent_kind(cleaned);
+    let (auto_kind, auto_reason) = classify_intent_kind(cleaned);
+    let (kind, classification_reason) = match forced_kind {
+        Some(raw) => {
+            let forced = parse_intent_kind(raw.trim())?;
+            let reason = match forced {
+                IntentDraftKind::DraftAutopilot => {
+                    "Switched to recurring. Terminus prepared an Autopilot setup.".to_string()
+                }
+                IntentDraftKind::OneOffRun => {
+                    "Switched to one-time. Terminus prepared a one-off Run.".to_string()
+                }
+            };
+            (forced, reason)
+        }
+        None => (auto_kind, auto_reason),
+    };
     let recipe = classify_recipe(cleaned);
     let plan = AutopilotPlan::from_intent(recipe, cleaned.to_string(), provider_id);
     let preview = preview_for_plan(&kind, &plan);

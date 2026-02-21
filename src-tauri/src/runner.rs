@@ -2,6 +2,7 @@ use crate::learning::{
     self, AdaptationSummary, DecisionEventMetadata, DecisionEventType, RunEvaluationSummary,
     RuntimeProfile,
 };
+use crate::email_connections::{self, EmailProvider, OutboundEmailRequest, TriageAction};
 use crate::db;
 use crate::primitives::PrimitiveGuard;
 use crate::providers::{
@@ -214,6 +215,14 @@ struct InboxItemRecord {
     content_hash: String,
     raw_text: String,
     processed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct IngestContext {
+    provider: EmailProvider,
+    provider_message_id: String,
+    provider_thread_id: Option<String>,
+    sender_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1534,6 +1543,92 @@ impl RunnerEngine {
                     failure_reason_override: None,
                 })
             }
+            PrimitiveId::TriageEmail => {
+                let context = Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
+                    StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    }
+                })?;
+                let Some(context) = context else {
+                    return Ok(StepExecutionResult {
+                        user_message:
+                            "No connected inbox message was found, so Terminus skipped filing for this run."
+                                .to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: None,
+                        terminal_state_override: None,
+                        terminal_summary_override: None,
+                        failure_reason_override: None,
+                    });
+                };
+
+                if Self::triage_outcome_exists(connection, &run.id, &step.id).map_err(|e| {
+                    StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    }
+                })? {
+                    return Ok(StepExecutionResult {
+                        user_message: "Inbox filing already applied for this run.".to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: None,
+                        terminal_state_override: None,
+                        terminal_summary_override: None,
+                        failure_reason_override: None,
+                    });
+                }
+
+                let result = email_connections::apply_triage_action(
+                    connection,
+                    context.provider,
+                    &context.provider_message_id,
+                    TriageAction::Archive,
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: e.retryable,
+                    user_reason: e.message,
+                })?;
+                let payload = serde_json::json!({
+                    "provider": context.provider.as_str(),
+                    "provider_message_id": result.provider_message_id,
+                    "action": match result.action {
+                        TriageAction::Archive => "archive",
+                    },
+                    "sender_email": context.sender_email,
+                    "executed_at_ms": now_ms(),
+                });
+                connection
+                    .execute(
+                        "
+                        INSERT INTO outcomes (
+                          id, run_id, step_id, kind, status, content, created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, 'email_triage_executed', 'executed', ?4, ?5, ?5)
+                        ON CONFLICT(run_id, step_id, kind)
+                        DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                        ",
+                        params![
+                            make_id("outcome"),
+                            run.id,
+                            step.id,
+                            payload.to_string(),
+                            now_ms()
+                        ],
+                    )
+                    .map_err(|_| StepExecutionError {
+                        retryable: true,
+                        user_reason: "Couldn't record inbox filing receipt yet.".to_string(),
+                    })?;
+
+                Ok(StepExecutionResult {
+                    user_message: "Inbox item was filed from your connected account.".to_string(),
+                    actual_spend_usd_cents: 1,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
             PrimitiveId::ReadVaultFile | PrimitiveId::ScheduleRun | PrimitiveId::NotifyUser => {
                 Ok(StepExecutionResult {
                     user_message: "Step completed.".to_string(),
@@ -1545,6 +1640,21 @@ impl RunnerEngine {
                 })
             }
             PrimitiveId::SendEmail => {
+                if Self::send_outcome_exists(connection, &run.id, &step.id).map_err(|e| {
+                    StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    }
+                })? {
+                    return Ok(StepExecutionResult {
+                        user_message: "Email send already recorded for this run.".to_string(),
+                        actual_spend_usd_cents: 0,
+                        next_step_index_override: None,
+                        terminal_state_override: None,
+                        terminal_summary_override: None,
+                        failure_reason_override: None,
+                    });
+                }
                 let policy = db::get_autopilot_send_policy(connection, &run.autopilot_id)
                     .map_err(|e| StepExecutionError {
                         retryable: false,
@@ -1612,12 +1722,44 @@ impl RunnerEngine {
                         user_reason: "No email draft was found for this run.".to_string(),
                     })?;
                 let subject = infer_subject_from_draft(&draft_body);
+                let context = Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
+                    StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    }
+                })?;
+                let provider = context
+                    .as_ref()
+                    .map(|ctx| ctx.provider)
+                    .ok_or_else(|| StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "No connected inbox context found for this send. Run this through a connected inbox Autopilot."
+                                .to_string(),
+                    })?;
+                let sent = email_connections::send_outbound_email(
+                    connection,
+                    OutboundEmailRequest {
+                        provider,
+                        recipient: &recipient,
+                        subject: &subject,
+                        body: &draft_body,
+                        thread_id: context
+                            .as_ref()
+                            .and_then(|ctx| ctx.provider_thread_id.as_deref()),
+                    },
+                )
+                .map_err(|e| StepExecutionError {
+                    retryable: e.retryable,
+                    user_reason: e.message,
+                })?;
                 let payload = serde_json::json!({
                     "recipient": recipient,
                     "subject": subject,
                     "body_preview": truncate_chars(&draft_body, 500),
-                    "message_id": format!("msg_{}_{}", run.id, step.id),
-                    "provider": run.provider_kind.as_str(),
+                    "provider_message_id": sent.provider_message_id,
+                    "provider_thread_id": sent.provider_thread_id,
+                    "provider": provider.as_str(),
                     "sent_at_ms": now_ms(),
                 });
                 connection
@@ -1854,6 +1996,74 @@ impl RunnerEngine {
                 |row| row.get(0),
             )
             .map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    fn send_outcome_exists(
+        connection: &Connection,
+        run_id: &str,
+        step_id: &str,
+    ) -> Result<bool, RunnerError> {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT id FROM outcomes WHERE run_id = ?1 AND step_id = ?2 AND kind = 'email_sent' LIMIT 1",
+                params![run_id, step_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(existing.is_some())
+    }
+
+    fn triage_outcome_exists(
+        connection: &Connection,
+        run_id: &str,
+        step_id: &str,
+    ) -> Result<bool, RunnerError> {
+        let existing: Option<String> = connection
+            .query_row(
+                "SELECT id FROM outcomes WHERE run_id = ?1 AND step_id = ?2 AND kind = 'email_triage_executed' LIMIT 1",
+                params![run_id, step_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(existing.is_some())
+    }
+
+    fn get_ingest_context_for_run(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Option<IngestContext>, RunnerError> {
+        let row: Option<(String, String, Option<String>, Option<String>)> = connection
+            .query_row(
+                "SELECT provider, provider_message_id, provider_thread_id, sender_email
+                 FROM email_ingest_events
+                 WHERE run_id = ?1
+                 ORDER BY created_at_ms DESC
+                 LIMIT 1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let Some((provider, provider_message_id, provider_thread_id, sender_email)) = row else {
+            return Ok(None);
+        };
+        let provider = match provider.as_str() {
+            "gmail" => EmailProvider::Gmail,
+            "microsoft365" => EmailProvider::Microsoft365,
+            other => {
+                return Err(RunnerError::Db(format!(
+                    "Unknown inbox provider in ingest context: {other}"
+                )))
+            }
+        };
+        Ok(Some(IngestContext {
+            provider,
+            provider_message_id,
+            provider_thread_id,
+            sender_email,
+        }))
     }
 
     fn build_inbox_triage_prompt(
@@ -2523,6 +2733,23 @@ impl RunnerEngine {
             return Ok((
                 format!("Approve step: {}", step.label),
                 "email_draft".to_string(),
+                payload,
+            ));
+        }
+
+        if step.primitive == PrimitiveId::TriageEmail {
+            let context = Self::get_ingest_context_for_run(connection, &run.id)?;
+            let payload = serde_json::json!({
+                "type": "email_triage",
+                "action": "archive",
+                "provider": context.as_ref().map(|c| c.provider.as_str()).unwrap_or("unknown"),
+                "provider_message_id": context.as_ref().map(|c| c.provider_message_id.as_str()).unwrap_or(""),
+                "sender_email": context.as_ref().and_then(|c| c.sender_email.as_deref()).unwrap_or("")
+            })
+            .to_string();
+            return Ok((
+                "Approve inbox filing action for this message.".to_string(),
+                "email_triage".to_string(),
                 payload,
             ));
         }
@@ -3251,6 +3478,7 @@ mod tests {
     fn setup_conn() -> Connection {
         // Keep runner tests deterministic regardless of local shell environment.
         std::env::set_var("TERMINUS_TRANSPORT", "mock");
+        std::env::set_var("TERMINUS_EMAIL_EFFECTOR", "mock");
         let mut conn = Connection::open_in_memory().expect("open memory db");
         bootstrap_schema(&mut conn).expect("bootstrap schema");
         conn
@@ -3723,15 +3951,23 @@ mod tests {
         let s1 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 1");
         assert_eq!(s1.state, RunState::Ready);
 
-        let s2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 2");
-        assert_eq!(s2.state, RunState::Ready);
+        let need_triage = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 2");
+        assert_eq!(need_triage.state, RunState::NeedsApproval);
+        let triage = RunnerEngine::list_pending_approvals(&conn)
+            .expect("triage approvals")
+            .into_iter()
+            .find(|a| a.run_id == run.id && a.step_id == "step_2")
+            .expect("triage approval");
+        let after_triage = RunnerEngine::approve(&mut conn, &triage.id).expect("approve triage");
+        assert_eq!(after_triage.state, RunState::Ready);
 
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step 3");
         let need_approval_2 = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
         assert_eq!(need_approval_2.state, RunState::NeedsApproval);
         let approvals_2 = RunnerEngine::list_pending_approvals(&conn).expect("pending2");
         let second = approvals_2
             .iter()
-            .find(|a| a.run_id == run.id)
+            .find(|a| a.run_id == run.id && a.step_id == "step_4")
             .expect("approval");
         let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
@@ -3757,13 +3993,22 @@ mod tests {
         )
         .expect("start1");
         let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step1");
-        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step2");
-        let need_approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval");
+        let need_triage = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval1");
+        assert_eq!(need_triage.state, RunState::NeedsApproval);
+        let triage = RunnerEngine::list_pending_approvals(&conn)
+            .expect("pending triage")
+            .into_iter()
+            .find(|a| a.run_id == run1.id && a.step_id == "step_2")
+            .expect("triage approval");
+        let after_triage = RunnerEngine::approve(&mut conn, &triage.id).expect("approve triage");
+        assert_eq!(after_triage.state, RunState::Ready);
+        let _ = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 step3");
+        let need_approval = RunnerEngine::run_tick(&mut conn, &run1.id).expect("run1 approval2");
         assert_eq!(need_approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("pending");
         let approval = approvals
             .iter()
-            .find(|a| a.run_id == run1.id)
+            .find(|a| a.run_id == run1.id && a.step_id == "step_4")
             .expect("approval");
         let done = RunnerEngine::approve(&mut conn, &approval.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
@@ -3874,13 +4119,22 @@ mod tests {
         .expect("start");
 
         let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
-        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step2");
-        let need_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval");
+        let need_triage = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_triage.state, RunState::NeedsApproval);
+        let triage = RunnerEngine::list_pending_approvals(&conn)
+            .expect("triage approvals")
+            .into_iter()
+            .find(|a| a.run_id == run.id && a.step_id == "step_2")
+            .expect("triage approval");
+        let after_triage = RunnerEngine::approve(&mut conn, &triage.id).expect("approve triage");
+        assert_eq!(after_triage.state, RunState::Ready);
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step3");
+        let need_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
         assert_eq!(need_approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("list approvals");
         let approval = approvals
             .iter()
-            .find(|a| a.run_id == run.id)
+            .find(|a| a.run_id == run.id && a.step_id == "step_4")
             .expect("approval row");
         let done = RunnerEngine::approve(&mut conn, &approval.id).expect("approve");
         assert_eq!(done.state, RunState::Succeeded);
@@ -4786,25 +5040,42 @@ mod tests {
         );
         let run = RunnerEngine::start_run(&mut conn, "auto_send_off", plan, "idem_send_off", 2)
             .expect("start");
+        conn.execute(
+            "INSERT INTO email_ingest_events (
+               id, provider, provider_message_id, provider_thread_id, sender_email, dedupe_key, autopilot_id, subject, received_at_ms, run_id, status, created_at_ms
+             ) VALUES (?1, 'gmail', 'msg_send_off', 'thread_send_off', 'user@example.com', 'gmail:msg_send_off', 'auto_send_off', 'Subject', ?2, ?3, 'queued', ?2)",
+            params!["ingest_send_off", 1_i64, run.id],
+        )
+        .expect("seed ingest");
 
         let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
-        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step2");
-        let need_draft_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        let need_triage_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_triage_approval.state, RunState::NeedsApproval);
+        let triage = RunnerEngine::list_pending_approvals(&conn)
+            .expect("triage approvals")
+            .into_iter()
+            .find(|a| a.run_id == run.id && a.step_id == "step_2")
+            .expect("triage approval");
+        let after_triage = RunnerEngine::approve(&mut conn, &triage.id).expect("approve triage");
+        assert_eq!(after_triage.state, RunState::Ready);
+
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step3");
+        let need_draft_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
         assert_eq!(need_draft_approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("approvals");
         let first = approvals
             .iter()
-            .find(|a| a.run_id == run.id)
+            .find(|a| a.run_id == run.id && a.step_id == "step_4")
             .expect("first approval");
         let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
         assert_eq!(after_first.state, RunState::Ready);
 
-        let need_send_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        let need_send_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval3");
         assert_eq!(need_send_approval.state, RunState::NeedsApproval);
         let approvals2 = RunnerEngine::list_pending_approvals(&conn).expect("approvals2");
         let second = approvals2
             .iter()
-            .find(|a| a.run_id == run.id)
+            .find(|a| a.run_id == run.id && a.step_id == "step_5")
             .expect("second approval");
         let failed = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
         assert_eq!(failed.state, RunState::Failed);
@@ -4826,6 +5097,13 @@ mod tests {
         );
         let run = RunnerEngine::start_run(&mut conn, "auto_send_on", plan, "idem_send_on", 2)
             .expect("start");
+        conn.execute(
+            "INSERT INTO email_ingest_events (
+               id, provider, provider_message_id, provider_thread_id, sender_email, dedupe_key, autopilot_id, subject, received_at_ms, run_id, status, created_at_ms
+             ) VALUES (?1, 'gmail', 'msg_send_on', 'thread_send_on', 'user@example.com', 'gmail:msg_send_on', 'auto_send_on', 'Subject', ?2, ?3, 'queued', ?2)",
+            params!["ingest_send_on", 1_i64, run.id],
+        )
+        .expect("seed ingest");
         crate::db::upsert_autopilot_send_policy(
             &conn,
             &AutopilotSendPolicyRecord {
@@ -4841,23 +5119,33 @@ mod tests {
         )
         .expect("seed send policy");
         let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
-        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step2");
-        let need_draft_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        let need_triage_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_triage_approval.state, RunState::NeedsApproval);
+        let triage = RunnerEngine::list_pending_approvals(&conn)
+            .expect("triage approvals")
+            .into_iter()
+            .find(|a| a.run_id == run.id && a.step_id == "step_2")
+            .expect("triage approval");
+        let after_triage = RunnerEngine::approve(&mut conn, &triage.id).expect("approve triage");
+        assert_eq!(after_triage.state, RunState::Ready);
+
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step3");
+        let need_draft_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
         assert_eq!(need_draft_approval.state, RunState::NeedsApproval);
         let approvals = RunnerEngine::list_pending_approvals(&conn).expect("approvals");
         let first = approvals
             .iter()
-            .find(|a| a.run_id == run.id)
+            .find(|a| a.run_id == run.id && a.step_id == "step_4")
             .expect("first approval");
         let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
         assert_eq!(after_first.state, RunState::Ready);
 
-        let need_send_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        let need_send_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval3");
         assert_eq!(need_send_approval.state, RunState::NeedsApproval);
         let approvals2 = RunnerEngine::list_pending_approvals(&conn).expect("approvals2");
         let second = approvals2
             .iter()
-            .find(|a| a.run_id == run.id)
+            .find(|a| a.run_id == run.id && a.step_id == "step_5")
             .expect("second approval");
         let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
         assert_eq!(done.state, RunState::Succeeded);
@@ -4870,5 +5158,14 @@ mod tests {
             )
             .expect("sent count");
         assert_eq!(sent_count, 1);
+
+        let triage_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'email_triage_executed'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("triage count");
+        assert_eq!(triage_count, 1);
     }
 }

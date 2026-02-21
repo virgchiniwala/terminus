@@ -1,5 +1,5 @@
 # PRIMITIVES.md
-Last updated: 2026-02-17
+Last updated: 2026-02-22
 
 ## Purpose
 Primitives are Terminus runtime actions. They are constrained by design and deny-by-default.
@@ -13,6 +13,7 @@ Read:
 - `read.sources`
 
 Write:
+- `triage.email` (approval-gated provider action)
 - `write.outcome_draft`
 - `write.email_draft`
 
@@ -35,8 +36,9 @@ Website Monitor:
 
 Inbox Triage:
 1. `read.forwarded_email`
-2. `write.outcome_draft`
-3. `write.email_draft` (approval)
+2. `triage.email` (approval)
+3. `write.outcome_draft`
+4. `write.email_draft` (approval)
 
 Daily Brief:
 1. `read.sources`

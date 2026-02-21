@@ -37,6 +37,7 @@ pub enum PrimitiveId {
     ReadWeb,
     ReadSources,
     ReadForwardedEmail,
+    TriageEmail,
     AggregateDailySummary,
     ReadVaultFile,
     WriteOutcomeDraft,
@@ -126,6 +127,7 @@ impl AutopilotPlan {
             PrimitiveId::ReadWeb,
             PrimitiveId::ReadSources,
             PrimitiveId::ReadForwardedEmail,
+            PrimitiveId::TriageEmail,
             PrimitiveId::AggregateDailySummary,
             PrimitiveId::WriteOutcomeDraft,
             PrimitiveId::WriteEmailDraft,
@@ -183,13 +185,20 @@ impl AutopilotPlan {
                     },
                     PlanStep {
                         id: "step_2".to_string(),
+                        label: "Apply inbox triage action".to_string(),
+                        primitive: PrimitiveId::TriageEmail,
+                        requires_approval: true,
+                        risk_tier: RiskTier::Medium,
+                    },
+                    PlanStep {
+                        id: "step_3".to_string(),
                         label: "Draft reply options and triage labels".to_string(),
                         primitive: PrimitiveId::WriteOutcomeDraft,
                         requires_approval: false,
                         risk_tier: RiskTier::Medium,
                     },
                     PlanStep {
-                        id: "step_3".to_string(),
+                        id: "step_4".to_string(),
                         label: "Queue email draft for explicit approval".to_string(),
                         primitive: PrimitiveId::WriteEmailDraft,
                         requires_approval: true,
@@ -198,7 +207,7 @@ impl AutopilotPlan {
                 ];
                 if wants_send {
                     steps.push(PlanStep {
-                        id: "step_4".to_string(),
+                        id: "step_5".to_string(),
                         label: "Send approved reply through connected account".to_string(),
                         primitive: PrimitiveId::SendEmail,
                         requires_approval: true,
@@ -351,7 +360,7 @@ mod tests {
             .contains(&super::PrimitiveId::ReadVaultFile));
         assert_eq!(brief.provider.tier, ProviderTier::Experimental);
         assert_eq!(website.steps.len(), 3);
-        assert_eq!(triage.steps.len(), 3);
+        assert_eq!(triage.steps.len(), 4);
         assert_eq!(brief.steps.len(), 3);
     }
 }
