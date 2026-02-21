@@ -347,6 +347,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               id TEXT PRIMARY KEY,
               provider TEXT NOT NULL,
               provider_message_id TEXT NOT NULL,
+              provider_thread_id TEXT,
+              sender_email TEXT,
               dedupe_key TEXT NOT NULL UNIQUE,
               autopilot_id TEXT NOT NULL,
               subject TEXT NOT NULL DEFAULT '',
@@ -458,6 +460,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "last_text_excerpt",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    ensure_column(connection, "email_ingest_events", "provider_thread_id", "TEXT")?;
+    ensure_column(connection, "email_ingest_events", "sender_email", "TEXT")?;
     ensure_column(
         connection,
         "web_snapshots",

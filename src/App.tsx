@@ -8,6 +8,7 @@ import type {
   RecipeKind,
   RunnerControlRecord,
   AutopilotSendPolicyRecord,
+  IntentDraftKind,
 } from "./types";
 
 const fallbackSnapshot: HomeSnapshot = {
@@ -190,7 +191,7 @@ export function App() {
     if (!draft) {
       return "";
     }
-    return draft.kind === "draft_autopilot" ? "Draft Autopilot" : "One-off Run";
+    return draft.kind === "draft_autopilot" ? "Recurring Autopilot" : "One-time Run";
   }, [draft]);
 
   const loadConnections = () => {
@@ -327,7 +328,7 @@ export function App() {
       });
   };
 
-  const generateDraft = () => {
+  const generateDraft = (forcedKind?: IntentDraftKind) => {
     const intent = intentInput.trim();
     if (!intent) {
       setIntentError("Add a one-line intent to continue.");
@@ -336,7 +337,7 @@ export function App() {
     setIntentLoading(true);
     setIntentError(null);
     setRunNotice(null);
-    invoke<IntentDraftResponse>("draft_intent", { intent })
+    invoke<IntentDraftResponse>("draft_intent", { intent, forcedKind })
       .then((payload) => {
         setDraft(normalizeDraft(payload));
       })
@@ -824,16 +825,40 @@ export function App() {
               placeholder="Example: Monitor https://example.com and send me an update when it changes"
             />
             <div className="intent-actions">
-              <button type="button" className="intent-primary" onClick={generateDraft} disabled={intentLoading}>
-                {intentLoading ? "Preparing..." : "Create Draft"}
+              <button
+                type="button"
+                className="intent-primary"
+                onClick={() => generateDraft()}
+                disabled={intentLoading}
+              >
+                {intentLoading ? "Preparing..." : "Prepare Setup"}
               </button>
             </div>
             {intentError && <p className="intent-error">{intentError}</p>}
 
             {draft && (
-              <section className="draft-preview" aria-label="Draft plan preview">
+              <section className="draft-preview" aria-label="Run plan preview">
                 <p className="draft-kind">{classifiedLabel}</p>
                 <p className="draft-reason">{draft.classificationReason}</p>
+                <div className="intent-actions">
+                  {draft.kind === "one_off_run" ? (
+                    <button
+                      type="button"
+                      onClick={() => generateDraft("draft_autopilot")}
+                      disabled={intentLoading}
+                    >
+                      Make recurring
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => generateDraft("one_off_run")}
+                      disabled={intentLoading}
+                    >
+                      Run once
+                    </button>
+                  )}
+                </div>
                 <p className="draft-spend">{draft.preview.estimatedSpend}</p>
                 <div className="draft-columns">
                   <div>

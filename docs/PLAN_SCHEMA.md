@@ -1,5 +1,5 @@
 # PLAN_SCHEMA.md
-Last updated: 2026-02-17
+Last updated: 2026-02-22
 
 ## Purpose
 Defines the shared Autopilot plan object used by all MVP presets.
@@ -37,7 +37,8 @@ Step shape:
 ## Approval Model
 - Read-only actions can auto-run.
 - Write actions default to approval-required where user trust demands it.
-- Send remains gated separately by policy.
+- Inbox triage action execution is approval-gated (`triage.email`).
+- Send remains gated separately by policy and provider context.
 
 ## Profile Overlay (Learning Layer)
 Runtime profile can modify bounded execution parameters without mutating core plan capabilities:

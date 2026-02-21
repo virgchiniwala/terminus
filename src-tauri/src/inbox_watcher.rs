@@ -12,6 +12,8 @@ const MAX_EMAIL_BODY_CHARS: usize = 12_000;
 #[derive(Debug, Clone)]
 struct InboundMessage {
     provider_message_id: String,
+    provider_thread_id: Option<String>,
+    sender_email: Option<String>,
     subject: String,
     body_preview: String,
     received_at_ms: i64,
@@ -60,6 +62,9 @@ pub fn run_watcher_tick(
         let intent = format!("Triage inbox message: {}", message.subject);
         let mut plan =
             AutopilotPlan::from_intent(RecipeKind::InboxTriage, intent, ProviderId::OpenAi);
+        if let Some(sender) = message.sender_email.as_ref() {
+            plan.recipient_hints = vec![sender.clone()];
+        }
         let source = format!(
             "Subject: {}\n\n{}",
             message.subject,
@@ -92,12 +97,14 @@ pub fn run_watcher_tick(
         connection
             .execute(
                 "INSERT INTO email_ingest_events (
-                   id, provider, provider_message_id, dedupe_key, autopilot_id, subject, received_at_ms, run_id, status, created_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                   id, provider, provider_message_id, provider_thread_id, sender_email, dedupe_key, autopilot_id, subject, received_at_ms, run_id, status, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     make_id("ingest"),
                     provider.as_str(),
                     message.provider_message_id,
+                    message.provider_thread_id.as_deref(),
+                    message.sender_email.as_deref(),
                     dedupe_key,
                     autopilot_id,
                     message.subject,
@@ -193,6 +200,16 @@ fn fetch_gmail_messages(
                 }
             })
             .unwrap_or_else(|| "(No subject)".to_string());
+        let sender_email = headers.iter().find_map(|h| {
+            let name = h.get("name").and_then(|v| v.as_str())?;
+            if name.eq_ignore_ascii_case("from") {
+                h.get("value")
+                    .and_then(|v| v.as_str())
+                    .map(extract_email_address)
+            } else {
+                None
+            }
+        });
         let snippet = details
             .get("snippet")
             .and_then(|v| v.as_str())
@@ -205,6 +222,11 @@ fn fetch_gmail_messages(
             .unwrap_or_else(now_ms);
         out.push(InboundMessage {
             provider_message_id: id,
+            provider_thread_id: details
+                .get("threadId")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            sender_email,
             subject,
             body_preview: snippet,
             received_at_ms: received_at,
@@ -254,9 +276,20 @@ fn fetch_ms_messages(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let sender_email = item
+            .get("from")
+            .and_then(|v| v.get("emailAddress"))
+            .and_then(|v| v.get("address"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_ascii_lowercase());
         let received_at_ms = now_ms();
         out.push(InboundMessage {
             provider_message_id: id,
+            provider_thread_id: item
+                .get("conversationId")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string()),
+            sender_email,
             subject,
             body_preview: preview,
             received_at_ms,
@@ -267,6 +300,19 @@ fn fetch_ms_messages(
 
 fn make_id(prefix: &str) -> String {
     format!("{}_{}", prefix, now_ms())
+}
+
+fn extract_email_address(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some((_, right)) = trimmed.rsplit_once('<') {
+        return right.trim_end_matches('>').trim().to_ascii_lowercase();
+    }
+    trimmed
+        .split_whitespace()
+        .find(|part| part.contains('@'))
+        .unwrap_or(trimmed)
+        .trim_matches(|c: char| ",.;:!?()[]{}<>\"'".contains(c))
+        .to_ascii_lowercase()
 }
 
 fn now_ms() -> i64 {

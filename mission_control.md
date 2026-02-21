@@ -1,16 +1,17 @@
 # Mission Control — Terminus
-Last updated: 2026-02-18
+Last updated: 2026-02-22
 
 ## Current State
 - Mode: Day
-- Branch: `codex/learning-layer-hardening`
+- Branch: `codex/p0-safe-effector-send-policy`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
 - Home remains object-first (`Autopilots / Outcomes / Approvals / Activity`)
 - No chat-first or harness-first product drift
 - Deny-by-default primitives
-- Compose-first outbound behavior
+- Completed outcomes over draft-only workflows
+- Compose-first outbound behavior with gated sending
 - Secrets only in OS keychain
 - Shared runtime for all three MVP presets
 - Intent Bar may be conversational input, but outputs must always resolve to objects (run draft or autopilot draft)
@@ -32,31 +33,30 @@ Last updated: 2026-02-18
 - Terminal receipts with redaction
 - Provider/transport seam + local BYOK lane
 - Learning Layer: Evaluate -> Adapt -> Memory
+- OAuth provider connections + inbox watcher cadence controls
+- Safe send policy gates + typed approval payload columns
 
 ## Now
-### P0.4 / P0.5 — Email Connections + Watcher Cadence
-Owner: Friday + Fury
-Status: Done
+### P0.6 / P0.7 — Provider-backed send + triage execution
+Owner: Friday + Loki
+Status: Done (slice 1)
 Scope:
-- Gmail + Microsoft 365 OAuth-ready connection flow
-- keychain-only OAuth token storage
-- provider connection status surfaced in app
-- throttled watcher cadence command + app-open polling loop
-- runner control model (background toggle, watcher toggle, interval, max items)
+- replace simulated send with provider-backed execution seam
+- add inbox triage execution primitive with typed approval payload
+- persist triage/send execution receipts with idempotent outcome writes
 Acceptance:
-- OAuth setup can be saved and connection can be completed with auth code
-- no OAuth tokens persisted in SQLite
-- watcher tick dedupes by provider message id and enqueues inbox triage runs
-- watcher cadence respects poll interval throttling and updates visible runner truth
+- send executes via connected provider context (Gmail/Microsoft) with policy gates
+- triage execution is approval-gated and writes explicit outcome receipt
+- tests remain deterministic in mock mode and pass in CI/local
 Verification:
 - `cargo test`
 - `npm run build`
-- manual: connect provider -> wait for cycle -> verify queued runs and backlog updates
+- manual: inbox run -> triage approval -> draft approval -> send approval
 
 ## Next
-1. P0.6: Safe Effector email send/reply policy gates + typed approval payloads (in progress)
-2. P0.7: provider-backed triage actions (label/archive or folder/category)
-3. P0.8: menubar/background agent execution when window is closed
+1. P0.8/P0.9: menubar/background runner with missed-run reconciliation
+2. P0.10+: scoped Guide, Voice object, and rule extraction without chat-first drift
+3. P1.x: provider routing/caching hardening and security tightening
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution

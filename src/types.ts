@@ -80,6 +80,7 @@ export type RiskTier = "low" | "medium" | "high";
 export type PrimitiveId =
   | "read.web"
   | "read.forwarded_email"
+  | "triage.email"
   | "read.vault_file"
   | "write.outcome_draft"
   | "write.email_draft"

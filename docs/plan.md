@@ -1,5 +1,5 @@
 # Terminus MVP Plan
-Last updated: 2026-02-17
+Last updated: 2026-02-22
 
 ## Mission
 Terminus is a calm, local-first Personal AI OS for people who want follow-through, not setup overhead.
@@ -11,6 +11,10 @@ Terminus is object-based, not chat-based:
 - Activity
 
 Chat is optional input only.
+
+Canonical strategy and execution backlog for this phase:
+- `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
+- `tasks/TERMINUS_TASKLIST_v3.md`
 
 ## Product Identity
 Terminus is not:
@@ -28,9 +32,9 @@ See `docs/DIFFERENTIATION.md` and `docs/PRINCIPLES_AND_CONSTRAINTS.md`.
 
 ## MVP Outcomes
 MVP ships one shared Autopilot runtime with three presets:
-1. Website Monitor: monitor -> summarize change -> approval -> draft email
-2. Inbox Triage: paste/forward text -> classify -> draft reply -> approval
-3. Daily Brief: read configured sources -> aggregate brief -> approval
+1. Website Monitor: monitor -> summarize change -> notify/deliver -> optional gated follow-through
+2. Inbox Triage: watch inbox -> classify/triage -> optional gated reply send
+3. Daily Brief: read configured sources -> aggregate brief -> deliver to destination
 
 Shared across all three:
 - one plan schema
@@ -43,14 +47,14 @@ Shared across all three:
 In:
 - Local-first desktop app (Tauri + React + Rust + SQLite)
 - Deny-by-default primitives
-- Compose-first outbound behavior
+- Completed Outcome semantics (executed, pending approval, blocked)
+- Compose-first outbound behavior with explicit send gates
 - Runtime spend enforcement in SGD
 - Provider tiers (Supported vs Experimental)
 - Learning Layer (Evaluate -> Adapt -> Memory)
 
 Out:
 - Hosted always-on runner
-- IMAP/OAuth inbox sync
 - End-user code/shell execution
 - End-user custom tool authoring UI
 - Marketplace-style extension system
@@ -137,6 +141,6 @@ See `docs/LEARNING_LAYER.md`.
 ## Definition of Done (Pilot)
 - User can configure all three presets in under 30 minutes total
 - Each preset completes at least two successful runs
-- User approves at least three drafts through approval queue
+- User approves at least three executable actions through approval queue
 - Failures provide recoverable guidance
 - User reports meaningful dependence on Terminus outcomes
