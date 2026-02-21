@@ -37,26 +37,27 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### P0.8 — Background runner window-closed execution
+### P0.10 — Scoped Guide command (safe guidance input)
 Owner: Friday + Loki
 Status: Done (slice 1)
 Scope:
-- keep app running in background when window closes and background mode is enabled
-- add menubar tray controls (`Open Terminus`, `Run Cycle Now`, `Quit`)
-- run bounded runner ticks from backend thread while app is alive and background mode is enabled
+- add scoped guidance command for `autopilot|run|approval|outcome`
+- classify guidance into `applied`, `proposed_rule`, or `needs_approval`
+- block risky capability-expanding instructions from being auto-applied
+- persist guidance events in SQLite with bounded instruction length
 Acceptance:
-- closing main window hides to tray instead of exiting when background mode is on
-- background thread executes tick cycle without UI polling dependency
-- manual tray action can trigger a cycle immediately
+- guidance requires explicit scope and scope id
+- risky instructions are stored but returned as `needs_approval` with no capability mutation
+- recurring phrasing is stored as rule proposal rather than silent mutation
 Verification:
 - `cargo test`
 - `npm run build`
-- manual: enable background mode -> close window -> verify tray remains and cycles continue
+- manual: submit scope+instruction from Guide panel and verify response mode/message
 
 ## Next
-1. P0.10+: scoped Guide, Voice object, and rule extraction without chat-first drift
+1. P0.11/P0.12: Voice object + “Make this a rule” approval flow
 2. P1.x: provider routing/caching hardening and security tightening
-3. UX cleanup for runner state surfaces and missed-run messaging
+3. UX cleanup for calm language across approvals/outcomes
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution

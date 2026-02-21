@@ -12,6 +12,7 @@ mod web;
 use runner::{ApprovalRecord, RunReceipt, RunRecord, RunnerEngine};
 use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
 use serde::Serialize;
+use rusqlite::OptionalExtension;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -86,6 +87,30 @@ struct AutopilotSendPolicyInput {
     quiet_hours_start_local: i64,
     quiet_hours_end_local: i64,
     allow_outside_quiet_hours: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuidanceInput {
+    scope_type: String,
+    scope_id: String,
+    instruction: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GuidanceMode {
+    Applied,
+    ProposedRule,
+    NeedsApproval,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuidanceResponse {
+    mode: GuidanceMode,
+    message: String,
+    proposed_rule: Option<String>,
 }
 
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
@@ -521,6 +546,107 @@ fn update_autopilot_send_policy(
     db::get_autopilot_send_policy(&connection, autopilot_id)
 }
 
+#[tauri::command]
+fn submit_guidance(
+    state: tauri::State<AppState>,
+    input: GuidanceInput,
+) -> Result<GuidanceResponse, String> {
+    let scope_type = input.scope_type.trim().to_ascii_lowercase();
+    if !matches!(
+        scope_type.as_str(),
+        "autopilot" | "run" | "approval" | "outcome"
+    ) {
+        return Err("Choose a valid guidance scope.".to_string());
+    }
+    let scope_id = input.scope_id.trim();
+    if scope_id.is_empty() {
+        return Err("Scope ID is required.".to_string());
+    }
+    let cleaned_instruction = normalize_guidance_instruction(&input.instruction)?;
+    let (mode, message, proposed_rule) = classify_guidance(&cleaned_instruction);
+
+    let connection = open_connection(&state)?;
+    let (autopilot_id, run_id, approval_id, outcome_id) = match scope_type.as_str() {
+        "autopilot" => (Some(scope_id.to_string()), None, None, None),
+        "run" => {
+            let autopilot: Option<String> = connection
+                .query_row(
+                    "SELECT autopilot_id FROM runs WHERE id = ?1 LIMIT 1",
+                    rusqlite::params![scope_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("Failed to resolve run scope: {e}"))?;
+            (autopilot, Some(scope_id.to_string()), None, None)
+        }
+        "approval" => {
+            let run_ref: Option<(String, String)> = connection
+                .query_row(
+                    "SELECT a.run_id, r.autopilot_id
+                     FROM approvals a
+                     JOIN runs r ON r.id = a.run_id
+                     WHERE a.id = ?1
+                     LIMIT 1",
+                    rusqlite::params![scope_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("Failed to resolve approval scope: {e}"))?;
+            match run_ref {
+                Some((run, auto)) => (Some(auto), Some(run), Some(scope_id.to_string()), None),
+                None => (None, None, Some(scope_id.to_string()), None),
+            }
+        }
+        _ => (None, None, None, Some(scope_id.to_string())),
+    };
+
+    let response = GuidanceResponse {
+        mode,
+        message,
+        proposed_rule: proposed_rule.clone(),
+    };
+    let result_json =
+        serde_json::to_string(&response).map_err(|e| format!("Failed to store guidance: {e}"))?;
+
+    db::insert_guidance_event(
+        &connection,
+        &db::GuidanceEventInsert {
+            id: format!("guide_{}", now_ms()),
+            scope_type: scope_type.clone(),
+            scope_id: scope_id.to_string(),
+            autopilot_id,
+            run_id: run_id.clone(),
+            approval_id,
+            outcome_id,
+            mode: match mode {
+                GuidanceMode::Applied => "applied".to_string(),
+                GuidanceMode::ProposedRule => "proposed_rule".to_string(),
+                GuidanceMode::NeedsApproval => "needs_approval".to_string(),
+            },
+            instruction: cleaned_instruction.clone(),
+            result_json,
+            created_at_ms: now_ms(),
+        },
+    )?;
+
+    if let Some(run_id) = run_id {
+        let _ = connection.execute(
+            "
+            INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
+            VALUES (?1, ?2, 'guidance_received', NULL, NULL, ?3, ?4)
+            ",
+            rusqlite::params![
+                format!("activity_{}", now_ms()),
+                run_id,
+                truncate_for_activity(&cleaned_instruction),
+                now_ms()
+            ],
+        );
+    }
+
+    Ok(response)
+}
+
 fn run_watchers(
     connection: &mut rusqlite::Connection,
     control: &db::RunnerControlRecord,
@@ -551,6 +677,62 @@ fn run_watchers(
     Ok(())
 }
 
+fn normalize_guidance_instruction(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Add one short instruction to guide this item.".to_string());
+    }
+    if trimmed.chars().count() > 280 {
+        return Err("Keep guidance under 280 characters for now.".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn classify_guidance(instruction: &str) -> (GuidanceMode, String, Option<String>) {
+    let lowered = instruction.to_ascii_lowercase();
+    let risky = [
+        "enable sending",
+        "disable approval",
+        "allow all",
+        "add recipient",
+        "remove quiet hours",
+        "run shell",
+        "execute code",
+    ]
+    .iter()
+    .any(|term| lowered.contains(term));
+    if risky {
+        return (
+            GuidanceMode::NeedsApproval,
+            "That change affects protected capabilities. Terminus saved your request and will require explicit approval.".to_string(),
+            None,
+        );
+    }
+    if lowered.contains("always")
+        || lowered.contains("from now on")
+        || lowered.starts_with("when ")
+    {
+        return (
+            GuidanceMode::ProposedRule,
+            "Saved as a proposed rule for your review.".to_string(),
+            Some(instruction.to_string()),
+        );
+    }
+    (
+        GuidanceMode::Applied,
+        "Applied to this scoped item only.".to_string(),
+        None,
+    )
+}
+
+fn truncate_for_activity(input: &str) -> String {
+    let max = 180;
+    if input.chars().count() <= max {
+        return input.to_string();
+    }
+    input.chars().take(max).collect::<String>()
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -577,7 +759,7 @@ fn compute_missed_cycles(last_tick_ms: Option<i64>, now_ms_value: i64, poll_ms: 
 
 #[cfg(test)]
 mod tests {
-    use super::compute_missed_cycles;
+    use super::{classify_guidance, compute_missed_cycles, normalize_guidance_instruction, GuidanceMode};
 
     #[test]
     fn compute_missed_cycles_returns_zero_when_within_interval() {
@@ -589,6 +771,26 @@ mod tests {
     fn compute_missed_cycles_returns_expected_overage() {
         assert_eq!(compute_missed_cycles(Some(1_000), 3_500, 1_000), 1);
         assert_eq!(compute_missed_cycles(Some(1_000), 6_100, 1_000), 4);
+    }
+
+    #[test]
+    fn guidance_classification_blocks_capability_escalation() {
+        let (mode, _, _) = classify_guidance("Enable sending for all recipients.");
+        assert!(matches!(mode, GuidanceMode::NeedsApproval));
+    }
+
+    #[test]
+    fn guidance_classification_proposes_rule_for_recurring_phrases() {
+        let (mode, _, rule) = classify_guidance("From now on, always keep replies short.");
+        assert!(matches!(mode, GuidanceMode::ProposedRule));
+        assert!(rule.is_some());
+    }
+
+    #[test]
+    fn guidance_instruction_is_bounded() {
+        let long = "x".repeat(281);
+        assert!(normalize_guidance_instruction(&long).is_err());
+        assert!(normalize_guidance_instruction("  keep this concise ").is_ok());
     }
 }
 
@@ -856,6 +1058,7 @@ fn main() {
             tick_runner_cycle,
             get_autopilot_send_policy,
             update_autopilot_send_policy,
+            submit_guidance,
             record_decision_event,
             compact_learning_data
         ])

@@ -111,6 +111,21 @@ pub struct MemoryCardUpsert {
     pub version: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuidanceEventInsert {
+    pub id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub autopilot_id: Option<String>,
+    pub run_id: Option<String>,
+    pub approval_id: Option<String>,
+    pub outcome_id: Option<String>,
+    pub mode: String,
+    pub instruction: String,
+    pub result_json: String,
+    pub created_at_ms: i64,
+}
+
 pub fn bootstrap_sqlite(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data = app_handle
         .path()
@@ -317,6 +332,20 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               version INTEGER NOT NULL DEFAULT 1,
               FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
               FOREIGN KEY (created_from_run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS guidance_events (
+              id TEXT PRIMARY KEY,
+              scope_type TEXT NOT NULL,
+              scope_id TEXT NOT NULL,
+              autopilot_id TEXT,
+              run_id TEXT,
+              approval_id TEXT,
+              outcome_id TEXT,
+              mode TEXT NOT NULL,
+              instruction TEXT NOT NULL,
+              result_json TEXT NOT NULL DEFAULT '{}',
+              created_at_ms INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS email_oauth_config (
@@ -565,6 +594,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to create memory card index: {e}"))?;
     connection
         .execute(
+            "CREATE INDEX IF NOT EXISTS idx_guidance_events_scope_created ON guidance_events(scope_type, scope_id, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create guidance events index: {e}"))?;
+    connection
+        .execute(
             "CREATE INDEX IF NOT EXISTS idx_email_oauth_sessions_provider_expiry ON email_oauth_sessions(provider, expires_at_ms DESC)",
             [],
         )
@@ -770,6 +805,36 @@ pub fn upsert_memory_card(
             ],
         )
         .map_err(|e| format!("Failed to upsert memory card: {e}"))?;
+    Ok(())
+}
+
+pub fn insert_guidance_event(
+    connection: &Connection,
+    payload: &GuidanceEventInsert,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO guidance_events (
+              id, scope_type, scope_id, autopilot_id, run_id, approval_id, outcome_id,
+              mode, instruction, result_json, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ",
+            params![
+                &payload.id,
+                &payload.scope_type,
+                &payload.scope_id,
+                &payload.autopilot_id,
+                &payload.run_id,
+                &payload.approval_id,
+                &payload.outcome_id,
+                &payload.mode,
+                &payload.instruction,
+                &payload.result_json,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(|e| format!("Failed to insert guidance event: {e}"))?;
     Ok(())
 }
 
