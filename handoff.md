@@ -27,6 +27,11 @@ Last updated: 2026-02-18
   - Manual inbox watcher tick command with provider fetch + dedupe + run queueing
   - Runner control model + throttled watcher cadence command (`tick_runner_cycle`)
   - App-open polling loop in UI for watcher cadence visibility
+- Safe Effector foundations for send:
+  - `autopilot_send_policy` table and Tauri commands to get/update policy
+  - typed approval payload fields on approvals (`payload_type`, `payload_json`)
+  - `send.email` runner path enforces allowlist, max/day, quiet hours, and explicit enablement
+  - send receipts persisted as `email_sent` outcomes with idempotent upsert by run/step/kind
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -34,7 +39,7 @@ Last updated: 2026-02-18
 
 ## Current Priority Track
 - Next phase follows updated strategy order:
-  1. P0.6 safe send/reply effectors with typed approvals and idempotency
+  1. P0.6 complete safe send/reply effectors with provider-backed delivery + richer typed payload rendering
   2. P0.7 minimal provider-backed triage actions
   3. P0.8 menubar/background runner for window-closed execution
 

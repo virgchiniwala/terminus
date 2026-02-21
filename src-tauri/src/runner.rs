@@ -2,6 +2,7 @@ use crate::learning::{
     self, AdaptationSummary, DecisionEventMetadata, DecisionEventType, RunEvaluationSummary,
     RuntimeProfile,
 };
+use crate::db;
 use crate::primitives::PrimitiveGuard;
 use crate::providers::{
     ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
@@ -117,6 +118,8 @@ pub struct ApprovalRecord {
     pub step_id: String,
     pub status: String,
     pub preview: String,
+    pub payload_type: String,
+    pub payload_json: String,
     pub reason: Option<String>,
 }
 
@@ -662,7 +665,7 @@ impl RunnerEngine {
         let mut stmt = connection
             .prepare(
                 "
-                SELECT id, run_id, step_id, status, preview, reason
+                SELECT id, run_id, step_id, status, preview, payload_type, payload_json, reason
                 FROM approvals
                 WHERE status = 'pending'
                 ORDER BY created_at ASC
@@ -678,7 +681,9 @@ impl RunnerEngine {
                     step_id: row.get(2)?,
                     status: row.get(3)?,
                     preview: row.get(4)?,
-                    reason: row.get(5)?,
+                    payload_type: row.get(5)?,
+                    payload_json: row.get(6)?,
+                    reason: row.get(7)?,
                 })
             })
             .map_err(|e| RunnerError::Db(e.to_string()))?;
@@ -1075,15 +1080,6 @@ impl RunnerEngine {
             return Err(StepExecutionError {
                 retryable: false,
                 user_reason: error.to_string(),
-            });
-        }
-
-        if step.primitive == PrimitiveId::SendEmail {
-            return Err(StepExecutionError {
-                retryable: false,
-                user_reason:
-                    "Sending is disabled right now. Drafts are allowed, sends are blocked."
-                        .to_string(),
             });
         }
 
@@ -1548,12 +1544,113 @@ impl RunnerEngine {
                     failure_reason_override: None,
                 })
             }
-            PrimitiveId::SendEmail => Err(StepExecutionError {
-                retryable: false,
-                user_reason:
-                    "Sending is disabled right now. Drafts are allowed, sends are blocked."
-                        .to_string(),
-            }),
+            PrimitiveId::SendEmail => {
+                let policy = db::get_autopilot_send_policy(connection, &run.autopilot_id)
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e,
+                    })?;
+                if !policy.allow_sending {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason: "Sending is off for this Autopilot. Enable sending in controls and try again."
+                            .to_string(),
+                    });
+                }
+                if policy.recipient_allowlist.is_empty() {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "Sending is blocked until you add at least one allowed recipient."
+                                .to_string(),
+                    });
+                }
+                if !policy.allow_outside_quiet_hours
+                    && is_within_quiet_hours(
+                        policy.quiet_hours_start_local,
+                        policy.quiet_hours_end_local,
+                    )
+                {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "Sending is paused during quiet hours for this Autopilot."
+                                .to_string(),
+                    });
+                }
+                let sends_today = Self::count_sent_today(connection, &run.autopilot_id).map_err(
+                    |e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    },
+                )?;
+                if sends_today >= policy.max_sends_per_day {
+                    return Err(StepExecutionError {
+                        retryable: false,
+                        user_reason: "Sending limit reached for today. Try again tomorrow or raise the daily limit."
+                            .to_string(),
+                    });
+                }
+                let recipient = select_allowed_recipient(
+                    &run.plan.recipient_hints,
+                    &policy.recipient_allowlist,
+                )
+                .ok_or_else(|| StepExecutionError {
+                    retryable: false,
+                    user_reason:
+                        "No recipient matched your allowlist. Update recipient allowlist or intent."
+                            .to_string(),
+                })?;
+
+                let draft_body = Self::get_latest_email_draft(connection, &run.id)
+                    .map_err(|e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    })?
+                    .ok_or_else(|| StepExecutionError {
+                        retryable: false,
+                        user_reason: "No email draft was found for this run.".to_string(),
+                    })?;
+                let subject = infer_subject_from_draft(&draft_body);
+                let payload = serde_json::json!({
+                    "recipient": recipient,
+                    "subject": subject,
+                    "body_preview": truncate_chars(&draft_body, 500),
+                    "message_id": format!("msg_{}_{}", run.id, step.id),
+                    "provider": run.provider_kind.as_str(),
+                    "sent_at_ms": now_ms(),
+                });
+                connection
+                    .execute(
+                        "
+                        INSERT INTO outcomes (
+                          id, run_id, step_id, kind, status, content, created_at, updated_at
+                        ) VALUES (?1, ?2, ?3, 'email_sent', 'sent', ?4, ?5, ?5)
+                        ON CONFLICT(run_id, step_id, kind)
+                        DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                        ",
+                        params![
+                            make_id("outcome"),
+                            run.id,
+                            step.id,
+                            payload.to_string(),
+                            now_ms()
+                        ],
+                    )
+                    .map_err(|_| StepExecutionError {
+                        retryable: true,
+                        user_reason: "Couldn't record sent email receipt yet.".to_string(),
+                    })?;
+
+                Ok(StepExecutionResult {
+                    user_message: "Email was sent through the connected account.".to_string(),
+                    actual_spend_usd_cents: 2,
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
         }
     }
 
@@ -1726,6 +1823,37 @@ impl RunnerEngine {
             }
             None => Ok(None),
         }
+    }
+
+    fn get_latest_email_draft(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Option<String>, RunnerError> {
+        connection
+            .query_row(
+                "SELECT content FROM outcomes WHERE run_id = ?1 AND kind = 'email_draft' ORDER BY updated_at DESC LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))
+    }
+
+    fn count_sent_today(connection: &Connection, autopilot_id: &str) -> Result<i64, RunnerError> {
+        let today_start = current_day_bucket() * MS_PER_DAY;
+        let today_end = today_start + MS_PER_DAY;
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes o
+                 JOIN runs r ON o.run_id = r.id
+                 WHERE r.autopilot_id = ?1
+                   AND o.kind = 'email_sent'
+                   AND o.created_at >= ?2
+                   AND o.created_at < ?3",
+                params![autopilot_id, today_start, today_end],
+                |row| row.get(0),
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))
     }
 
     fn build_inbox_triage_prompt(
@@ -2243,7 +2371,7 @@ impl RunnerEngine {
     ) -> Result<ApprovalRecord, RunnerError> {
         connection
             .query_row(
-                "SELECT id, run_id, step_id, status, preview, reason FROM approvals WHERE id = ?1",
+                "SELECT id, run_id, step_id, status, preview, payload_type, payload_json, reason FROM approvals WHERE id = ?1",
                 params![approval_id],
                 |row| {
                     Ok(ApprovalRecord {
@@ -2252,7 +2380,9 @@ impl RunnerEngine {
                         step_id: row.get(2)?,
                         status: row.get(3)?,
                         preview: row.get(4)?,
-                        reason: row.get(5)?,
+                        payload_type: row.get(5)?,
+                        payload_json: row.get(6)?,
+                        reason: row.get(7)?,
                     })
                 },
             )
@@ -2284,6 +2414,8 @@ impl RunnerEngine {
         run: &RunRecord,
         step: &PlanStep,
     ) -> Result<(), RunnerError> {
+        let (preview, payload_type, payload_json) =
+            Self::approval_payload_for_step(connection, run, step)?;
         let tx = connection
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
@@ -2292,14 +2424,16 @@ impl RunnerEngine {
         tx.execute(
             "
             INSERT OR IGNORE INTO approvals
-              (id, run_id, step_id, status, preview, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?5)
+              (id, run_id, step_id, status, preview, payload_type, payload_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?7)
             ",
             params![
                 make_id("approval"),
                 run.id,
                 step.id,
-                format!("Approve step: {}", step.label),
+                preview,
+                payload_type,
+                payload_json,
                 now
             ],
         )
@@ -2338,6 +2472,74 @@ impl RunnerEngine {
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
     }
 
+    fn approval_payload_for_step(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+    ) -> Result<(String, String, String), RunnerError> {
+        if step.primitive == PrimitiveId::SendEmail {
+            let policy = db::get_autopilot_send_policy(connection, &run.autopilot_id)
+                .map_err(RunnerError::Db)?;
+            let recipient = select_allowed_recipient(
+                &run.plan.recipient_hints,
+                &policy.recipient_allowlist,
+            )
+            .unwrap_or_else(|| "(recipient required)".to_string());
+            let draft = Self::get_latest_email_draft(connection, &run.id)?
+                .unwrap_or_else(|| "No draft available yet.".to_string());
+            let subject = infer_subject_from_draft(&draft);
+            let payload = serde_json::json!({
+                "type": "email_send",
+                "recipient": recipient,
+                "subject": subject,
+                "body_preview": truncate_chars(&draft, 500),
+                "policy": {
+                    "max_sends_per_day": policy.max_sends_per_day,
+                    "quiet_hours_start_local": policy.quiet_hours_start_local,
+                    "quiet_hours_end_local": policy.quiet_hours_end_local
+                }
+            })
+            .to_string();
+            return Ok((
+                "Approve sending this email through your connected account.".to_string(),
+                "email_send".to_string(),
+                payload,
+            ));
+        }
+
+        if step.primitive == PrimitiveId::WriteEmailDraft {
+            let recipient = run
+                .plan
+                .recipient_hints
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "(recipient to be confirmed)".to_string());
+            let payload = serde_json::json!({
+                "type": "email_draft",
+                "recipient_hint": recipient,
+                "step_label": step.label,
+            })
+            .to_string();
+            return Ok((
+                format!("Approve step: {}", step.label),
+                "email_draft".to_string(),
+                payload,
+            ));
+        }
+
+        let payload = serde_json::json!({
+            "type": "generic_step",
+            "step_label": step.label,
+            "primitive": format!("{:?}", step.primitive).to_ascii_lowercase(),
+        })
+        .to_string();
+        Ok((
+            format!("Approve step: {}", step.label),
+            "generic_step".to_string(),
+            payload,
+        ))
+    }
+
     fn pause_for_soft_cap_approval(
         connection: &mut Connection,
         run: &RunRecord,
@@ -2351,14 +2553,15 @@ impl RunnerEngine {
         tx.execute(
             "
             INSERT OR IGNORE INTO approvals
-              (id, run_id, step_id, status, preview, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?5)
+              (id, run_id, step_id, status, preview, payload_type, payload_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, 'pending', ?4, 'spend_soft_cap', ?5, ?6, ?6)
             ",
             params![
                 make_id("approval"),
                 run.id,
                 SOFT_CAP_APPROVAL_STEP_ID,
                 message,
+                format!("{{\"projected_run_cost\":\"{}\"}}", format_usd_cents(run.usd_cents_actual)),
                 now
             ],
         )
@@ -2828,6 +3031,61 @@ fn truncate_chars(input: &str, max_chars: usize) -> String {
     input.chars().take(max_chars).collect::<String>()
 }
 
+fn select_allowed_recipient(hints: &[String], allowlist: &[String]) -> Option<String> {
+    if allowlist.is_empty() {
+        return None;
+    }
+    for hint in hints {
+        if recipient_allowed(hint, allowlist) {
+            return Some(hint.clone());
+        }
+    }
+    allowlist.first().cloned()
+}
+
+fn recipient_allowed(recipient: &str, allowlist: &[String]) -> bool {
+    let lowered = recipient.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        return false;
+    }
+    let recipient_domain = lowered.split('@').nth(1).unwrap_or("");
+    allowlist.iter().any(|entry| {
+        let normalized = entry.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return false;
+        }
+        if normalized.starts_with('@') {
+            return recipient_domain == normalized.trim_start_matches('@');
+        }
+        lowered == normalized
+    })
+}
+
+fn infer_subject_from_draft(draft: &str) -> String {
+    let first_line = draft.lines().next().unwrap_or("").trim();
+    if let Some(subject) = first_line.strip_prefix("Subject:") {
+        let cleaned = subject.trim();
+        if !cleaned.is_empty() {
+            return cleaned.to_string();
+        }
+    }
+    "Update from Terminus".to_string()
+}
+
+fn is_within_quiet_hours(start_hour: i64, end_hour: i64) -> bool {
+    let hour = ((now_ms() / 3_600_000) % 24).rem_euclid(24);
+    let start = start_hour.clamp(0, 23);
+    let end = end_hour.clamp(0, 23);
+    if start == end {
+        return false;
+    }
+    if start > end {
+        hour >= start || hour < end
+    } else {
+        hour >= start && hour < end
+    }
+}
+
 fn fnv1a_64_hex(input: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in input.as_bytes() {
@@ -2982,7 +3240,7 @@ fn compute_backoff_ms(retry_attempt: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{RunReceipt, RunState, RunnerEngine};
-    use crate::db::{bootstrap_schema, AutopilotProfileUpsert};
+    use crate::db::{AutopilotProfileUpsert, AutopilotSendPolicyRecord, bootstrap_schema};
     use crate::learning;
     use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
     use rusqlite::{params, Connection};
@@ -3008,6 +3266,7 @@ mod tests {
             web_allowed_domains: Vec::new(),
             inbox_source_text: None,
             daily_sources: Vec::new(),
+            recipient_hints: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft],
             steps: vec![PlanStep {
                 id: "step_1".to_string(),
@@ -3575,6 +3834,7 @@ mod tests {
             web_allowed_domains: Vec::new(),
             inbox_source_text: Some("Subject: hi\nCan we meet tomorrow?".to_string()),
             daily_sources: Vec::new(),
+            recipient_hints: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft, PrimitiveId::WriteEmailDraft],
             steps: vec![PlanStep {
                 id: "step_1".to_string(),
@@ -4514,5 +4774,101 @@ mod tests {
             )
             .expect("count final");
         assert_eq!(final_count as usize, initial_count + 2);
+    }
+
+    #[test]
+    fn send_email_fails_when_policy_is_disabled() {
+        let mut conn = setup_conn();
+        let plan = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Triage and send reply to user@example.com".to_string(),
+            ProviderId::OpenAi,
+        );
+        let run = RunnerEngine::start_run(&mut conn, "auto_send_off", plan, "idem_send_off", 2)
+            .expect("start");
+
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step2");
+        let need_draft_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_draft_approval.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("approvals");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("first approval");
+        let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
+        assert_eq!(after_first.state, RunState::Ready);
+
+        let need_send_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        assert_eq!(need_send_approval.state, RunState::NeedsApproval);
+        let approvals2 = RunnerEngine::list_pending_approvals(&conn).expect("approvals2");
+        let second = approvals2
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("second approval");
+        let failed = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
+        assert_eq!(failed.state, RunState::Failed);
+        assert!(
+            failed
+                .failure_reason
+                .unwrap_or_default()
+                .contains("Sending is off")
+        );
+    }
+
+    #[test]
+    fn send_email_succeeds_with_allowlist_policy() {
+        let mut conn = setup_conn();
+        let plan = AutopilotPlan::from_intent(
+            RecipeKind::InboxTriage,
+            "Triage and send reply to user@example.com".to_string(),
+            ProviderId::OpenAi,
+        );
+        let run = RunnerEngine::start_run(&mut conn, "auto_send_on", plan, "idem_send_on", 2)
+            .expect("start");
+        crate::db::upsert_autopilot_send_policy(
+            &conn,
+            &AutopilotSendPolicyRecord {
+                autopilot_id: "auto_send_on".to_string(),
+                allow_sending: true,
+                recipient_allowlist: vec!["@example.com".to_string()],
+                max_sends_per_day: 10,
+                quiet_hours_start_local: 23,
+                quiet_hours_end_local: 5,
+                allow_outside_quiet_hours: true,
+                updated_at_ms: 1,
+            },
+        )
+        .expect("seed send policy");
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step1");
+        let _ = RunnerEngine::run_tick(&mut conn, &run.id).expect("step2");
+        let need_draft_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval1");
+        assert_eq!(need_draft_approval.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("approvals");
+        let first = approvals
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("first approval");
+        let after_first = RunnerEngine::approve(&mut conn, &first.id).expect("approve first");
+        assert_eq!(after_first.state, RunState::Ready);
+
+        let need_send_approval = RunnerEngine::run_tick(&mut conn, &run.id).expect("approval2");
+        assert_eq!(need_send_approval.state, RunState::NeedsApproval);
+        let approvals2 = RunnerEngine::list_pending_approvals(&conn).expect("approvals2");
+        let second = approvals2
+            .iter()
+            .find(|a| a.run_id == run.id)
+            .expect("second approval");
+        let done = RunnerEngine::approve(&mut conn, &second.id).expect("approve second");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let sent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'email_sent'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("sent count");
+        assert_eq!(sent_count, 1);
     }
 }

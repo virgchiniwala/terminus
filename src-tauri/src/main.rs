@@ -70,6 +70,18 @@ struct RunnerCycleSummary {
     resumed_due_runs: usize,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutopilotSendPolicyInput {
+    autopilot_id: String,
+    allow_sending: bool,
+    recipient_allowlist: Vec<String>,
+    max_sends_per_day: i64,
+    quiet_hours_start_local: i64,
+    quiet_hours_end_local: i64,
+    allow_outside_quiet_hours: bool,
+}
+
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
     let db_path = state
         .db_path
@@ -326,6 +338,57 @@ fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary
     Ok(summary)
 }
 
+#[tauri::command]
+fn get_autopilot_send_policy(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+) -> Result<db::AutopilotSendPolicyRecord, String> {
+    let connection = open_connection(&state)?;
+    db::get_autopilot_send_policy(&connection, autopilot_id.trim())
+}
+
+#[tauri::command]
+fn update_autopilot_send_policy(
+    state: tauri::State<AppState>,
+    input: AutopilotSendPolicyInput,
+) -> Result<db::AutopilotSendPolicyRecord, String> {
+    let autopilot_id = input.autopilot_id.trim();
+    if autopilot_id.is_empty() {
+        return Err("Autopilot ID is required.".to_string());
+    }
+    if !(1..=200).contains(&input.max_sends_per_day) {
+        return Err("Max sends per day must be between 1 and 200.".to_string());
+    }
+    if !(0..=23).contains(&input.quiet_hours_start_local)
+        || !(0..=23).contains(&input.quiet_hours_end_local)
+    {
+        return Err("Quiet hours must use 0-23 clock values.".to_string());
+    }
+    if input.allow_sending && input.recipient_allowlist.is_empty() {
+        return Err("Add at least one allowed recipient before enabling sending.".to_string());
+    }
+
+    let connection = open_connection(&state)?;
+    let cleaned_allowlist = input
+        .recipient_allowlist
+        .into_iter()
+        .map(|r| r.trim().to_ascii_lowercase())
+        .filter(|r| !r.is_empty())
+        .collect::<Vec<String>>();
+    let updated = db::AutopilotSendPolicyRecord {
+        autopilot_id: autopilot_id.to_string(),
+        allow_sending: input.allow_sending,
+        recipient_allowlist: cleaned_allowlist,
+        max_sends_per_day: input.max_sends_per_day,
+        quiet_hours_start_local: input.quiet_hours_start_local,
+        quiet_hours_end_local: input.quiet_hours_end_local,
+        allow_outside_quiet_hours: input.allow_outside_quiet_hours,
+        updated_at_ms: now_ms(),
+    };
+    db::upsert_autopilot_send_policy(&connection, &updated)?;
+    db::get_autopilot_send_policy(&connection, autopilot_id)
+}
+
 fn run_watchers(
     connection: &mut rusqlite::Connection,
     control: &db::RunnerControlRecord,
@@ -579,6 +642,8 @@ fn main() {
             get_runner_control,
             update_runner_control,
             tick_runner_cycle,
+            get_autopilot_send_policy,
+            update_autopilot_send_policy,
             record_decision_event,
             compact_learning_data
         ])

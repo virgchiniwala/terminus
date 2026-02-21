@@ -7,6 +7,7 @@ import type {
   OAuthStartResponse,
   RecipeKind,
   RunnerControlRecord,
+  AutopilotSendPolicyRecord,
 } from "./types";
 
 const fallbackSnapshot: HomeSnapshot = {
@@ -82,6 +83,7 @@ function normalizeDraft(raw: unknown): IntentDraftResponse {
       webSourceUrl: plan.webSourceUrl ?? plan.web_source_url ?? null,
       webAllowedDomains: plan.webAllowedDomains ?? plan.web_allowed_domains ?? [],
       inboxSourceText: plan.inboxSourceText ?? plan.inbox_source_text ?? null,
+      recipientHints: plan.recipientHints ?? plan.recipient_hints ?? [],
     },
     preview: {
       reads: value.preview?.reads ?? [],
@@ -123,6 +125,9 @@ export function App() {
   const [watcherAutopilotId, setWatcherAutopilotId] = useState("auto_inbox_watch");
   const [watcherMaxItems, setWatcherMaxItems] = useState(10);
   const [runnerControl, setRunnerControl] = useState<RunnerControlRecord | null>(null);
+  const [sendPolicyAutopilotId, setSendPolicyAutopilotId] = useState("auto_inbox_watch_gmail");
+  const [sendPolicyAllowlistInput, setSendPolicyAllowlistInput] = useState("");
+  const [sendPolicy, setSendPolicy] = useState<AutopilotSendPolicyRecord | null>(null);
 
   const loadSnapshot = () => {
     setLoading(true);
@@ -249,6 +254,76 @@ export function App() {
       .catch((err) => {
         console.error("Failed to update runner control:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not update runner controls.");
+      });
+  };
+
+  const loadSendPolicy = () => {
+    invoke<AutopilotSendPolicyRecord>("get_autopilot_send_policy", {
+      autopilotId: sendPolicyAutopilotId,
+    })
+      .then((payload: any) => {
+        const normalized: AutopilotSendPolicyRecord = {
+          autopilotId: payload.autopilotId ?? payload.autopilot_id ?? sendPolicyAutopilotId,
+          allowSending: payload.allowSending ?? payload.allow_sending ?? false,
+          recipientAllowlist: payload.recipientAllowlist ?? payload.recipient_allowlist ?? [],
+          maxSendsPerDay: payload.maxSendsPerDay ?? payload.max_sends_per_day ?? 10,
+          quietHoursStartLocal:
+            payload.quietHoursStartLocal ?? payload.quiet_hours_start_local ?? 18,
+          quietHoursEndLocal: payload.quietHoursEndLocal ?? payload.quiet_hours_end_local ?? 9,
+          allowOutsideQuietHours:
+            payload.allowOutsideQuietHours ?? payload.allow_outside_quiet_hours ?? false,
+          updatedAtMs: payload.updatedAtMs ?? payload.updated_at_ms ?? 0,
+        };
+        setSendPolicy(normalized);
+        setSendPolicyAllowlistInput(normalized.recipientAllowlist.join(", "));
+      })
+      .catch((err) => {
+        console.error("Failed to load send policy:", err);
+        setConnectionsMessage("Could not load send policy for this Autopilot.");
+      });
+  };
+
+  const saveSendPolicy = (next: AutopilotSendPolicyRecord) => {
+    invoke<AutopilotSendPolicyRecord>("update_autopilot_send_policy", {
+      input: {
+        autopilotId: next.autopilotId,
+        allowSending: next.allowSending,
+        recipientAllowlist: next.recipientAllowlist,
+        maxSendsPerDay: next.maxSendsPerDay,
+        quietHoursStartLocal: next.quietHoursStartLocal,
+        quietHoursEndLocal: next.quietHoursEndLocal,
+        allowOutsideQuietHours: next.allowOutsideQuietHours,
+      },
+    })
+      .then((payload: any) => {
+        setSendPolicy({
+          autopilotId: payload.autopilotId ?? payload.autopilot_id ?? next.autopilotId,
+          allowSending: payload.allowSending ?? payload.allow_sending ?? next.allowSending,
+          recipientAllowlist:
+            payload.recipientAllowlist ??
+            payload.recipient_allowlist ??
+            next.recipientAllowlist,
+          maxSendsPerDay:
+            payload.maxSendsPerDay ?? payload.max_sends_per_day ?? next.maxSendsPerDay,
+          quietHoursStartLocal:
+            payload.quietHoursStartLocal ??
+            payload.quiet_hours_start_local ??
+            next.quietHoursStartLocal,
+          quietHoursEndLocal:
+            payload.quietHoursEndLocal ??
+            payload.quiet_hours_end_local ??
+            next.quietHoursEndLocal,
+          allowOutsideQuietHours:
+            payload.allowOutsideQuietHours ??
+            payload.allow_outside_quiet_hours ??
+            next.allowOutsideQuietHours,
+          updatedAtMs: payload.updatedAtMs ?? payload.updated_at_ms ?? Date.now(),
+        });
+        setConnectionsMessage("Send policy updated.");
+      })
+      .catch((err) => {
+        console.error("Failed to save send policy:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not update send policy.");
       });
   };
 
@@ -592,6 +667,85 @@ export function App() {
                     })
                   }
                 />
+              </label>
+            </div>
+          )}
+          <div className="watcher-controls">
+            <label>
+              <span>Send policy Autopilot ID</span>
+              <input
+                value={sendPolicyAutopilotId}
+                onChange={(event) => setSendPolicyAutopilotId(event.target.value)}
+                placeholder="auto_inbox_watch_gmail"
+              />
+            </label>
+            <label>
+              <span>&nbsp;</span>
+              <button type="button" onClick={loadSendPolicy}>
+                Load Send Policy
+              </button>
+            </label>
+          </div>
+          {sendPolicy && (
+            <div className="watcher-controls">
+              <label>
+                <span>Sending</span>
+                <select
+                  value={sendPolicy.allowSending ? "on" : "off"}
+                  onChange={(event) =>
+                    saveSendPolicy({ ...sendPolicy, allowSending: event.target.value === "on" })
+                  }
+                >
+                  <option value="off">Compose only</option>
+                  <option value="on">Allow sending</option>
+                </select>
+              </label>
+              <label>
+                <span>Recipient allowlist (comma separated)</span>
+                <input
+                  value={sendPolicyAllowlistInput}
+                  onChange={(event) => setSendPolicyAllowlistInput(event.target.value)}
+                  onBlur={() =>
+                    saveSendPolicy({
+                      ...sendPolicy,
+                      recipientAllowlist: sendPolicyAllowlistInput
+                        .split(",")
+                        .map((x) => x.trim())
+                        .filter((x) => x.length > 0),
+                    })
+                  }
+                  placeholder="person@example.com, @company.com"
+                />
+              </label>
+              <label>
+                <span>Max sends per day</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={sendPolicy.maxSendsPerDay}
+                  onChange={(event) =>
+                    saveSendPolicy({
+                      ...sendPolicy,
+                      maxSendsPerDay: Number(event.target.value) || sendPolicy.maxSendsPerDay,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                <span>Allow outside quiet hours</span>
+                <select
+                  value={sendPolicy.allowOutsideQuietHours ? "yes" : "no"}
+                  onChange={(event) =>
+                    saveSendPolicy({
+                      ...sendPolicy,
+                      allowOutsideQuietHours: event.target.value === "yes",
+                    })
+                  }
+                >
+                  <option value="no">No</option>
+                  <option value="yes">Yes</option>
+                </select>
               </label>
             </div>
           )}

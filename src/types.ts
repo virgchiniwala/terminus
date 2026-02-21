@@ -62,6 +62,17 @@ export interface RunnerControlRecord {
   watcherLastTickMs: number | null;
 }
 
+export interface AutopilotSendPolicyRecord {
+  autopilotId: string;
+  allowSending: boolean;
+  recipientAllowlist: string[];
+  maxSendsPerDay: number;
+  quietHoursStartLocal: number;
+  quietHoursEndLocal: number;
+  allowOutsideQuietHours: boolean;
+  updatedAtMs: number;
+}
+
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 
 export type RiskTier = "low" | "medium" | "high";
@@ -101,6 +112,7 @@ export interface AutopilotPlan {
   webAllowedDomains?: string[];
   inboxSourceText?: string | null;
   dailySources?: string[];
+  recipientHints?: string[];
   allowedPrimitives: PrimitiveId[];
   steps: PlanStep[];
 }
