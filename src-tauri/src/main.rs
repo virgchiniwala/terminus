@@ -147,6 +147,15 @@ fn get_home_snapshot(state: tauri::State<AppState>) -> Result<db::HomeSnapshot, 
 }
 
 #[tauri::command]
+fn list_primary_outcomes(
+    state: tauri::State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<db::PrimaryOutcomeRecord>, String> {
+    let connection = open_connection(&state)?;
+    db::list_primary_outcomes(&connection, limit.unwrap_or(50))
+}
+
+#[tauri::command]
 fn start_recipe_run(
     state: tauri::State<AppState>,
     autopilot_id: String,
@@ -1057,6 +1066,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_home_snapshot,
+            list_primary_outcomes,
             draft_intent,
             start_recipe_run,
             run_tick,

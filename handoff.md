@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-21
+Last updated: 2026-02-22
 
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
@@ -63,6 +63,11 @@ Last updated: 2026-02-21
   - runner action interfaces: `ActionType`, `ActionRecord`, `ActionExecutionRecord`, `execute_action(...)`
   - clarification queue foundation: `clarifications` table, `list_pending_clarifications`, `submit_clarification_answer`
   - provider observability foundation: `provider_calls` table + provider dispatch logging hooks in runner
+- Completed outcome semantics (compatibility-safe):
+  - write-step provider outputs now also persist canonical `CreateOutcomeAction` + `action_executions`
+  - `completed_outcome` rows are persisted for generated completion payloads
+  - new primary outcomes query/count (`list_primary_outcomes`, run-based semantics) hides internal draft artifacts from Home outcomes count
+  - duplicate approval on already-approved write step does not create duplicate `action_executions`
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes

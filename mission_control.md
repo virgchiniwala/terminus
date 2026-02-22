@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-21
+Last updated: 2026-02-22
 
 ## Current State
 - Mode: Day
@@ -37,29 +37,26 @@ Last updated: 2026-02-21
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR2-PR3 Transition — Draft-to-Action canonicalization
+### PR19 — Completed outcomes + approval canonicalization (compatibility-safe)
 Owner: Friday + Fury + Loki
-Status: In progress
+Status: In progress (slice 2)
 Scope:
-- add canonical `actions` + `action_executions` storage
-- link approvals to `action_id` with idempotent approval paths
-- add clarification queue primitives (`clarifications`, answer/resume command)
-- reframe UI/home copy from draft review to action authorization
-- add provider call observability table hooks (`provider_calls`)
+- persist canonical `CreateOutcomeAction` execution records for write-step completions
+- make Outcomes home count use primary outcome semantics (run-based, internal artifacts hidden)
+- add `list_primary_outcomes` backend query for executed / pending approval / blocked clarification
+- keep legacy `*_draft` artifacts as compatibility internals
 Acceptance:
-- no core home/approval copy describes drafts as primary user outcome
-- action rows persist for approval-gated steps with idempotency key
-- approval rows include `action_id`
-- clarification answer resumes the same run
-- provider calls are logged for LLM steps
+- completed write steps create `actions` + `action_executions` (`create_outcome`)
+- double approve remains idempotent (single action execution row)
+- primary outcomes query excludes internal draft artifacts
 Verification:
 - `cd src-tauri && cargo test`
 - `npm run build`
 
 ## Next
-1. PR4: Completed outcome semantics on outcome surfaces
-2. PR5: Single-slot clarification UX polish
-3. PR6/PR7: deterministic provider scaffolding + CSP/redaction hardening
+1. Full approvals UI cards from typed action payloads (render exact execution intent)
+2. Clarification queue UI (single-slot card + answer/resume)
+3. Security hardening follow-up (CSP dev/prod split + redaction regression tests)
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
