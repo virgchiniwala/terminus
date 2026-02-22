@@ -549,7 +549,9 @@ impl RunnerEngine {
         let approval = Self::get_approval(connection, approval_id)?;
         if approval.status == "approved" {
             if let Some(action_id) = approval.action_id.as_deref() {
-                Self::execute_action(connection, action_id)?;
+                if Self::action_is_safe_internal(connection, action_id)? {
+                    Self::execute_action(connection, action_id)?;
+                }
             }
             return Self::get_run_with_learning(connection, &approval.run_id);
         }
@@ -2064,7 +2066,7 @@ impl RunnerEngine {
     }
 
     fn persist_provider_output(
-        connection: &Connection,
+        connection: &mut Connection,
         run: &RunRecord,
         step: &PlanStep,
         response: &ProviderResponse,
@@ -2128,7 +2130,96 @@ impl RunnerEngine {
                 user_reason: "Couldn't save compatibility output yet.".to_string(),
             })?;
 
+        let action_payload = serde_json::json!({
+            "type": if step.primitive == PrimitiveId::WriteEmailDraft { "message_payload" } else { "outcome_payload" },
+            "step_label": step.label,
+            "content_preview": truncate_chars(&redact_text(&response.text), 500),
+            "content_length": response.text.chars().count(),
+            "provider": run.provider_kind.as_str(),
+            "model": response.model,
+        })
+        .to_string();
+        Self::upsert_generated_output_action(connection, run, step, &action_payload).map_err(
+            |_| StepExecutionError {
+                retryable: true,
+                user_reason: "Couldn't save completed outcome record yet.".to_string(),
+            },
+        )?;
+
         Ok(())
+    }
+
+    fn upsert_generated_output_action(
+        connection: &mut Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        payload_json: &str,
+    ) -> Result<(), RunnerError> {
+        let tx = connection
+            .transaction()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let now = now_ms();
+        let idempotency_key = format!(
+            "{}:{}:{}",
+            run.id,
+            step.id,
+            ActionType::CreateOutcomeAction.as_str()
+        );
+        let action_id: String = tx
+            .query_row(
+                "SELECT id FROM actions WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?
+            .unwrap_or_else(|| make_id("action"));
+
+        tx.execute(
+            "INSERT INTO actions (
+               id, run_id, step_id, action_type, payload_json, requires_approval, status, idempotency_key, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, 'executed', ?6, ?7, ?7)
+             ON CONFLICT(idempotency_key) DO UPDATE SET
+               payload_json = excluded.payload_json,
+               status = excluded.status,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                action_id,
+                run.id,
+                step.id,
+                ActionType::CreateOutcomeAction.as_str(),
+                payload_json,
+                idempotency_key,
+                now
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        tx.execute(
+            "INSERT INTO action_executions (
+               id, action_id, attempt, executed_at_ms, result_status, result_json, latency_ms, retry_at_ms
+             ) VALUES (?1, ?2, 1, ?3, 'success', ?4, NULL, NULL)
+             ON CONFLICT(action_id, attempt) DO NOTHING",
+            params![
+                make_id("action_exec"),
+                action_id,
+                now,
+                "{\"source\":\"provider_generation\"}"
+            ],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        tx.execute(
+            "INSERT INTO outcomes (
+              id, run_id, step_id, kind, status, content, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, 'completed_outcome', 'executed', ?4, ?5, ?5)
+            ON CONFLICT(run_id, step_id, kind)
+            DO UPDATE SET content = excluded.content, status = excluded.status, updated_at = excluded.updated_at",
+            params![make_id("outcome"), run.id, step.id, payload_json, now],
+        )
+        .map_err(|e| RunnerError::Db(e.to_string()))?;
+
+        tx.commit().map_err(|e| RunnerError::Db(e.to_string()))
     }
 
     fn persist_web_read_artifact(
@@ -2933,6 +3024,24 @@ impl RunnerEngine {
             .map_err(|e| RunnerError::Db(e.to_string()))
     }
 
+    fn action_is_safe_internal(
+        connection: &Connection,
+        action_id: &str,
+    ) -> Result<bool, RunnerError> {
+        let action_type: Option<String> = connection
+            .query_row(
+                "SELECT action_type FROM actions WHERE id = ?1",
+                params![action_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(matches!(
+            action_type.as_deref(),
+            Some("create_outcome") | Some("deliver_notification")
+        ))
+    }
+
     fn create_action_for_step_in_tx(
         tx: &rusqlite::Transaction<'_>,
         run_id: &str,
@@ -3281,14 +3390,32 @@ impl RunnerEngine {
                 .cloned()
                 .unwrap_or_else(|| "(recipient to be confirmed)".to_string());
             let payload = serde_json::json!({
-                "type": "email_draft",
+                "type": "create_message_action",
+                "operation": "generate_message_payload",
                 "recipient_hint": recipient,
                 "step_label": step.label,
+                "approval_effect": "authorizes generation of a message payload (sending still requires a separate approval)",
             })
             .to_string();
             return Ok((
                 format!("Approve step: {}", step.label),
-                "email_draft".to_string(),
+                "create_message_action".to_string(),
+                payload,
+                ActionType::CreateOutcomeAction,
+            ));
+        }
+
+        if step.primitive == PrimitiveId::WriteOutcomeDraft {
+            let payload = serde_json::json!({
+                "type": "create_outcome_action",
+                "operation": "generate_completed_outcome_payload",
+                "step_label": step.label,
+                "approval_effect": "authorizes generation of a completed outcome payload for this run",
+            })
+            .to_string();
+            return Ok((
+                format!("Approve step: {}", step.label),
+                "create_outcome_action".to_string(),
                 payload,
                 ActionType::CreateOutcomeAction,
             ));
@@ -3298,6 +3425,7 @@ impl RunnerEngine {
             let context = Self::get_ingest_context_for_run(connection, &run.id)?;
             let payload = serde_json::json!({
                 "type": "email_triage",
+                "operation": "archive_message",
                 "action": "archive",
                 "provider": context.as_ref().map(|c| c.provider.as_str()).unwrap_or("unknown"),
                 "provider_message_id": context.as_ref().map(|c| c.provider_message_id.as_str()).unwrap_or(""),
@@ -5094,6 +5222,78 @@ mod tests {
             )
             .expect("count rejected decision events");
         assert_eq!(rejected_count, 1);
+    }
+
+    #[test]
+    fn double_approve_does_not_duplicate_safe_internal_action_execution() {
+        let mut conn = setup_conn();
+        let mut plan = plan_with_single_write_step("double approve action execution");
+        plan.steps[0].requires_approval = true;
+        let run = RunnerEngine::start_run(
+            &mut conn,
+            "auto_double_approve",
+            plan,
+            "idem_double_approve",
+            2,
+        )
+        .expect("start");
+
+        let needs = RunnerEngine::run_tick(&mut conn, &run.id).expect("needs approval");
+        assert_eq!(needs.state, RunState::NeedsApproval);
+        let approvals = RunnerEngine::list_pending_approvals(&conn).expect("approvals");
+        let approval = approvals
+            .into_iter()
+            .find(|a| a.run_id == run.id)
+            .expect("approval");
+        let done = RunnerEngine::approve(&mut conn, &approval.id).expect("first approve");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let _ = RunnerEngine::approve(&mut conn, &approval.id).expect("second approve idempotent");
+
+        let exec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM action_executions ae
+                 JOIN actions a ON ae.action_id = a.id
+                 WHERE a.run_id = ?1 AND a.step_id = 'step_1' AND a.action_type = 'create_outcome'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("execution count");
+        assert_eq!(exec_count, 1);
+    }
+
+    #[test]
+    fn primary_outcomes_query_hides_internal_draft_artifacts() {
+        let mut conn = setup_conn();
+        let run = RunnerEngine::start_run(
+            &mut conn,
+            "auto_primary_outcomes",
+            plan_with_single_write_step("primary outcomes"),
+            "idem_primary_outcomes",
+            2,
+        )
+        .expect("start");
+        let done = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(done.state, RunState::Succeeded);
+
+        let draft_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind IN ('outcome_draft','action_payload_outcome')",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("draft rows");
+        assert!(draft_rows >= 1);
+
+        let primary = crate::db::list_primary_outcomes(&conn, 20).expect("primary outcomes");
+        let row = primary
+            .iter()
+            .find(|item| item.run_id == run.id)
+            .expect("primary outcome row");
+        assert_eq!(row.status, "executed");
+
+        let home_count = crate::db::count_primary_outcomes(&conn).expect("primary count");
+        assert!(home_count >= 1);
     }
 
     #[test]

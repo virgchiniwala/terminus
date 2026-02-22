@@ -27,6 +27,17 @@ pub struct HomeSnapshot {
     pub runner: RunnerStatus,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimaryOutcomeRecord {
+    pub run_id: String,
+    pub autopilot_id: String,
+    pub status: String, // executed | pending_approval | blocked_clarification | blocked
+    pub summary: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerControlRecord {
@@ -973,6 +984,8 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
         base_line.to_string()
     };
 
+    let primary_outcome_count = count_primary_outcomes(&connection)?;
+
     Ok(HomeSnapshot {
         surfaces: vec![
             HomeSurface {
@@ -984,7 +997,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             HomeSurface {
                 title: "Outcomes".into(),
                 subtitle: "Results from completed runs".into(),
-                count: count("outcomes")?,
+                count: primary_outcome_count,
                 cta: "View Outcomes".into(),
             },
             HomeSurface {
@@ -1013,6 +1026,122 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             missed_runs_count: runner_control.missed_runs_count,
         },
     })
+}
+
+pub fn count_primary_outcomes(connection: &Connection) -> Result<i64, String> {
+    connection
+        .query_row(
+            "
+            SELECT COUNT(*)
+            FROM runs r
+            WHERE r.state IN ('succeeded', 'failed', 'canceled')
+               OR r.state = 'needs_approval'
+               OR (
+                    r.state = 'blocked'
+                    AND EXISTS (
+                      SELECT 1 FROM clarifications c
+                      WHERE c.run_id = r.id AND c.status = 'pending'
+                    )
+                  )
+            ",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count primary outcomes: {e}"))
+}
+
+pub fn list_primary_outcomes(
+    connection: &Connection,
+    limit: usize,
+) -> Result<Vec<PrimaryOutcomeRecord>, String> {
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT
+              r.id,
+              r.autopilot_id,
+              r.state,
+              r.failure_reason,
+              r.created_at,
+              r.updated_at,
+              (
+                SELECT a.preview FROM approvals a
+                WHERE a.run_id = r.id AND a.status = 'pending'
+                ORDER BY a.created_at ASC LIMIT 1
+              ) AS pending_approval_preview,
+              (
+                SELECT c.question FROM clarifications c
+                WHERE c.run_id = r.id AND c.status = 'pending'
+                ORDER BY c.created_at_ms ASC LIMIT 1
+              ) AS pending_clarification_question,
+              (
+                SELECT o.content FROM outcomes o
+                WHERE o.run_id = r.id AND o.kind = 'receipt'
+                ORDER BY o.updated_at DESC LIMIT 1
+              ) AS receipt_content
+            FROM runs r
+            WHERE r.state IN ('succeeded', 'failed', 'canceled', 'needs_approval', 'blocked')
+            ORDER BY r.updated_at DESC
+            LIMIT ?1
+            ",
+        )
+        .map_err(|e| format!("Failed to prepare primary outcomes query: {e}"))?;
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            let state: String = row.get(2)?;
+            let failure_reason: Option<String> = row.get(3)?;
+            let pending_preview: Option<String> = row.get(6)?;
+            let clarification_q: Option<String> = row.get(7)?;
+            let receipt_content: Option<String> = row.get(8)?;
+            let (status, summary) = match state.as_str() {
+                "needs_approval" => (
+                    "pending_approval".to_string(),
+                    pending_preview.unwrap_or_else(|| "Action waiting for approval.".to_string()),
+                ),
+                "blocked" if clarification_q.is_some() => (
+                    "blocked_clarification".to_string(),
+                    clarification_q
+                        .unwrap_or_else(|| "One thing is needed to proceed.".to_string()),
+                ),
+                "blocked" => (
+                    "blocked".to_string(),
+                    failure_reason
+                        .clone()
+                        .unwrap_or_else(|| "Run was blocked.".to_string()),
+                ),
+                "succeeded" | "failed" | "canceled" => {
+                    let summary = receipt_content
+                        .as_deref()
+                        .and_then(|payload| {
+                            serde_json::from_str::<serde_json::Value>(payload)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("summary")
+                                        .and_then(|s| s.as_str())
+                                        .map(ToString::to_string)
+                                })
+                        })
+                        .or(failure_reason.clone())
+                        .unwrap_or_else(|| "Run completed.".to_string());
+                    ("executed".to_string(), summary)
+                }
+                _ => ("executed".to_string(), "Run completed.".to_string()),
+            };
+            Ok(PrimaryOutcomeRecord {
+                run_id: row.get(0)?,
+                autopilot_id: row.get(1)?,
+                status,
+                summary,
+                created_at_ms: row.get(4)?,
+                updated_at_ms: row.get(5)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query primary outcomes: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("Failed to parse primary outcomes row: {e}"))?);
+    }
+    Ok(out)
 }
 
 pub fn get_runner_control(connection: &Connection) -> Result<RunnerControlRecord, String> {
