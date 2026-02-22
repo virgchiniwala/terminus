@@ -17,6 +17,11 @@ export interface HomeSnapshot {
     watcherLastTickMs?: number | null;
     missedRunsCount?: number;
     suppressedAutopilotsCount?: number;
+    suppressedAutopilots?: Array<{
+      autopilotId: string;
+      name: string;
+      suppressUntilMs: number;
+    }>;
   };
 }
 

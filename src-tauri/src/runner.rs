@@ -43,6 +43,7 @@ pub enum RunState {
     Ready,
     Running,
     NeedsApproval,
+    NeedsClarification,
     Retrying,
     Succeeded,
     Failed,
@@ -57,6 +58,7 @@ impl RunState {
             Self::Ready => "ready",
             Self::Running => "running",
             Self::NeedsApproval => "needs_approval",
+            Self::NeedsClarification => "needs_clarification",
             Self::Retrying => "retrying",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -82,6 +84,7 @@ impl FromStr for RunState {
             "ready" => Ok(Self::Ready),
             "running" => Ok(Self::Running),
             "needs_approval" => Ok(Self::NeedsApproval),
+            "needs_clarification" => Ok(Self::NeedsClarification),
             "retrying" => Ok(Self::Retrying),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
@@ -471,8 +474,9 @@ impl RunnerEngine {
     ///
     /// # State Transitions
     /// - `Ready` → executes next step → `Running` or `NeedsApproval`
-    /// - `Running` → step completes → `Ready`, `Succeeded`, `Retrying`, `Failed`, or `Blocked`
+    /// - `Running` → step completes → `Ready`, `Succeeded`, `Retrying`, `Failed`, `Blocked`, or `NeedsClarification`
     /// - `NeedsApproval` → waits for approval (no-op tick)
+    /// - `NeedsClarification` → waits for one answer (no-op tick)
     /// - `Retrying` → waits for retry time (use `resume_due_runs`)
     /// - Terminal states (`Succeeded`, `Failed`, `Blocked`, `Canceled`) → no-op
     ///
@@ -909,7 +913,7 @@ impl RunnerEngine {
         }
         tx.execute(
             "INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
-             VALUES (?1, ?2, 'clarification_answered', 'blocked', 'ready', ?3, ?4)",
+             VALUES (?1, ?2, 'clarification_answered', 'needs_clarification', 'ready', ?3, ?4)",
             params![
                 make_id("activity"),
                 run_id,
@@ -1111,7 +1115,10 @@ impl RunnerEngine {
     ) -> Result<RunRecord, RunnerError> {
         let run = Self::get_run_with_learning(connection, run_id)?;
 
-        if run.state.is_terminal() || run.state == RunState::NeedsApproval {
+        if run.state.is_terminal()
+            || run.state == RunState::NeedsApproval
+            || run.state == RunState::NeedsClarification
+        {
             return Ok(run);
         }
 
@@ -3575,14 +3582,14 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
         tx.execute(
             "UPDATE runs
-             SET state = 'blocked', failure_reason = ?1, updated_at = ?2
+                 SET state = 'needs_clarification', failure_reason = ?1, updated_at = ?2
              WHERE id = ?3",
             params![question, now, run.id],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
         tx.execute(
             "INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
-             VALUES (?1, ?2, 'clarification_required', ?3, 'blocked', ?4, ?5)",
+             VALUES (?1, ?2, 'clarification_required', ?3, 'needs_clarification', ?4, ?5)",
             params![
                 make_id("activity"),
                 run.id,
@@ -4360,6 +4367,16 @@ mod tests {
         )
     }
 
+    fn website_plan_missing_url() -> AutopilotPlan {
+        let mut plan = AutopilotPlan::from_intent(
+            RecipeKind::WebsiteMonitor,
+            "Monitor this website for changes".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan.web_source_url = None;
+        plan
+    }
+
     fn spawn_http_server(
         bodies: Vec<String>,
         content_type: &str,
@@ -4761,6 +4778,30 @@ mod tests {
         assert_eq!(failed.state, RunState::Failed);
         let reason = failed.failure_reason.expect("reason");
         assert!(reason.contains("allowlist"));
+    }
+
+    #[test]
+    fn missing_web_source_pauses_in_needs_clarification_and_does_not_terminalize() {
+        let mut conn = setup_conn();
+        let plan = website_plan_missing_url();
+        let run = RunnerEngine::start_run(&mut conn, "auto_clarify_web", plan, "idem_clarify", 2)
+            .expect("start");
+
+        let paused = RunnerEngine::run_tick(&mut conn, &run.id).expect("tick");
+        assert_eq!(paused.state, RunState::NeedsClarification);
+        assert!(!paused.state.is_terminal());
+
+        let receipt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outcomes WHERE run_id = ?1 AND kind = 'receipt'",
+                params![run.id],
+                |row| row.get(0),
+            )
+            .expect("receipt count");
+        assert_eq!(receipt_count, 0);
+
+        let second = RunnerEngine::run_tick(&mut conn, &run.id).expect("no-op tick while waiting");
+        assert_eq!(second.state, RunState::NeedsClarification);
     }
 
     #[test]
