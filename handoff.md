@@ -86,6 +86,11 @@ Last updated: 2026-02-22
   - production CSP tightened; dev-only CSP moved to `src-tauri/tauri.dev.conf.json`
   - frontend fixes: polling stale closure, debounced runner/send policy writes, run-start double submit guard, clarification input label, modal Escape/click-outside/focus trap
   - redaction precision improved (avoid corrupting email addresses / `skipping`)
+- State correctness + suppression visibility follow-up:
+  - clarification pauses now persist as `runs.state = 'needs_clarification'` (non-terminal)
+  - ticks no-op while clarification is pending; legacy `blocked + pending clarification` remains readable
+  - primary outcomes/backlog queries treat `needs_clarification` as first-class and still support legacy blocked clarification rows
+  - Home snapshot now includes suppressed Autopilot details (`autopilot_id`, `name`, `suppress_until_ms`) and UI shows them in the runner banner
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -136,7 +141,7 @@ Last updated: 2026-02-22
 
 ## Known Deferred Audit Items (not in this PR)
 - Large refactors: split `App.tsx`, split `runner.rs`, move `main.rs` business logic into modules
-- Full state-model cleanup (`RunState::Blocked` overload / dedicated `NeedsClarification` variant)
+- Full state-model cleanup beyond clarification (legacy `blocked` migration/normalization and dead `RunState::Draft` removal)
 - Tauri capability-file scoping for IPC commands
 - Schema-wide FK cascade rebuild / migration framework cleanup
 - Gmail batch API optimization (N+1 list/detail calls)

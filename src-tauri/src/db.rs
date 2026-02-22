@@ -20,6 +20,14 @@ pub struct RunnerStatus {
     pub watcher_last_tick_ms: Option<i64>,
     pub missed_runs_count: i64,
     pub suppressed_autopilots_count: i64,
+    pub suppressed_autopilots: Vec<SuppressedAutopilotNotice>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SuppressedAutopilotNotice {
+    pub autopilot_id: String,
+    pub name: String,
+    pub suppress_until_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -992,7 +1000,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
     let now_ms = current_time_ms();
     let backlog_count: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM runs WHERE state IN ('ready', 'retrying', 'needs_approval')",
+            "SELECT COUNT(*) FROM runs WHERE state IN ('ready', 'retrying', 'needs_approval', 'needs_clarification')",
             [],
             |row| row.get(0),
         )
@@ -1026,6 +1034,33 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             |row| row.get(0),
         )
         .unwrap_or(0);
+    let mut suppressed_stmt = connection
+        .prepare(
+            "SELECT ap.autopilot_id,
+                    COALESCE(a.name, ap.autopilot_id) AS name,
+                    CAST(json_extract(ap.suppression_json, '$.suppress_until_ms') AS INTEGER) AS suppress_until_ms
+             FROM autopilot_profile ap
+             LEFT JOIN autopilots a ON a.id = ap.autopilot_id
+             WHERE ap.learning_enabled = 1
+               AND CAST(json_extract(ap.suppression_json, '$.suppress_until_ms') AS INTEGER) > ?1
+             ORDER BY suppress_until_ms ASC
+             LIMIT 5",
+        )
+        .map_err(|e| format!("Failed to prepare suppressed Autopilot query: {e}"))?;
+    let suppressed_rows = suppressed_stmt
+        .query_map(params![now_ms], |row| {
+            Ok(SuppressedAutopilotNotice {
+                autopilot_id: row.get(0)?,
+                name: row.get(1)?,
+                suppress_until_ms: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query suppressed Autopilots: {e}"))?;
+    let mut suppressed_autopilots = Vec::new();
+    for row in suppressed_rows {
+        suppressed_autopilots
+            .push(row.map_err(|e| format!("Failed to parse suppressed Autopilot row: {e}"))?);
+    }
     let status_line = if suppressed_autopilots_count > 0 {
         format!(
             "{} {} Autopilot{} currently suppressed by learning rules.",
@@ -1082,6 +1117,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             watcher_last_tick_ms: runner_control.watcher_last_tick_ms,
             missed_runs_count: runner_control.missed_runs_count,
             suppressed_autopilots_count,
+            suppressed_autopilots,
         },
     })
 }
@@ -1102,6 +1138,7 @@ pub fn count_primary_outcomes(connection: &Connection) -> Result<i64, String> {
             FROM runs r
             WHERE r.state IN ('succeeded', 'failed', 'canceled')
                OR r.state = 'needs_approval'
+               OR r.state = 'needs_clarification'
                OR (
                     r.state = 'blocked'
                     AND EXISTS (
@@ -1146,7 +1183,7 @@ pub fn list_primary_outcomes(
                 ORDER BY o.updated_at DESC LIMIT 1
               ) AS receipt_content
             FROM runs r
-            WHERE r.state IN ('succeeded', 'failed', 'canceled', 'needs_approval', 'blocked')
+            WHERE r.state IN ('succeeded', 'failed', 'canceled', 'needs_approval', 'needs_clarification', 'blocked')
             ORDER BY r.updated_at DESC
             LIMIT ?1
             ",
@@ -1163,6 +1200,11 @@ pub fn list_primary_outcomes(
                 "needs_approval" => (
                     "pending_approval".to_string(),
                     pending_preview.unwrap_or_else(|| "Action waiting for approval.".to_string()),
+                ),
+                "needs_clarification" => (
+                    "blocked_clarification".to_string(),
+                    clarification_q
+                        .unwrap_or_else(|| "One thing is needed to proceed.".to_string()),
                 ),
                 "blocked" if clarification_q.is_some() => (
                     "blocked_clarification".to_string(),

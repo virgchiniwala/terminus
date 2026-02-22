@@ -46,6 +46,20 @@ function normalizeSnapshot(raw: unknown): HomeSnapshot {
       missed_runs_count?: number;
       suppressedAutopilotsCount?: number;
       suppressed_autopilots_count?: number;
+      suppressedAutopilots?: Array<{
+        autopilotId?: string;
+        autopilot_id?: string;
+        name?: string;
+        suppressUntilMs?: number;
+        suppress_until_ms?: number;
+      }>;
+      suppressed_autopilots?: Array<{
+        autopilotId?: string;
+        autopilot_id?: string;
+        name?: string;
+        suppressUntilMs?: number;
+        suppress_until_ms?: number;
+      }>;
     };
   };
   return {
@@ -61,6 +75,13 @@ function normalizeSnapshot(raw: unknown): HomeSnapshot {
         value.runner?.missedRunsCount ?? value.runner?.missed_runs_count ?? 0,
       suppressedAutopilotsCount:
         value.runner?.suppressedAutopilotsCount ?? value.runner?.suppressed_autopilots_count ?? 0,
+      suppressedAutopilots: (value.runner?.suppressedAutopilots ??
+        value.runner?.suppressed_autopilots ??
+        [])?.map((item) => ({
+        autopilotId: item.autopilotId ?? item.autopilot_id ?? "",
+        name: item.name ?? item.autopilotId ?? item.autopilot_id ?? "Autopilot",
+        suppressUntilMs: item.suppressUntilMs ?? item.suppress_until_ms ?? Date.now(),
+      })),
     },
   };
 }
@@ -111,6 +132,19 @@ function recipeNeedsSources(recipe: RecipeKind): boolean {
 
 function recipeNeedsPastedText(recipe: RecipeKind): boolean {
   return recipe === "inbox_triage";
+}
+
+function formatShortLocalTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return "soon";
+  }
 }
 
 export function App() {
@@ -749,6 +783,18 @@ export function App() {
           <p>{snapshot.runner.statusLine}</p>
           <p>Pending runs: {snapshot.runner.backlogCount ?? 0}</p>
           <p>Missed while asleep/offline: {snapshot.runner.missedRunsCount ?? 0}</p>
+          {(snapshot.runner.suppressedAutopilots?.length ?? 0) > 0 && (
+            <div className="runner-suppressed-list">
+              <p><strong>Suppressed Autopilots</strong></p>
+              <ul>
+                {snapshot.runner.suppressedAutopilots?.map((item) => (
+                  <li key={`${item.autopilotId}_${item.suppressUntilMs}`}>
+                    {item.name} (<code>{item.autopilotId}</code>) until {formatShortLocalTime(item.suppressUntilMs)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
 
         <section className="clarifications-panel" aria-label="Clarifications">
