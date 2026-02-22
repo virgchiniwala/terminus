@@ -68,6 +68,11 @@ Last updated: 2026-02-22
   - `completed_outcome` rows are persisted for generated completion payloads
   - new primary outcomes query/count (`list_primary_outcomes`, run-based semantics) hides internal draft artifacts from Home outcomes count
   - duplicate approval on already-approved write step does not create duplicate `action_executions`
+- Clarification queue UI (single-slot):
+  - Home now renders a `Clarifications` object panel
+  - pending clarifications load via `list_pending_clarifications`
+  - one answer submits via `submit_clarification_answer` and immediately resumes the run
+  - quick-pick options are supported when `options_json` is present
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes

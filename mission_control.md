@@ -54,8 +54,8 @@ Verification:
 - `npm run build`
 
 ## Next
-1. Full approvals UI cards from typed action payloads (render exact execution intent)
-2. Clarification queue UI (single-slot card + answer/resume)
+1. PR20: Clarification queue UI (single-slot card + answer/resume)
+2. Full approvals UI cards from typed action payloads (render exact execution intent)
 3. Security hardening follow-up (CSP dev/prod split + redaction regression tests)
 
 ## Non-goals (MVP)
