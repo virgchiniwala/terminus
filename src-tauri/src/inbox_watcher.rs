@@ -60,8 +60,9 @@ pub fn run_watcher_tick(
         }
 
         let intent = format!("Triage inbox message: {}", message.subject);
-        let mut plan =
-            AutopilotPlan::from_intent(RecipeKind::InboxTriage, intent, ProviderId::OpenAi);
+        let provider_id = preferred_provider_for_autopilot(connection, autopilot_id)
+            .unwrap_or(ProviderId::OpenAi);
+        let mut plan = AutopilotPlan::from_intent(RecipeKind::InboxTriage, intent, provider_id);
         if let Some(sender) = message.sender_email.as_ref() {
             plan.recipient_hints = vec![sender.clone()];
         }
@@ -156,6 +157,15 @@ fn fetch_gmail_messages(
         .bearer_auth(access_token)
         .send()
         .map_err(|_| "Could not read Gmail inbox. Check connection and try again.".to_string())?
+        .error_for_status()
+        .map_err(|e| {
+            if e.status().map(|s| s.as_u16()) == Some(429) {
+                "Gmail inbox is rate-limited right now. Terminus will try again shortly."
+                    .to_string()
+            } else {
+                "Could not read Gmail inbox. Check connection and try again.".to_string()
+            }
+        })?
         .json::<Value>()
         .map_err(|_| "Could not parse Gmail inbox response.".to_string())?;
     let ids = list_json
@@ -179,6 +189,14 @@ fn fetch_gmail_messages(
             .bearer_auth(access_token)
             .send()
             .map_err(|_| "Could not read Gmail message details.".to_string())?
+            .error_for_status()
+            .map_err(|e| {
+                if e.status().map(|s| s.as_u16()) == Some(429) {
+                    "Gmail message details are rate-limited right now.".to_string()
+                } else {
+                    "Could not read Gmail message details.".to_string()
+                }
+            })?
             .json::<Value>()
             .map_err(|_| "Could not parse Gmail message details.".to_string())?;
         let headers = details
@@ -249,6 +267,15 @@ fn fetch_ms_messages(
         .bearer_auth(access_token)
         .send()
         .map_err(|_| "Could not read Microsoft inbox. Check connection and try again.".to_string())?
+        .error_for_status()
+        .map_err(|e| {
+            if e.status().map(|s| s.as_u16()) == Some(429) {
+                "Microsoft inbox is rate-limited right now. Terminus will try again shortly."
+                    .to_string()
+            } else {
+                "Could not read Microsoft inbox. Check connection and try again.".to_string()
+            }
+        })?
         .json::<Value>()
         .map_err(|_| "Could not parse Microsoft inbox response.".to_string())?;
     let items = json
@@ -282,7 +309,11 @@ fn fetch_ms_messages(
             .and_then(|v| v.get("address"))
             .and_then(|v| v.as_str())
             .map(|v| v.to_ascii_lowercase());
-        let received_at_ms = now_ms();
+        let received_at_ms = item
+            .get("receivedDateTime")
+            .and_then(|v| v.as_str())
+            .and_then(parse_rfc3339_ms)
+            .unwrap_or_else(now_ms);
         out.push(InboundMessage {
             provider_message_id: id,
             provider_thread_id: item
@@ -299,7 +330,9 @@ fn fetch_ms_messages(
 }
 
 fn make_id(prefix: &str) -> String {
-    format!("{}_{}", prefix, now_ms())
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}_{}_{}", prefix, now_ms(), seq)
 }
 
 fn extract_email_address(raw: &str) -> String {
@@ -320,4 +353,29 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn parse_rfc3339_ms(raw: &str) -> Option<i64> {
+    let dt = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(dt.timestamp_millis())
+}
+
+fn preferred_provider_for_autopilot(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Option<ProviderId> {
+    let provider_kind: Option<String> = connection
+        .query_row(
+            "SELECT provider_kind FROM runs WHERE autopilot_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![autopilot_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()?;
+    match provider_kind.as_deref() {
+        Some("anthropic") => Some(ProviderId::Anthropic),
+        Some("gemini") => Some(ProviderId::Gemini),
+        Some("openai") => Some(ProviderId::OpenAi),
+        _ => None,
+    }
 }

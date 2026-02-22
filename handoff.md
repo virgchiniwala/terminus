@@ -73,6 +73,19 @@ Last updated: 2026-02-22
   - pending clarifications load via `list_pending_clarifications`
   - one answer submits via `submit_clarification_answer` and immediately resumes the run
   - quick-pick options are supported when `options_json` is present
+- Security + correctness hardening (audit-driven bundle):
+  - `read.sources` now uses plan/domain allowlists (no self-authorized source fetch)
+  - web fetches reject private/local/loopback targets in production paths (initial + redirects)
+  - Daily Brief allowlist hosts are seeded from explicit sources at plan/run creation (compatibility-safe)
+  - keychain writes no longer pass secrets via process argv (`security ... -w -` with stdin)
+  - clarification `recipient` answers are written back into `runs.plan_json` before resume
+  - learning pipeline runs only when `learning_enabled` and skips clarification-paused terminalization
+  - runner status surfaces suppressed-autopilot count for visible suppression truth
+  - SQLite connections configured with WAL + `busy_timeout`; background/tray tick errors are surfaced (sanitized)
+  - inbox watcher uses autopilot preferred provider, parses Microsoft `receivedDateTime`, and returns clearer 429 failures
+  - production CSP tightened; dev-only CSP moved to `src-tauri/tauri.dev.conf.json`
+  - frontend fixes: polling stale closure, debounced runner/send policy writes, run-start double submit guard, clarification input label, modal Escape/click-outside/focus trap
+  - redaction precision improved (avoid corrupting email addresses / `skipping`)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -84,7 +97,7 @@ Last updated: 2026-02-22
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
   1. P0.11/P0.12 Voice object + rule extraction approval flow
-  2. P1 provider routing/caching and security hardening
+  2. P1 provider routing/caching and structural hardening cleanup
   3. UX and copy cleanup for calm language and trust clarity
 
 ## Learning Storage and Privacy Guardrails
@@ -119,6 +132,14 @@ Last updated: 2026-02-22
 - Scope drift into marketplace/tool-authoring behavior
 - Silent capability expansion from adaptation logic
 - Contradictory currency policy across docs/UI/runtime naming
+- Residual structural debt from large files (`runner.rs`, `App.tsx`) despite functional hardening
+
+## Known Deferred Audit Items (not in this PR)
+- Large refactors: split `App.tsx`, split `runner.rs`, move `main.rs` business logic into modules
+- Full state-model cleanup (`RunState::Blocked` overload / dedicated `NeedsClarification` variant)
+- Tauri capability-file scoping for IPC commands
+- Schema-wide FK cascade rebuild / migration framework cleanup
+- Gmail batch API optimization (N+1 list/detail calls)
 
 ## Next Suggested Work
 1. Wire learning outcomes into object surfaces with calm, non-technical language.

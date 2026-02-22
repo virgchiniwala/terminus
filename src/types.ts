@@ -16,6 +16,7 @@ export interface HomeSnapshot {
     watcherEnabled?: boolean;
     watcherLastTickMs?: number | null;
     missedRunsCount?: number;
+    suppressedAutopilotsCount?: number;
   };
 }
 
@@ -91,15 +92,17 @@ export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 export type RiskTier = "low" | "medium" | "high";
 
 export type PrimitiveId =
-  | "read.web"
-  | "read.forwarded_email"
-  | "triage.email"
-  | "read.vault_file"
-  | "write.outcome_draft"
-  | "write.email_draft"
-  | "send.email"
-  | "schedule.run"
-  | "notify.user";
+  | "read_web"
+  | "read_forwarded_email"
+  | "read_sources"
+  | "aggregate_daily_summary"
+  | "triage_email"
+  | "read_vault_file"
+  | "write_outcome_draft"
+  | "write_email_draft"
+  | "send_email"
+  | "schedule_run"
+  | "notify_user";
 
 export type ProviderTier = "supported" | "experimental";
 

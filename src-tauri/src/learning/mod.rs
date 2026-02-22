@@ -1095,6 +1095,24 @@ fn write_compaction_activity(
         "learning_compaction: decision_events_deleted={}, adaptation_log_deleted={}, run_evaluations_deleted={}",
         summary.decision_events_deleted, summary.adaptation_log_deleted, summary.run_evaluations_deleted
     );
+    let created_at = now_ms();
+    if let Some(ap_id) = autopilot_id {
+        let latest_run_id: Option<String> = connection
+            .query_row(
+                "SELECT id FROM runs WHERE autopilot_id = ?1 ORDER BY updated_at DESC LIMIT 1",
+                params![ap_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| LearningError::Db(e.to_string()))?;
+        if let Some(run_id) = latest_run_id {
+            let _ = connection.execute(
+                "INSERT INTO activities (id, run_id, activity_type, user_message, created_at)
+                 VALUES (?1, ?2, 'learning_compaction', ?3, ?4)",
+                params![make_learning_id("activity"), run_id, event, created_at],
+            );
+        }
+    }
     connection
         .execute(
             "INSERT INTO activity (id, autopilot_id, event, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -1102,7 +1120,7 @@ fn write_compaction_activity(
                 make_learning_id("learning_compact"),
                 autopilot_id,
                 event,
-                now_ms()
+                created_at
             ],
         )
         .map_err(|e| LearningError::Db(e.to_string()))?;

@@ -12,7 +12,7 @@ use crate::schema::{
     AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
     ProviderTier as SchemaProviderTier, RecipeKind,
 };
-use crate::web::{fetch_allowlisted_text, parse_scheme_host, WebFetchError, WebFetchResult};
+use crate::web::{fetch_allowlisted_text, WebFetchError, WebFetchResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -371,7 +371,7 @@ impl RunnerEngine {
     pub fn start_run(
         connection: &mut Connection,
         autopilot_id: &str,
-        plan: AutopilotPlan,
+        mut plan: AutopilotPlan,
         idempotency_key: &str,
         max_retries: i64,
     ) -> Result<RunRecord, RunnerError> {
@@ -381,6 +381,7 @@ impl RunnerEngine {
 
         let run_id = make_id("run");
         let now = now_ms();
+        Self::ensure_daily_source_allowlist_defaults(&mut plan);
         let plan_json =
             serde_json::to_string(&plan).map_err(|e| RunnerError::Serde(e.to_string()))?;
         let provider_kind = provider_kind_from_plan(&plan);
@@ -568,9 +569,6 @@ impl RunnerEngine {
             .transaction()
             .map_err(|e| RunnerError::Db(e.to_string()))?;
         let now = decision_now;
-        let has_action = approval.action_id.is_some();
-        let skip_step_after_approval = false;
-
         tx.execute(
             "
             UPDATE approvals
@@ -588,19 +586,14 @@ impl RunnerEngine {
             UPDATE runs
             SET state = 'ready',
                 soft_cap_approved = CASE WHEN ?1 THEN 1 ELSE soft_cap_approved END,
-                current_step_index = CASE WHEN ?2 THEN current_step_index + 1 ELSE current_step_index END,
+                current_step_index = current_step_index,
                 failure_reason = NULL,
                 next_retry_backoff_ms = NULL,
                 next_retry_at_ms = NULL,
-                updated_at = ?3
-            WHERE id = ?4
+                updated_at = ?2
+            WHERE id = ?3
             ",
-            params![
-                is_soft_cap_approval,
-                has_action && skip_step_after_approval,
-                now,
-                approval.run_id
-            ],
+            params![is_soft_cap_approval, now, approval.run_id],
         )
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
@@ -623,11 +616,6 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         tx.commit().map_err(|e| RunnerError::Db(e.to_string()))?;
-        if skip_step_after_approval {
-            if let Some(action_id) = approval.action_id.as_deref() {
-                Self::execute_action(connection, action_id)?;
-            }
-        }
         let run_after_approval = Self::get_run(connection, &approval.run_id)?;
         learning::record_decision_event(
             connection,
@@ -651,8 +639,6 @@ impl RunnerEngine {
         .map_err(|e| RunnerError::Db(e.to_string()))?;
 
         if is_soft_cap_approval {
-            Self::run_tick_internal(connection, &approval.run_id, None)
-        } else if has_action && skip_step_after_approval {
             Self::run_tick_internal(connection, &approval.run_id, None)
         } else {
             Self::run_tick_internal(connection, &approval.run_id, Some(&approval.step_id))
@@ -848,6 +834,8 @@ impl RunnerEngine {
         clarification_id: &str,
         answer_json: &str,
     ) -> Result<RunRecord, RunnerError> {
+        let answer_value = extract_clarification_value(answer_json)
+            .unwrap_or_else(|| answer_json.trim().trim_matches('"').to_string());
         let row: (String, String, String) = connection
             .query_row(
                 "SELECT run_id, status, field_key FROM clarifications WHERE id = ?1",
@@ -880,7 +868,7 @@ impl RunnerEngine {
                      failure_reason = NULL,
                      updated_at = ?2
                  WHERE id = ?3",
-                params![answer_json, now, run_id],
+                params![answer_value, now, run_id],
             )
             .map_err(|e| RunnerError::Db(e.to_string()))?;
         } else if field_key == "web_source_url" {
@@ -891,7 +879,21 @@ impl RunnerEngine {
                      failure_reason = NULL,
                      updated_at = ?2
                  WHERE id = ?3",
-                params![answer_json, now, run_id],
+                params![answer_value, now, run_id],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        } else if field_key == "recipient" {
+            tx.execute(
+                "UPDATE runs
+                 SET plan_json = json_insert(
+                       json_set(plan_json, '$.recipientHints', COALESCE(json_extract(plan_json, '$.recipientHints'), json('[]'))),
+                       '$.recipientHints[#]', ?1
+                     ),
+                     state = 'ready',
+                     failure_reason = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3",
+                params![answer_value, now, run_id],
             )
             .map_err(|e| RunnerError::Db(e.to_string()))?;
         } else {
@@ -979,10 +981,49 @@ impl RunnerEngine {
     ) -> Result<RunRecord, RunnerError> {
         let run = Self::get_run(connection, run_id)?;
         if run.state.is_terminal() {
-            Self::run_learning_pipeline(connection, &run)?;
+            if Self::has_pending_clarification(connection, &run.id)? {
+                return Ok(run);
+            }
+            let runtime_profile = learning::get_runtime_profile(connection, &run.autopilot_id)
+                .map_err(|e| RunnerError::Db(e.to_string()))?;
+            if runtime_profile.learning_enabled {
+                Self::run_learning_pipeline(connection, &run)?;
+            }
             return Self::get_run(connection, run_id);
         }
         Ok(run)
+    }
+
+    fn has_pending_clarification(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<bool, RunnerError> {
+        let found: Option<String> = connection
+            .query_row(
+                "SELECT id FROM clarifications WHERE run_id = ?1 AND status = 'pending' LIMIT 1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(found.is_some())
+    }
+
+    fn ensure_daily_source_allowlist_defaults(plan: &mut AutopilotPlan) {
+        if !matches!(plan.recipe, RecipeKind::DailyBrief) || !plan.web_allowed_domains.is_empty() {
+            return;
+        }
+        for source in &plan.daily_sources {
+            if let Some((_, host)) = crate::web::parse_scheme_host(source) {
+                if !plan
+                    .web_allowed_domains
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(&host))
+                {
+                    plan.web_allowed_domains.push(host);
+                }
+            }
+        }
     }
 
     pub fn get_terminal_receipt(
@@ -1379,7 +1420,8 @@ impl RunnerEngine {
                         user_reason: e.to_string(),
                     },
                 )?;
-                let source_results = Self::read_daily_sources(&sources);
+                let source_results =
+                    Self::read_daily_sources(&sources, &run.plan.web_allowed_domains);
                 let sources_hash = compute_daily_sources_hash(&source_results);
                 let artifact = DailySourcesArtifact {
                     sources_hash,
@@ -2591,7 +2633,10 @@ impl RunnerEngine {
         Ok(())
     }
 
-    fn read_daily_sources(inputs: &[String]) -> Vec<DailySourceResult> {
+    fn read_daily_sources(
+        inputs: &[String],
+        allowlisted_hosts: &[String],
+    ) -> Vec<DailySourceResult> {
         inputs
             .iter()
             .enumerate()
@@ -2599,10 +2644,7 @@ impl RunnerEngine {
                 let source_id = format!("source_{}", idx + 1);
                 let trimmed = raw.trim().to_string();
                 if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-                    let host_allowlist = parse_scheme_host(&trimmed)
-                        .map(|(_, host)| vec![host])
-                        .unwrap_or_default();
-                    match fetch_allowlisted_text(&trimmed, &host_allowlist) {
+                    match fetch_allowlisted_text(&trimmed, allowlisted_hosts) {
                         Ok(fetched) => DailySourceResult {
                             source_id,
                             url: fetched.url,
@@ -3886,6 +3928,17 @@ impl RunnerEngine {
     }
 }
 
+fn extract_clarification_value(answer_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(answer_json)
+        .ok()
+        .and_then(|v| {
+            v.get("value")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+}
+
 fn map_provider_error(error: ProviderError) -> StepExecutionError {
     StepExecutionError {
         retryable: error.is_retryable(),
@@ -3930,7 +3983,9 @@ fn parse_action_type(value: &str) -> Result<ActionType, RunnerError> {
         "create_outcome" => Ok(ActionType::CreateOutcomeAction),
         "email_triage" => Ok(ActionType::EmailTriageAction),
         "email_send" => Ok(ActionType::EmailSendAction),
-        _ => Err(RunnerError::Human(format!("Unknown action type: {value}"))),
+        _ => Err(RunnerError::Db(format!(
+            "Unknown action type in database: {value}"
+        ))),
     }
 }
 
@@ -3988,10 +4043,40 @@ fn build_receipt(
 }
 
 fn redact_text(input: &str) -> String {
-    input
-        .replace("sk-", "[REDACTED_KEY]-")
-        .replace("api_key", "[REDACTED_FIELD]")
-        .replace('@', "[at]")
+    let mut out = input.to_string();
+    out = out.replace("Authorization:", "[REDACTED_HEADER]:");
+    out = out.replace("Bearer ", "[REDACTED_BEARER] ");
+    out = out.replace("api_key", "[REDACTED_FIELD]");
+    redact_prefixed_secret_like(&out)
+}
+
+fn redact_prefixed_secret_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if i + 3 <= chars.len()
+            && chars[i] == 's'
+            && chars[i + 1] == 'k'
+            && chars[i + 2] == '-'
+            && (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+        {
+            let mut j = i + 3;
+            let mut token_len = 0usize;
+            while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                token_len += 1;
+                j += 1;
+            }
+            if token_len >= 12 {
+                out.push_str("[REDACTED_KEY]");
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 fn format_usd_cents(cents: i64) -> String {
@@ -4143,8 +4228,23 @@ fn compute_diff_score(previous: &str, current: &str) -> f64 {
         .iter()
         .zip(curr_chars.iter())
         .take_while(|(a, b)| a == b)
-        .count() as f64;
-    (1.0 - (shared_prefix / max_len)).clamp(0.0, 1.0)
+        .count();
+
+    let mut shared_suffix = 0usize;
+    let mut prev_i = prev_chars.len();
+    let mut curr_i = curr_chars.len();
+    while prev_i > shared_prefix
+        && curr_i > shared_prefix
+        && prev_chars[prev_i - 1] == curr_chars[curr_i - 1]
+    {
+        shared_suffix += 1;
+        prev_i -= 1;
+        curr_i -= 1;
+    }
+
+    let changed = (max_len as usize).saturating_sub(shared_prefix + shared_suffix) as f64;
+    let length_delta = (prev_chars.len() as i64 - curr_chars.len() as i64).unsigned_abs() as f64;
+    ((changed + length_delta.min(max_len * 0.25)) / max_len).clamp(0.0, 1.0)
 }
 
 fn compute_daily_sources_hash(results: &[DailySourceResult]) -> String {
