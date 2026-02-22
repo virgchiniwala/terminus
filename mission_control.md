@@ -3,7 +3,7 @@ Last updated: 2026-02-22
 
 ## Current State
 - Mode: Day
-- Branch: `codex/pr22-state-clarification-visibility`
+- Branch: `codex/pr23-security-infra-hardening`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -37,26 +37,24 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR22 — State correctness + suppression visibility (audit follow-up)
+### PR23 — Security/infra follow-up (capabilities + rebinding hardening)
 Owner: Friday + Fury + Loki
 Status: In progress
 Scope:
-- add dedicated `needs_clarification` run state (non-terminal) for one-slot clarification pauses
-- keep backward compatibility for legacy `blocked + pending clarification` rows in primary outcomes queries
-- include `needs_clarification` in backlog and primary outcome surfaces
-- expose suppressed Autopilot details (id + name + until time) in Home snapshot and runner banner
+- add Tauri capability scaffolding for the main window (window-scoped IPC boundary)
+- strengthen web fetch against DNS rebinding by pinning resolved IPs into curl (`--resolve`)
+- clear expired OAuth session state when refresh token is missing during token access
 Acceptance:
-- clarification-paused runs are non-terminal (`needs_clarification`) and no-op until answered
-- Home runner banner shows suppressed Autopilot details (not just a count)
-- `cargo test` and `npm run build` pass
+- `cargo test` and `npm run build` pass with capability files present
+- website and daily brief web-fetch tests still pass after DNS pinning
 Verification:
 - `cd src-tauri && cargo test`
 - `npm run build`
 
 ## Next
-1. Security/infra hardening follow-up: Tauri capabilities + deeper web fetch anti-rebinding constraints
-2. Inbox watcher efficiency/reliability pass: Gmail batching + explicit backoff policy
-3. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
+1. Reliability/cleanup bundle: Gmail batching + watcher rate/backoff policy + DB/query hygiene
+2. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
+3. Docs/architecture refresh to match shipped learning layer + watcher + background runtime
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution

@@ -533,6 +533,7 @@ pub fn get_access_token(
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
+            let _ = disconnect(connection, provider.as_str());
             "Session expired and refresh token is missing. Reconnect provider.".to_string()
         })?;
     let (client_id, _redirect_uri) = load_oauth_config(connection, provider)?;
