@@ -14,6 +14,7 @@ use rusqlite::OptionalExtension;
 use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +26,8 @@ use tauri::Manager;
 struct AppState {
     db_path: std::sync::Mutex<Option<PathBuf>>,
 }
+
+static MAIN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +126,7 @@ fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connectio
 
     let mut connection = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    db::configure_connection(&connection)?;
     db::bootstrap_schema(&mut connection)?;
     Ok(connection)
 }
@@ -130,6 +134,7 @@ fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connectio
 fn open_connection_from_path(db_path: &PathBuf) -> Result<rusqlite::Connection, String> {
     let mut connection = rusqlite::Connection::open(db_path)
         .map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    db::configure_connection(&connection)?;
     db::bootstrap_schema(&mut connection)?;
     Ok(connection)
 }
@@ -183,6 +188,17 @@ fn start_recipe_run(
             .filter(|s| !s.is_empty())
             .collect::<Vec<String>>();
         if !cleaned.is_empty() {
+            for source in &cleaned {
+                if let Some((_, host)) = crate::web::parse_scheme_host(source) {
+                    if !plan
+                        .web_allowed_domains
+                        .iter()
+                        .any(|h| h.eq_ignore_ascii_case(&host))
+                    {
+                        plan.web_allowed_domains.push(host);
+                    }
+                }
+            }
             plan.daily_sources = cleaned;
         }
     }
@@ -461,7 +477,12 @@ fn spawn_background_cycle_thread(app: &tauri::AppHandle, db_path: PathBuf) {
             Ok(conn) => conn,
             Err(_) => continue,
         };
-        let _ = tick_runner_cycle_internal(&mut connection, true);
+        if let Err(err) = tick_runner_cycle_internal(&mut connection, true) {
+            eprintln!(
+                "background runner cycle failed: {}",
+                sanitize_log_message(&err)
+            );
+        }
     });
 }
 
@@ -495,7 +516,9 @@ fn install_tray(app: &tauri::AppHandle) -> Result<(), String> {
                 let db_path = app_state.db_path.lock().ok().and_then(|g| g.clone());
                 if let Some(path) = db_path {
                     if let Ok(mut connection) = open_connection_from_path(&path) {
-                        let _ = tick_runner_cycle_internal(&mut connection, false);
+                        if let Err(err) = tick_runner_cycle_internal(&mut connection, false) {
+                            eprintln!("tray run cycle failed: {}", sanitize_log_message(&err));
+                        }
                     }
                 }
             }
@@ -639,7 +662,7 @@ fn submit_guidance(
     db::insert_guidance_event(
         &connection,
         &db::GuidanceEventInsert {
-            id: format!("guide_{}", now_ms()),
+            id: make_main_id("guide"),
             scope_type: scope_type.clone(),
             scope_id: scope_id.to_string(),
             autopilot_id,
@@ -664,7 +687,7 @@ fn submit_guidance(
             VALUES (?1, ?2, 'guidance_received', NULL, NULL, ?3, ?4)
             ",
             rusqlite::params![
-                format!("activity_{}", now_ms()),
+                make_main_id("activity"),
                 run_id,
                 truncate_for_activity(&cleaned_instruction),
                 now_ms()
@@ -759,11 +782,53 @@ fn truncate_for_activity(input: &str) -> String {
     input.chars().take(max).collect::<String>()
 }
 
+fn sanitize_log_message(input: &str) -> String {
+    let out = input
+        .replace("Authorization", "[REDACTED_HEADER]")
+        .replace("Bearer ", "[REDACTED_BEARER] ")
+        .replace("api_key", "[REDACTED_FIELD]");
+    redact_prefixed_secret_like(&out)
+}
+
+fn redact_prefixed_secret_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if i + 3 <= chars.len()
+            && chars[i] == 's'
+            && chars[i + 1] == 'k'
+            && chars[i + 2] == '-'
+            && (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+        {
+            let mut j = i + 3;
+            let mut token_len = 0usize;
+            while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                token_len += 1;
+                j += 1;
+            }
+            if token_len >= 12 {
+                out.push_str("[REDACTED_KEY]");
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn make_main_id(prefix: &str) -> String {
+    let seq = MAIN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}_{}_{}", prefix, now_ms(), seq)
 }
 
 fn compute_missed_cycles(last_tick_ms: Option<i64>, now_ms_value: i64, poll_ms: i64) -> i64 {

@@ -122,6 +122,19 @@ impl AutopilotPlan {
         } else {
             Vec::new()
         };
+        let mut web_allowed_domains = web_allowed_domains;
+        if recipe == RecipeKind::DailyBrief {
+            for source in &daily_sources {
+                if let Some(host) = extract_host(source) {
+                    if !web_allowed_domains
+                        .iter()
+                        .any(|h| h.eq_ignore_ascii_case(&host))
+                    {
+                        web_allowed_domains.push(host);
+                    }
+                }
+            }
+        }
         let wants_send = intent_mentions_send(&intent);
         let mut allowed_primitives = vec![
             PrimitiveId::ReadWeb,

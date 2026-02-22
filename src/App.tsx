@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   EmailConnectionRecord,
@@ -44,6 +44,8 @@ function normalizeSnapshot(raw: unknown): HomeSnapshot {
       watcher_last_tick_ms?: number | null;
       missedRunsCount?: number;
       missed_runs_count?: number;
+      suppressedAutopilotsCount?: number;
+      suppressed_autopilots_count?: number;
     };
   };
   return {
@@ -57,6 +59,8 @@ function normalizeSnapshot(raw: unknown): HomeSnapshot {
         value.runner?.watcherLastTickMs ?? value.runner?.watcher_last_tick_ms ?? null,
       missedRunsCount:
         value.runner?.missedRunsCount ?? value.runner?.missed_runs_count ?? 0,
+      suppressedAutopilotsCount:
+        value.runner?.suppressedAutopilotsCount ?? value.runner?.suppressed_autopilots_count ?? 0,
     },
   };
 }
@@ -114,6 +118,7 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const retryCountRef = useRef(0);
 
   const [intentOpen, setIntentOpen] = useState(false);
   const [intentInput, setIntentInput] = useState("");
@@ -121,6 +126,7 @@ export function App() {
   const [intentLoading, setIntentLoading] = useState(false);
   const [draft, setDraft] = useState<IntentDraftResponse | null>(null);
   const [runNotice, setRunNotice] = useState<string | null>(null);
+  const [runDraftLoading, setRunDraftLoading] = useState(false);
   const [connections, setConnections] = useState<EmailConnectionRecord[]>([]);
   const [connectionsMessage, setConnectionsMessage] = useState<string | null>(null);
   const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
@@ -141,8 +147,16 @@ export function App() {
   const [clarifications, setClarifications] = useState<ClarificationRecord[]>([]);
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   const [clarificationsMessage, setClarificationsMessage] = useState<string | null>(null);
+  const runnerControlSaveTimerRef = useRef<number | null>(null);
+  const sendPolicySaveTimerRef = useRef<number | null>(null);
+  const intentOverlayRef = useRef<HTMLDivElement | null>(null);
+  const intentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const loadSnapshot = () => {
+  useEffect(() => {
+    retryCountRef.current = retryCount;
+  }, [retryCount]);
+
+  const loadSnapshot = useCallback(() => {
     setLoading(true);
     invoke<HomeSnapshot>("get_home_snapshot")
       .then((data) => {
@@ -152,7 +166,7 @@ export function App() {
       })
       .catch((err) => {
         console.error("Failed to load home snapshot:", err);
-        const isFirstFailure = retryCount === 0;
+        const isFirstFailure = retryCountRef.current === 0;
         setError(
           isFirstFailure
             ? "Could not load data. Using default view."
@@ -164,30 +178,9 @@ export function App() {
       .finally(() => {
         setLoading(false);
       });
-  };
-
-  useEffect(() => {
-    loadSnapshot();
-    loadConnections();
-    loadRunnerControl();
-    loadClarifications();
   }, []);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      invoke("tick_runner_cycle")
-        .then(() => {
-          loadSnapshot();
-          loadClarifications();
-        })
-        .catch(() => {
-          // keep silent; runner status remains visible on Home
-        });
-    }, 10_000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  const normalizeClarification = (row: any): ClarificationRecord => ({
+  const normalizeClarification = useCallback((row: any): ClarificationRecord => ({
     id: row.id,
     runId: row.runId ?? row.run_id,
     stepId: row.stepId ?? row.step_id,
@@ -196,9 +189,9 @@ export function App() {
     optionsJson: row.optionsJson ?? row.options_json ?? null,
     answerJson: row.answerJson ?? row.answer_json ?? null,
     status: row.status,
-  });
+  }), []);
 
-  const loadClarifications = () => {
+  const loadClarifications = useCallback(() => {
     invoke<ClarificationRecord[]>("list_pending_clarifications")
       .then((rows: any[]) => {
         const normalized = (rows ?? []).map(normalizeClarification);
@@ -216,10 +209,15 @@ export function App() {
       .catch((err) => {
         console.error("Failed to load clarifications:", err);
       });
-  };
+  }, [normalizeClarification]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && intentOpen) {
+        event.preventDefault();
+        setIntentOpen(false);
+        return;
+      }
       const cmdK = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
       if (!cmdK) {
         return;
@@ -230,7 +228,15 @@ export function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [intentOpen]);
+
+  useEffect(() => {
+    if (!intentOpen) {
+      return;
+    }
+    const timer = window.setTimeout(() => intentTextareaRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [intentOpen]);
 
   const classifiedLabel = useMemo(() => {
     if (!draft) {
@@ -239,7 +245,7 @@ export function App() {
     return draft.kind === "draft_autopilot" ? "Recurring Autopilot" : "One-time Run";
   }, [draft]);
 
-  const loadConnections = () => {
+  const loadConnections = useCallback(() => {
     invoke<EmailConnectionRecord[]>("list_email_connections")
       .then((rows) => {
         const normalized = rows.map((row: any) => ({
@@ -257,9 +263,9 @@ export function App() {
         console.error("Failed to load connections:", err);
         setConnectionsMessage("Could not load provider connections.");
       });
-  };
+  }, []);
 
-  const loadRunnerControl = () => {
+  const loadRunnerControl = useCallback(() => {
     invoke<RunnerControlRecord>("get_runner_control")
       .then((payload: any) => {
         setRunnerControl({
@@ -280,9 +286,9 @@ export function App() {
       .catch((err) => {
         console.error("Failed to load runner control:", err);
       });
-  };
+  }, []);
 
-  const saveRunnerControl = (next: RunnerControlRecord) => {
+  const persistRunnerControl = useCallback((next: RunnerControlRecord) => {
     invoke<RunnerControlRecord>("update_runner_control", {
       input: {
         backgroundEnabled: next.backgroundEnabled,
@@ -294,7 +300,6 @@ export function App() {
       },
     })
       .then(() => {
-        setRunnerControl(next);
         setConnectionsMessage("Runner controls updated.");
         loadSnapshot();
       })
@@ -302,7 +307,18 @@ export function App() {
         console.error("Failed to update runner control:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not update runner controls.");
       });
-  };
+  }, [loadSnapshot]);
+
+  const saveRunnerControl = useCallback((next: RunnerControlRecord) => {
+    setRunnerControl(next);
+    if (runnerControlSaveTimerRef.current != null) {
+      window.clearTimeout(runnerControlSaveTimerRef.current);
+    }
+    runnerControlSaveTimerRef.current = window.setTimeout(() => {
+      runnerControlSaveTimerRef.current = null;
+      persistRunnerControl(next);
+    }, 300);
+  }, [persistRunnerControl]);
 
   const loadSendPolicy = () => {
     invoke<AutopilotSendPolicyRecord>("get_autopilot_send_policy", {
@@ -330,7 +346,7 @@ export function App() {
       });
   };
 
-  const saveSendPolicy = (next: AutopilotSendPolicyRecord) => {
+  const persistSendPolicy = useCallback((next: AutopilotSendPolicyRecord) => {
     invoke<AutopilotSendPolicyRecord>("update_autopilot_send_policy", {
       input: {
         autopilotId: next.autopilotId,
@@ -372,7 +388,50 @@ export function App() {
         console.error("Failed to save send policy:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not update send policy.");
       });
-  };
+  }, []);
+
+  const saveSendPolicy = useCallback((next: AutopilotSendPolicyRecord) => {
+    setSendPolicy(next);
+    if (sendPolicySaveTimerRef.current != null) {
+      window.clearTimeout(sendPolicySaveTimerRef.current);
+    }
+    sendPolicySaveTimerRef.current = window.setTimeout(() => {
+      sendPolicySaveTimerRef.current = null;
+      persistSendPolicy(next);
+    }, 300);
+  }, [persistSendPolicy]);
+
+  useEffect(() => {
+    loadSnapshot();
+    loadConnections();
+    loadRunnerControl();
+    loadClarifications();
+  }, [loadSnapshot, loadConnections, loadRunnerControl, loadClarifications]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      invoke("tick_runner_cycle")
+        .then(() => {
+          loadSnapshot();
+          loadClarifications();
+        })
+        .catch(() => {
+          // keep silent; runner status remains visible on Home
+        });
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [loadSnapshot, loadClarifications]);
+
+  useEffect(() => {
+    return () => {
+      if (runnerControlSaveTimerRef.current != null) {
+        window.clearTimeout(runnerControlSaveTimerRef.current);
+      }
+      if (sendPolicySaveTimerRef.current != null) {
+        window.clearTimeout(sendPolicySaveTimerRef.current);
+      }
+    };
+  }, []);
 
   const generateDraft = (forcedKind?: IntentDraftKind) => {
     const intent = intentInput.trim();
@@ -397,7 +456,7 @@ export function App() {
   };
 
   const runDraft = () => {
-    if (!draft) {
+    if (!draft || runDraftLoading) {
       return;
     }
     const autopilotId = nowId(draft.kind === "draft_autopilot" ? "autopilot" : "run");
@@ -405,6 +464,7 @@ export function App() {
     const dailySources = recipeNeedsSources(draft.plan.recipe) ? draft.plan.dailySources : undefined;
     const pastedText = recipeNeedsPastedText(draft.plan.recipe) ? draft.plan.inboxSourceText : undefined;
 
+    setRunDraftLoading(true);
     invoke("start_recipe_run", {
       autopilotId,
       recipe: draft.plan.recipe,
@@ -425,7 +485,38 @@ export function App() {
       .catch((err) => {
         console.error("Failed to start run:", err);
         setIntentError(typeof err === "string" ? err : "Could not start this run.");
+      })
+      .finally(() => {
+        setRunDraftLoading(false);
       });
+  };
+
+  const handleIntentOverlayKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") {
+      return;
+    }
+    const root = intentOverlayRef.current;
+    if (!root) {
+      return;
+    }
+    const focusables = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((node) => !node.hasAttribute("disabled"));
+    if (focusables.length === 0) {
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+    if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
   };
 
   const saveOauthSetup = () => {
@@ -682,7 +773,7 @@ export function App() {
                       Run: <code>{item.runId}</code> · Field: <code>{item.fieldKey}</code>
                     </p>
                     {options.length > 0 && (
-                      <div className="clarification-options" role="list" aria-label="Quick picks">
+                      <div className="clarification-options" aria-label="Quick picks">
                         {options.map((option) => (
                           <button
                             key={option}
@@ -699,6 +790,7 @@ export function App() {
                     )}
                     <div className="clarification-answer-row">
                       <input
+                        aria-label={`Clarification answer for ${item.fieldKey}`}
                         value={clarificationAnswers[item.id] ?? ""}
                         onChange={(event) =>
                           setClarificationAnswers((prev) => ({
@@ -1016,7 +1108,19 @@ export function App() {
       </main>
 
       {intentOpen && (
-        <div className="intent-overlay" role="dialog" aria-modal="true" aria-label="Intent Bar">
+        <div
+          ref={intentOverlayRef}
+          className="intent-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Intent Bar"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setIntentOpen(false);
+            }
+          }}
+          onKeyDown={handleIntentOverlayKeyDown}
+        >
           <div className="intent-card">
             <div className="intent-header">
               <h2>Intent Bar</h2>
@@ -1026,6 +1130,7 @@ export function App() {
             </div>
             <p className="intent-help">Describe what you want done in one sentence.</p>
             <textarea
+              ref={intentTextareaRef}
               className="intent-input"
               value={intentInput}
               onChange={(e) => setIntentInput(e.target.value)}
@@ -1085,8 +1190,13 @@ export function App() {
                     </ul>
                   </div>
                 </div>
-                <button type="button" className="intent-primary" onClick={runDraft}>
-                  {draft.preview.primaryCta}
+                <button
+                  type="button"
+                  className="intent-primary"
+                  onClick={runDraft}
+                  disabled={runDraftLoading}
+                >
+                  {runDraftLoading ? "Starting..." : draft.preview.primaryCta}
                 </button>
               </section>
             )}

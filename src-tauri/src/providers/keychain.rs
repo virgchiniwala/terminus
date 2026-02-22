@@ -1,5 +1,6 @@
 use crate::providers::types::{ProviderError, ProviderKind};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, ProviderError> {
     let service = provider_kind.keychain_service_name();
@@ -44,23 +45,35 @@ pub fn set_secret(service: &str, account: &str, secret: &str) -> Result<(), Prov
         ));
     }
 
-    let status = Command::new("security")
+    let mut child = Command::new("security")
         .arg("add-generic-password")
         .arg("-a")
         .arg(account)
         .arg("-s")
         .arg(service)
         .arg("-w")
-        .arg(secret)
+        .arg("-")
         .arg("-U")
-        .status()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|_| {
             ProviderError::non_retryable(
                 "Could not write to Keychain. Check local security settings.",
             )
         })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(secret.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .map_err(|_| ProviderError::non_retryable("Could not write secret to Keychain."))?;
+    }
+    let output = child.wait_with_output().map_err(|_| {
+        ProviderError::non_retryable("Could not write to Keychain. Check local security settings.")
+    })?;
 
-    if status.success() {
+    if output.status.success() {
         return Ok(());
     }
 

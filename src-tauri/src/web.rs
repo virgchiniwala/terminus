@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Command;
 use thiserror::Error;
 
@@ -23,6 +24,10 @@ pub enum WebFetchError {
     InvalidScheme,
     #[error("This website is not in the allowlist for this Autopilot.")]
     HostNotAllowlisted,
+    #[error(
+        "This website points to a private or local network address, which Terminus does not allow."
+    )]
+    PrivateNetworkHost,
     #[error("Website fetch timed out. Try again.")]
     Timeout,
     #[error("Website is temporarily unavailable. Try again.")]
@@ -50,6 +55,7 @@ pub fn fetch_allowlisted_text(
     let (scheme, host) = parse_scheme_host(url).ok_or(WebFetchError::InvalidScheme)?;
     validate_scheme(&scheme)?;
     validate_allowlist(&host, allowlisted_hosts)?;
+    reject_private_host_resolution(&host)?;
 
     let mut current_url = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
@@ -62,6 +68,7 @@ pub fn fetch_allowlisted_text(
                 parse_scheme_host(&next_url).ok_or(WebFetchError::InvalidRedirect)?;
             validate_scheme(&next_scheme)?;
             validate_allowlist(&next_host, allowlisted_hosts)?;
+            reject_private_host_resolution(&next_host)?;
             current_url = next_url;
             continue;
         }
@@ -206,6 +213,57 @@ fn validate_allowlist(host: &str, allowlisted_hosts: &[String]) -> Result<(), We
     }
 }
 
+fn reject_private_host_resolution(host: &str) -> Result<(), WebFetchError> {
+    let host_lc = host.trim().to_ascii_lowercase();
+    #[cfg(test)]
+    if host_lc == "localhost" {
+        return Ok(());
+    }
+    if host_lc == "localhost" {
+        return Err(WebFetchError::PrivateNetworkHost);
+    }
+
+    if let Ok(ip) = host_lc.parse::<IpAddr>() {
+        #[cfg(test)]
+        if ip.is_loopback() {
+            return Ok(());
+        }
+        if is_private_ip(ip) {
+            return Err(WebFetchError::PrivateNetworkHost);
+        }
+        return Ok(());
+    }
+
+    let addrs = (host_lc.as_str(), 80)
+        .to_socket_addrs()
+        .map_err(|_| WebFetchError::FetchFailed)?;
+    for addr in addrs {
+        if is_private_ip(addr.ip()) {
+            return Err(WebFetchError::PrivateNetworkHost);
+        }
+    }
+    Ok(())
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || a == 0
+                || a == 100 && (64..=127).contains(&b) // CGNAT
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
 pub fn parse_scheme_host(url: &str) -> Option<(String, String)> {
     let (scheme, rest) = url.split_once("://")?;
     let host_port = rest.split('/').next()?.trim();
@@ -294,6 +352,27 @@ fn collapse_whitespace(input: &str) -> String {
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {
     input.chars().take(max_chars).collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_private_ip, reject_private_host_resolution, WebFetchError};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn rejects_private_ipv4_hosts() {
+        let err = reject_private_host_resolution("192.168.1.25").unwrap_err();
+        assert!(matches!(err, WebFetchError::PrivateNetworkHost));
+    }
+
+    #[test]
+    fn private_ip_classifier_covers_common_ranges() {
+        assert!(is_private_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8))));
+        assert!(is_private_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_private_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 2))));
+        assert!(is_private_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(!is_private_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
+    }
 }
 
 fn now_ms() -> i64 {

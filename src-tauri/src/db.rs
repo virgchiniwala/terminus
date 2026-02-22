@@ -19,6 +19,7 @@ pub struct RunnerStatus {
     pub watcher_enabled: bool,
     pub watcher_last_tick_ms: Option<i64>,
     pub missed_runs_count: i64,
+    pub suppressed_autopilots_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,8 +148,19 @@ pub fn bootstrap_sqlite(app_handle: &tauri::AppHandle) -> Result<PathBuf, String
     let db_path = app_data.join("terminus.sqlite");
     let mut connection =
         Connection::open(&db_path).map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    configure_connection(&connection)?;
     bootstrap_schema(&mut connection)?;
     Ok(db_path)
+}
+
+pub fn configure_connection(connection: &Connection) -> Result<(), String> {
+    connection
+        .busy_timeout(std::time::Duration::from_millis(5_000))
+        .map_err(|e| format!("Failed to configure SQLite busy timeout: {e}"))?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
+        .map_err(|e| format!("Failed to configure SQLite pragmas: {e}"))?;
+    Ok(())
 }
 
 pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
@@ -156,6 +168,13 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .execute_batch(
             "
             PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA busy_timeout = 5000;
+
+            CREATE TABLE IF NOT EXISTS schema_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS autopilots (
               id TEXT PRIMARY KEY,
@@ -494,6 +513,13 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             ",
         )
         .map_err(|e| format!("Failed to bootstrap schema: {e}"))?;
+    connection
+        .execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2026-02-22-hardening')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )
+        .map_err(|e| format!("Failed to update schema version: {e}"))?;
 
     ensure_column(connection, "runs", "next_retry_at_ms", "INTEGER")?;
     ensure_column(
@@ -692,6 +718,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create runs state index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_autopilot_updated ON runs(autopilot_id, updated_at DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create runs autopilot index: {e}"))?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_actions_run_step ON actions(run_id, step_id)",
@@ -947,6 +979,7 @@ pub fn insert_guidance_event(
 pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
     let connection =
         Connection::open(db_path).map_err(|e| format!("Failed to open sqlite db: {e}"))?;
+    configure_connection(&connection)?;
 
     let count = |table: &str| -> Result<i64, String> {
         let sql = format!("SELECT COUNT(*) FROM {table}");
@@ -956,6 +989,7 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
     };
 
     let runner_control = get_runner_control(&connection)?;
+    let now_ms = current_time_ms();
     let backlog_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM runs WHERE state IN ('ready', 'retrying', 'needs_approval')",
@@ -982,6 +1016,29 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
         )
     } else {
         base_line.to_string()
+    };
+    let suppressed_autopilots_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM autopilot_profile
+             WHERE learning_enabled = 1
+               AND CAST(json_extract(suppression_json, '$.suppress_until_ms') AS INTEGER) > ?1",
+            params![now_ms],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let status_line = if suppressed_autopilots_count > 0 {
+        format!(
+            "{} {} Autopilot{} currently suppressed by learning rules.",
+            status_line,
+            suppressed_autopilots_count,
+            if suppressed_autopilots_count == 1 {
+                " is"
+            } else {
+                "s are"
+            }
+        )
+    } else {
+        status_line
     };
 
     let primary_outcome_count = count_primary_outcomes(&connection)?;
@@ -1024,8 +1081,17 @@ pub fn get_home_snapshot(db_path: PathBuf) -> Result<HomeSnapshot, String> {
             watcher_enabled: runner_control.watcher_enabled,
             watcher_last_tick_ms: runner_control.watcher_last_tick_ms,
             missed_runs_count: runner_control.missed_runs_count,
+            suppressed_autopilots_count,
         },
     })
+}
+
+fn current_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 pub fn count_primary_outcomes(connection: &Connection) -> Result<i64, String> {

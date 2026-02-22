@@ -1,6 +1,9 @@
 use crate::providers::keychain;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{
+    distributions::{Alphanumeric, DistString},
+    rngs::OsRng,
+};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -289,6 +292,7 @@ pub fn upsert_oauth_config(connection: &Connection, input: OAuthConfigInput) -> 
     }
     let _ =
         Url::parse(redirect_uri).map_err(|_| "Redirect URI must be a valid URL.".to_string())?;
+    validate_redirect_uri(redirect_uri)?;
 
     connection
         .execute(
@@ -393,6 +397,10 @@ pub fn complete_oauth(
         return Err("OAuth session was not found. Start connection again.".to_string());
     };
     if expires_at_ms < now {
+        let _ = connection.execute(
+            "DELETE FROM email_oauth_sessions WHERE provider = ?1 AND state = ?2",
+            params![provider.as_str(), state],
+        );
         return Err("This connection link expired. Start connection again.".to_string());
     }
 
@@ -872,11 +880,29 @@ fn parse_scopes(raw: &str) -> Vec<String> {
 }
 
 fn random_token(len: usize) -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(len)
-        .map(char::from)
-        .collect::<String>()
+    Alphanumeric.sample_string(&mut OsRng, len)
+}
+
+fn validate_redirect_uri(raw: &str) -> Result<(), String> {
+    let parsed = Url::parse(raw).map_err(|_| "Redirect URI must be a valid URL.".to_string())?;
+    match parsed.scheme() {
+        "http" => {
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| "Redirect URI must include a host.".to_string())?;
+            if host != "127.0.0.1" && host != "localhost" {
+                return Err(
+                    "Redirect URI must use localhost for local OAuth callbacks.".to_string()
+                );
+            }
+            if parsed.port().is_none() {
+                return Err("Redirect URI must include a localhost port.".to_string());
+            }
+            Ok(())
+        }
+        "terminus" => Ok(()),
+        _ => Err("Redirect URI must use localhost or the Terminus app scheme.".to_string()),
+    }
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -891,4 +917,26 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_redirect_uri;
+
+    #[test]
+    fn redirect_uri_allows_localhost_http_with_port() {
+        assert!(validate_redirect_uri("http://127.0.0.1:3000/callback").is_ok());
+        assert!(validate_redirect_uri("http://localhost:5173/oauth").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_allows_terminus_scheme() {
+        assert!(validate_redirect_uri("terminus://oauth/callback").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_rejects_non_local_http_and_https() {
+        assert!(validate_redirect_uri("https://attacker.example/callback").is_err());
+        assert!(validate_redirect_uri("http://example.com:8080/callback").is_err());
+    }
 }
