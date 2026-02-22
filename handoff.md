@@ -91,6 +91,10 @@ Last updated: 2026-02-22
   - ticks no-op while clarification is pending; legacy `blocked + pending clarification` remains readable
   - primary outcomes/backlog queries treat `needs_clarification` as first-class and still support legacy blocked clarification rows
   - Home snapshot now includes suppressed Autopilot details (`autopilot_id`, `name`, `suppress_until_ms`) and UI shows them in the runner banner
+- Security/infra follow-up:
+  - `web::fetch_allowlisted_text` now resolves and pins a concrete IP per request hop using `curl --resolve` (reduces DNS rebinding window)
+  - capability file scaffold added for main Tauri window (`src-tauri/capabilities/main-window.json`) and explicit main window label in `tauri.conf.json`
+  - expired provider session with missing refresh token now clears stored connection/session state during token access path
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -142,7 +146,7 @@ Last updated: 2026-02-22
 ## Known Deferred Audit Items (not in this PR)
 - Large refactors: split `App.tsx`, split `runner.rs`, move `main.rs` business logic into modules
 - Full state-model cleanup beyond clarification (legacy `blocked` migration/normalization and dead `RunState::Draft` removal)
-- Tauri capability-file scoping for IPC commands
+- Fine-grained per-command app IPC permissions (current capability file provides window boundary + core permissions only)
 - Schema-wide FK cascade rebuild / migration framework cleanup
 - Gmail batch API optimization (N+1 list/detail calls)
 

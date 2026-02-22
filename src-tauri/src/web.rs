@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::process::Command;
 use thiserror::Error;
+use url::Url;
 
 const FETCH_TIMEOUT_SECS: u32 = 15;
 const MAX_REDIRECTS: usize = 3;
@@ -59,7 +60,9 @@ pub fn fetch_allowlisted_text(
 
     let mut current_url = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
-        let response = fetch_once(&current_url)?;
+        let parsed = ParsedFetchUrl::parse(&current_url)?;
+        let pinned_addr = resolve_public_addr(&parsed.host, parsed.port)?;
+        let response = fetch_once(&current_url, &parsed.host, parsed.port, pinned_addr.ip())?;
         if (300..400).contains(&response.status_code) {
             let location = response.location.ok_or(WebFetchError::InvalidRedirect)?;
             let next_url = resolve_redirect_url(&current_url, &location)
@@ -121,7 +124,13 @@ struct SingleFetchResponse {
     body: String,
 }
 
-fn fetch_once(url: &str) -> Result<SingleFetchResponse, WebFetchError> {
+fn fetch_once(
+    url: &str,
+    host: &str,
+    port: u16,
+    ip: IpAddr,
+) -> Result<SingleFetchResponse, WebFetchError> {
+    let resolve_arg = format!("{host}:{port}:{ip}");
     let output = Command::new("curl")
         .args([
             "--silent",
@@ -134,6 +143,8 @@ fn fetch_once(url: &str) -> Result<SingleFetchResponse, WebFetchError> {
             "=http,https",
             "--max-filesize",
             &MAX_RESPONSE_BYTES.to_string(),
+            "--resolve",
+            &resolve_arg,
             "--dump-header",
             "-",
             "--output",
@@ -243,6 +254,43 @@ fn reject_private_host_resolution(host: &str) -> Result<(), WebFetchError> {
         }
     }
     Ok(())
+}
+
+fn resolve_public_addr(host: &str, port: u16) -> Result<SocketAddr, WebFetchError> {
+    let host_lc = host.trim().to_ascii_lowercase();
+    let addrs = (host_lc.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|_| WebFetchError::FetchFailed)?;
+    for addr in addrs {
+        #[cfg(test)]
+        if addr.ip().is_loopback() {
+            return Ok(addr);
+        }
+        if !is_private_ip(addr.ip()) {
+            return Ok(addr);
+        }
+    }
+    Err(WebFetchError::PrivateNetworkHost)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedFetchUrl {
+    host: String,
+    port: u16,
+}
+
+impl ParsedFetchUrl {
+    fn parse(url: &str) -> Result<Self, WebFetchError> {
+        let parsed = Url::parse(url).map_err(|_| WebFetchError::InvalidScheme)?;
+        let host = parsed
+            .host_str()
+            .ok_or(WebFetchError::InvalidScheme)?
+            .to_string();
+        let port = parsed
+            .port_or_known_default()
+            .ok_or(WebFetchError::InvalidScheme)?;
+        Ok(Self { host, port })
+    }
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
