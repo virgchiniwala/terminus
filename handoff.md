@@ -95,6 +95,13 @@ Last updated: 2026-02-22
   - `web::fetch_allowlisted_text` now resolves and pins a concrete IP per request hop using `curl --resolve` (reduces DNS rebinding window)
   - capability file scaffold added for main Tauri window (`src-tauri/capabilities/main-window.json`) and explicit main window label in `tauri.conf.json`
   - expired provider session with missing refresh token now clears stored connection/session state during token access path
+- Reliability/cleanup bundle:
+  - Gmail watcher details fetch now uses Gmail batch endpoint (with sequential fallback if batch parsing fails)
+  - provider-level watcher backoff state persisted in `inbox_watcher_state` (rate-limit/retryable failures back off instead of hammering)
+  - watcher cycle no longer aborts all providers when one provider poll fails
+  - primary outcomes query uses a `recent_runs` CTE (limit-first) and new indexes for approvals/outcomes/clarifications subqueries
+  - removed dead `RunState::Draft` variant from runner state enum
+  - `ARCHITECTURE.md` refreshed to match shipped runner/actions/clarifications/learning/watcher/background reality
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo test` passes
@@ -145,10 +152,10 @@ Last updated: 2026-02-22
 
 ## Known Deferred Audit Items (not in this PR)
 - Large refactors: split `App.tsx`, split `runner.rs`, move `main.rs` business logic into modules
-- Full state-model cleanup beyond clarification (legacy `blocked` migration/normalization and dead `RunState::Draft` removal)
+- Full state-model cleanup beyond clarification (legacy `blocked` migration/normalization)
 - Fine-grained per-command app IPC permissions (current capability file provides window boundary + core permissions only)
 - Schema-wide FK cascade rebuild / migration framework cleanup
-- Gmail batch API optimization (N+1 list/detail calls)
+- Legacy money/timestamp schema cleanup (retire float spend columns, normalize timestamp fields)
 
 ## Next Suggested Work
 1. Wire learning outcomes into object surfaces with calm, non-technical language.
