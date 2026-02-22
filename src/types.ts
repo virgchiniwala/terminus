@@ -75,6 +75,17 @@ export interface AutopilotSendPolicyRecord {
   updatedAtMs: number;
 }
 
+export interface ClarificationRecord {
+  id: string;
+  runId: string;
+  stepId: string;
+  fieldKey: string;
+  question: string;
+  optionsJson?: string | null;
+  answerJson?: string | null;
+  status: "pending" | "answered" | "canceled" | string;
+}
+
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 
 export type RiskTier = "low" | "medium" | "high";

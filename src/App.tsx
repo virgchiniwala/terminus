@@ -8,6 +8,7 @@ import type {
   RecipeKind,
   RunnerControlRecord,
   AutopilotSendPolicyRecord,
+  ClarificationRecord,
   IntentDraftKind,
 } from "./types";
 
@@ -137,6 +138,9 @@ export function App() {
   const [guideScopeId, setGuideScopeId] = useState("");
   const [guideInstruction, setGuideInstruction] = useState("");
   const [guideMessage, setGuideMessage] = useState<string | null>(null);
+  const [clarifications, setClarifications] = useState<ClarificationRecord[]>([]);
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
+  const [clarificationsMessage, setClarificationsMessage] = useState<string | null>(null);
 
   const loadSnapshot = () => {
     setLoading(true);
@@ -166,6 +170,7 @@ export function App() {
     loadSnapshot();
     loadConnections();
     loadRunnerControl();
+    loadClarifications();
   }, []);
 
   useEffect(() => {
@@ -173,6 +178,7 @@ export function App() {
       invoke("tick_runner_cycle")
         .then(() => {
           loadSnapshot();
+          loadClarifications();
         })
         .catch(() => {
           // keep silent; runner status remains visible on Home
@@ -180,6 +186,37 @@ export function App() {
     }, 10_000);
     return () => window.clearInterval(interval);
   }, []);
+
+  const normalizeClarification = (row: any): ClarificationRecord => ({
+    id: row.id,
+    runId: row.runId ?? row.run_id,
+    stepId: row.stepId ?? row.step_id,
+    fieldKey: row.fieldKey ?? row.field_key,
+    question: row.question,
+    optionsJson: row.optionsJson ?? row.options_json ?? null,
+    answerJson: row.answerJson ?? row.answer_json ?? null,
+    status: row.status,
+  });
+
+  const loadClarifications = () => {
+    invoke<ClarificationRecord[]>("list_pending_clarifications")
+      .then((rows: any[]) => {
+        const normalized = (rows ?? []).map(normalizeClarification);
+        setClarifications(normalized);
+        setClarificationAnswers((prev) => {
+          const next = { ...prev };
+          for (const item of normalized) {
+            if (next[item.id] == null) {
+              next[item.id] = "";
+            }
+          }
+          return next;
+        });
+      })
+      .catch((err) => {
+        console.error("Failed to load clarifications:", err);
+      });
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -509,6 +546,47 @@ export function App() {
       });
   };
 
+  const clarificationOptions = (item: ClarificationRecord): string[] => {
+    if (!item.optionsJson) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(item.optionsJson);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((v): v is string => typeof v === "string").slice(0, 6);
+      }
+      if (parsed && Array.isArray(parsed.options)) {
+        return parsed.options.filter((v: unknown): v is string => typeof v === "string").slice(0, 6);
+      }
+    } catch {
+      // ignore malformed options payload
+    }
+    return [];
+  };
+
+  const submitClarification = (item: ClarificationRecord) => {
+    const raw = (clarificationAnswers[item.id] ?? "").trim();
+    if (!raw) {
+      setClarificationsMessage("Add one answer so Terminus can continue.");
+      return;
+    }
+    const answerPayload = JSON.stringify({ value: raw, fieldKey: item.fieldKey });
+    setClarificationsMessage(null);
+    invoke("submit_clarification_answer", {
+      clarificationId: item.id,
+      answerJson: answerPayload,
+    })
+      .then(() => {
+        setClarificationsMessage("Answer saved. Terminus resumed the run.");
+        loadClarifications();
+        loadSnapshot();
+      })
+      .catch((err) => {
+        console.error("Failed to submit clarification answer:", err);
+        setClarificationsMessage(typeof err === "string" ? err : "Could not submit answer.");
+      });
+  };
+
   if (loading) {
     return (
       <main className="app-shell loading-state" aria-label="Loading Terminus" aria-busy="true">
@@ -580,6 +658,65 @@ export function App() {
           <p>{snapshot.runner.statusLine}</p>
           <p>Pending runs: {snapshot.runner.backlogCount ?? 0}</p>
           <p>Missed while asleep/offline: {snapshot.runner.missedRunsCount ?? 0}</p>
+        </section>
+
+        <section className="clarifications-panel" aria-label="Clarifications">
+          <div className="connection-panel-header">
+            <h2>Clarifications</h2>
+            <p>When Terminus is missing one detail, it asks one question and resumes immediately.</p>
+          </div>
+          {clarificationsMessage && <p className="connection-message">{clarificationsMessage}</p>}
+          {clarifications.length === 0 ? (
+            <div className="clarification-empty">
+              <p>No clarifications waiting.</p>
+            </div>
+          ) : (
+            <div className="clarification-list">
+              {clarifications.map((item) => {
+                const options = clarificationOptions(item);
+                return (
+                  <article key={item.id} className="clarification-card">
+                    <p className="clarification-kicker">One thing I need to proceed</p>
+                    <p className="clarification-question">{item.question}</p>
+                    <p className="clarification-meta">
+                      Run: <code>{item.runId}</code> · Field: <code>{item.fieldKey}</code>
+                    </p>
+                    {options.length > 0 && (
+                      <div className="clarification-options" role="list" aria-label="Quick picks">
+                        {options.map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            className="clarification-chip"
+                            onClick={() =>
+                              setClarificationAnswers((prev) => ({ ...prev, [item.id]: option }))
+                            }
+                          >
+                            {option}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="clarification-answer-row">
+                      <input
+                        value={clarificationAnswers[item.id] ?? ""}
+                        onChange={(event) =>
+                          setClarificationAnswers((prev) => ({
+                            ...prev,
+                            [item.id]: event.target.value,
+                          }))
+                        }
+                        placeholder="Type one answer"
+                      />
+                      <button type="button" className="intent-primary" onClick={() => submitClarification(item)}>
+                        Answer & Resume
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         <section className="connection-panel" aria-label="Email connections">
