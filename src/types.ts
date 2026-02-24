@@ -92,6 +92,54 @@ export interface ClarificationRecord {
   status: "pending" | "answered" | "canceled" | string;
 }
 
+export type RunHealthStatus =
+  | "healthy_running"
+  | "waiting_for_approval"
+  | "waiting_for_clarification"
+  | "retrying_transient"
+  | "retrying_stuck"
+  | "policy_blocked"
+  | "provider_misconfigured"
+  | "source_unreachable"
+  | "resource_throttled"
+  | "completed"
+  | "failed_unclassified";
+
+export interface InterventionSuggestion {
+  kind:
+    | "approve_pending_action"
+    | "answer_clarification"
+    | "retry_now_if_due"
+    | "pause_autopilot_15m"
+    | "reduce_source_scope"
+    | "switch_provider_supported_default"
+    | "open_receipt"
+    | "open_activity_log"
+    | string;
+  label: string;
+  reason: string;
+  disabled: boolean;
+}
+
+export interface RunDiagnosticRecord {
+  id: string;
+  runId: string;
+  autopilotId: string;
+  runState: string;
+  healthStatus: RunHealthStatus | string;
+  reasonCode: string;
+  summary: string;
+  suggestions: InterventionSuggestion[];
+  createdAtMs: number;
+}
+
+export interface ApplyInterventionResult {
+  ok: boolean;
+  runId: string;
+  message: string;
+  updatedRunState?: string | null;
+}
+
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 
 export type RiskTier = "low" | "medium" | "high";

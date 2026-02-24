@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ApplyInterventionResult,
   EmailConnectionRecord,
   HomeSnapshot,
+  InterventionSuggestion,
   IntentDraftResponse,
   OAuthStartResponse,
   RecipeKind,
+  RunDiagnosticRecord,
   RunnerControlRecord,
   AutopilotSendPolicyRecord,
   ClarificationRecord,
@@ -181,6 +184,8 @@ export function App() {
   const [clarifications, setClarifications] = useState<ClarificationRecord[]>([]);
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   const [clarificationsMessage, setClarificationsMessage] = useState<string | null>(null);
+  const [runDiagnostics, setRunDiagnostics] = useState<RunDiagnosticRecord[]>([]);
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState<string | null>(null);
   const runnerControlSaveTimerRef = useRef<number | null>(null);
   const sendPolicySaveTimerRef = useRef<number | null>(null);
   const intentOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -225,6 +230,23 @@ export function App() {
     status: row.status,
   }), []);
 
+  const normalizeRunDiagnostic = useCallback((row: any): RunDiagnosticRecord => ({
+    id: row.id,
+    runId: row.runId ?? row.run_id,
+    autopilotId: row.autopilotId ?? row.autopilot_id,
+    runState: row.runState ?? row.run_state,
+    healthStatus: row.healthStatus ?? row.health_status,
+    reasonCode: row.reasonCode ?? row.reason_code,
+    summary: row.summary ?? "",
+    suggestions: (row.suggestions ?? []).map((s: any): InterventionSuggestion => ({
+      kind: s.kind,
+      label: s.label,
+      reason: s.reason ?? "",
+      disabled: Boolean(s.disabled),
+    })),
+    createdAtMs: row.createdAtMs ?? row.created_at_ms ?? Date.now(),
+  }), []);
+
   const loadClarifications = useCallback(() => {
     invoke<ClarificationRecord[]>("list_pending_clarifications")
       .then((rows: any[]) => {
@@ -244,6 +266,17 @@ export function App() {
         console.error("Failed to load clarifications:", err);
       });
   }, [normalizeClarification]);
+
+  const loadRunDiagnostics = useCallback(() => {
+    invoke<RunDiagnosticRecord[]>("list_run_diagnostics", { limit: 12 })
+      .then((rows: any[]) => {
+        setRunDiagnostics((rows ?? []).map(normalizeRunDiagnostic));
+      })
+      .catch((err) => {
+        console.error("Failed to load run diagnostics:", err);
+        setDiagnosticsMessage("Could not load run diagnostics.");
+      });
+  }, [normalizeRunDiagnostic]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -440,7 +473,8 @@ export function App() {
     loadConnections();
     loadRunnerControl();
     loadClarifications();
-  }, [loadSnapshot, loadConnections, loadRunnerControl, loadClarifications]);
+    loadRunDiagnostics();
+  }, [loadSnapshot, loadConnections, loadRunnerControl, loadClarifications, loadRunDiagnostics]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -448,13 +482,14 @@ export function App() {
         .then(() => {
           loadSnapshot();
           loadClarifications();
+          loadRunDiagnostics();
         })
         .catch(() => {
           // keep silent; runner status remains visible on Home
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics]);
 
   useEffect(() => {
     return () => {
@@ -705,10 +740,26 @@ export function App() {
         setClarificationsMessage("Answer saved. Terminus resumed the run.");
         loadClarifications();
         loadSnapshot();
+        loadRunDiagnostics();
       })
       .catch((err) => {
         console.error("Failed to submit clarification answer:", err);
         setClarificationsMessage(typeof err === "string" ? err : "Could not submit answer.");
+      });
+  };
+
+  const applyIntervention = (runId: string, kind: string) => {
+    setDiagnosticsMessage(null);
+    invoke<ApplyInterventionResult>("apply_intervention", { input: { runId, kind } })
+      .then((result) => {
+        setDiagnosticsMessage(result.message);
+        loadRunDiagnostics();
+        loadClarifications();
+        loadSnapshot();
+      })
+      .catch((err) => {
+        console.error("Failed to apply intervention:", err);
+        setDiagnosticsMessage(typeof err === "string" ? err : "Could not apply intervention.");
       });
   };
 
@@ -793,6 +844,53 @@ export function App() {
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+        </section>
+
+        <section className="diagnostics-panel" aria-label="Needs attention">
+          <div className="connection-panel-header">
+            <h2>Needs Attention</h2>
+            <p>Supervisor diagnostics classify blocked runs and suggest safe next actions.</p>
+          </div>
+          {diagnosticsMessage && <p className="connection-message">{diagnosticsMessage}</p>}
+          {runDiagnostics.filter((item) => !["healthy_running", "completed"].includes(item.healthStatus)).length === 0 ? (
+            <div className="clarification-empty">
+              <p>No runs need intervention right now.</p>
+            </div>
+          ) : (
+            <div className="diagnostic-list">
+              {runDiagnostics
+                .filter((item) => !["healthy_running", "completed"].includes(item.healthStatus))
+                .map((item) => (
+                  <article key={item.id} className="diagnostic-card">
+                    <div className="diagnostic-header-row">
+                      <p className="clarification-kicker">Run health</p>
+                      <span className={`diagnostic-status status-${item.healthStatus}`}>
+                        {item.healthStatus.split("_").join(" ")}
+                      </span>
+                    </div>
+                    <p className="diagnostic-summary">{item.summary}</p>
+                    <p className="clarification-meta">
+                      Run: <code>{item.runId}</code> · Autopilot: <code>{item.autopilotId}</code> · State:{" "}
+                      <code>{item.runState}</code>
+                    </p>
+                    <div className="diagnostic-actions">
+                      {item.suggestions.slice(0, 4).map((suggestion) => (
+                        <button
+                          key={`${item.id}_${suggestion.kind}`}
+                          type="button"
+                          className="clarification-chip"
+                          disabled={suggestion.disabled}
+                          title={suggestion.reason}
+                          onClick={() => applyIntervention(item.runId, suggestion.kind)}
+                        >
+                          {suggestion.label}
+                        </button>
+                      ))}
+                    </div>
+                  </article>
+                ))}
             </div>
           )}
         </section>

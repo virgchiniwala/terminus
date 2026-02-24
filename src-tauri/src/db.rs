@@ -445,6 +445,17 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               created_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS run_diagnostics (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              health_status TEXT NOT NULL,
+              reason_code TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              suggestions_json TEXT NOT NULL DEFAULT '[]',
+              created_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
             CREATE TABLE IF NOT EXISTS email_oauth_config (
               provider TEXT PRIMARY KEY,
               client_id TEXT NOT NULL,
@@ -716,6 +727,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create guidance events index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_run_diagnostics_health_created ON run_diagnostics(health_status, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create run diagnostics index: {e}"))?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_email_oauth_sessions_provider_expiry ON email_oauth_sessions(provider, expires_at_ms DESC)",

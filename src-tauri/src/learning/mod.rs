@@ -323,6 +323,18 @@ pub fn get_runtime_profile(
     })
 }
 
+pub fn set_autopilot_suppression_until(
+    connection: &Connection,
+    autopilot_id: &str,
+    suppress_until_ms: Option<i64>,
+) -> Result<(), LearningError> {
+    let mut profile = ensure_autopilot_profile(connection, autopilot_id)?;
+    profile.suppression.suppress_until_ms = suppress_until_ms;
+    profile.updated_at_ms = now_ms();
+    profile.version = profile.version.saturating_add(1);
+    persist_profile(connection, &profile)
+}
+
 pub fn evaluate_run(
     connection: &Connection,
     run_id: &str,
