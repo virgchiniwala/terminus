@@ -1,6 +1,9 @@
 # Handoff
 Last updated: 2026-02-24
 
+## Fresh Session Note
+- For the agentic-orchestration plan, implemented supervisor diagnostics slice, and latest cross-session context summary, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
+
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
 - Shared plan schema for Website Monitor, Inbox Triage, Daily Brief
