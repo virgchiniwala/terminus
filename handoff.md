@@ -95,9 +95,22 @@ Last updated: 2026-02-22
   - `web::fetch_allowlisted_text` now resolves and pins a concrete IP per request hop using `curl --resolve` (reduces DNS rebinding window)
   - capability file scaffold added for main Tauri window (`src-tauri/capabilities/main-window.json`) and explicit main window label in `tauri.conf.json`
   - expired provider session with missing refresh token now clears stored connection/session state during token access path
+- Reliability/cleanup follow-up:
+  - Gmail watcher details fetch now uses Gmail batch endpoint (with sequential fallback)
+  - provider-level watcher backoff state persisted in `inbox_watcher_state`
+  - watcher cycle continues polling other providers when one provider fails
+  - `list_primary_outcomes` now limits recent runs first via CTE + supporting indexes for approvals/outcomes/clarifications lookups
+  - dead `RunState::Draft` enum variant removed
+  - `ARCHITECTURE.md` refreshed to reflect current shipped runtime
+- CI + quality gates baseline:
+  - GitHub Actions CI workflow added for PRs and `main` pushes (macOS runner)
+  - CI checks: `cargo fmt --check`, `cargo test`, `npm run lint`, `npm run build`
+  - lightweight ESLint flat config added with `npm run lint`
 
 ## Current Verification Baseline
+- `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
+- `npm run lint` passes
 - `npm run build` passes
 
 ## Current Priority Track
@@ -145,10 +158,10 @@ Last updated: 2026-02-22
 
 ## Known Deferred Audit Items (not in this PR)
 - Large refactors: split `App.tsx`, split `runner.rs`, move `main.rs` business logic into modules
-- Full state-model cleanup beyond clarification (legacy `blocked` migration/normalization and dead `RunState::Draft` removal)
+- Full state-model cleanup beyond clarification (legacy `blocked` migration/normalization)
 - Fine-grained per-command app IPC permissions (current capability file provides window boundary + core permissions only)
 - Schema-wide FK cascade rebuild / migration framework cleanup
-- Gmail batch API optimization (N+1 list/detail calls)
+- Legacy money/timestamp schema cleanup (float spend columns + timestamp normalization)
 
 ## Next Suggested Work
 1. Wire learning outcomes into object surfaces with calm, non-technical language.

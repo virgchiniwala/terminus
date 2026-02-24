@@ -3,7 +3,7 @@ Last updated: 2026-02-22
 
 ## Current State
 - Mode: Day
-- Branch: `codex/pr23-security-infra-hardening`
+- Branch: `codex/pr25-ci-quality-gates`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -37,24 +37,26 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR23 — Security/infra follow-up (capabilities + rebinding hardening)
-Owner: Friday + Fury + Loki
+### PR25 — CI + baseline quality gates
+Owner: Friday + Fury
 Status: In progress
 Scope:
-- add Tauri capability scaffolding for the main window (window-scoped IPC boundary)
-- strengthen web fetch against DNS rebinding by pinning resolved IPs into curl (`--resolve`)
-- clear expired OAuth session state when refresh token is missing during token access
+- add GitHub Actions CI workflow for PRs/main (macOS runner)
+- enforce baseline checks: `cargo fmt --check`, `cargo test`, `npm run lint`, `npm run build`
+- add lightweight ESLint config + `npm run lint` script (minimal friction)
 Acceptance:
-- `cargo test` and `npm run build` pass with capability files present
-- website and daily brief web-fetch tests still pass after DNS pinning
+- local and CI checks are aligned and passing
+- lint runs without requiring broad frontend refactors
 Verification:
+- `cd src-tauri && cargo fmt --check`
 - `cd src-tauri && cargo test`
+- `npm run lint`
 - `npm run build`
 
 ## Next
-1. Reliability/cleanup bundle: Gmail batching + watcher rate/backoff policy + DB/query hygiene
-2. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
-3. Docs/architecture refresh to match shipped learning layer + watcher + background runtime
+1. Watcher health UX: surface provider backoff/error state in UI
+2. Frontend test foundation (Vitest + RTL) for polling/debounce/normalization/run-start guards
+3. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
