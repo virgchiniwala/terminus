@@ -114,10 +114,22 @@ Last updated: 2026-02-24
     - recovering (recent failures)
     - backoff/retry time for rate limits / temporary provider failures
   - Connection cards also surface provider connection issues (for reconnect-required cases)
+- Frontend test foundation (PR27):
+  - Vitest + React Testing Library + jsdom setup added
+  - `npm test` script added and wired into CI
+  - UI helper extraction (`src/uiLogic.ts`) for deterministic tests:
+    - `normalizeSnapshot`
+    - `normalizeEmailConnectionRecord`
+    - watcher status messaging
+    - polling retry error copy
+    - debounce timer replacement helper
+    - run-start guard helper
+  - `ConnectionHealthSummary` extracted and covered with RTL rendering tests
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
+- `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
 

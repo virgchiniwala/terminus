@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ConnectionHealthSummary } from "./components/ConnectionHealthSummary";
 import type {
   ApplyInterventionResult,
   EmailConnectionRecord,
@@ -14,79 +15,18 @@ import type {
   ClarificationRecord,
   IntentDraftKind,
 } from "./types";
-
-const fallbackSnapshot: HomeSnapshot = {
-  surfaces: [
-    { title: "Autopilots", subtitle: "Create repeatable follow-through", count: 0, cta: "Create Autopilot" },
-    { title: "Outcomes", subtitle: "Results from completed runs", count: 0, cta: "View Outcomes" },
-    { title: "Approvals", subtitle: "Actions waiting for your go-ahead", count: 0, cta: "Open Queue" },
-    { title: "Activity", subtitle: "What happened and why", count: 0, cta: "Open Activity" },
-  ],
-  runner: {
-    mode: "app_open",
-    statusLine: "Autopilots run only while the app is open.",
-  },
-};
+import {
+  canStartDraftRun,
+  fallbackSnapshot,
+  formatShortLocalTime,
+  homeLoadErrorMessage,
+  normalizeEmailConnectionRecord,
+  normalizeSnapshot,
+  replaceDebouncedTimer,
+} from "./uiLogic";
 
 function nowId(prefix: string): string {
   return `${prefix}_${Date.now()}`;
-}
-
-function normalizeSnapshot(raw: unknown): HomeSnapshot {
-  const value = raw as {
-    surfaces?: HomeSnapshot["surfaces"];
-    runner?: {
-      mode?: "app_open" | "background";
-      statusLine?: string;
-      status_line?: string;
-      backlogCount?: number;
-      backlog_count?: number;
-      watcherEnabled?: boolean;
-      watcher_enabled?: boolean;
-      watcherLastTickMs?: number | null;
-      watcher_last_tick_ms?: number | null;
-      missedRunsCount?: number;
-      missed_runs_count?: number;
-      suppressedAutopilotsCount?: number;
-      suppressed_autopilots_count?: number;
-      suppressedAutopilots?: Array<{
-        autopilotId?: string;
-        autopilot_id?: string;
-        name?: string;
-        suppressUntilMs?: number;
-        suppress_until_ms?: number;
-      }>;
-      suppressed_autopilots?: Array<{
-        autopilotId?: string;
-        autopilot_id?: string;
-        name?: string;
-        suppressUntilMs?: number;
-        suppress_until_ms?: number;
-      }>;
-    };
-  };
-  return {
-    surfaces: value.surfaces ?? fallbackSnapshot.surfaces,
-    runner: {
-      mode: value.runner?.mode ?? "app_open",
-      statusLine: value.runner?.statusLine ?? value.runner?.status_line ?? fallbackSnapshot.runner.statusLine,
-      backlogCount: value.runner?.backlogCount ?? value.runner?.backlog_count ?? 0,
-      watcherEnabled: value.runner?.watcherEnabled ?? value.runner?.watcher_enabled ?? true,
-      watcherLastTickMs:
-        value.runner?.watcherLastTickMs ?? value.runner?.watcher_last_tick_ms ?? null,
-      missedRunsCount:
-        value.runner?.missedRunsCount ?? value.runner?.missed_runs_count ?? 0,
-      suppressedAutopilotsCount:
-        value.runner?.suppressedAutopilotsCount ?? value.runner?.suppressed_autopilots_count ?? 0,
-      suppressedAutopilots: (value.runner?.suppressedAutopilots ??
-        value.runner?.suppressed_autopilots ??
-        [])?.map((item) => ({
-        autopilotId: item.autopilotId ?? item.autopilot_id ?? "",
-        name: item.name ?? item.autopilotId ?? item.autopilot_id ?? "Autopilot",
-        suppressUntilMs: item.suppressUntilMs ?? item.suppress_until_ms ?? Date.now(),
-      })),
-    },
-  };
 }
 
 function normalizeDraft(raw: unknown): IntentDraftResponse {
@@ -135,34 +75,6 @@ function recipeNeedsSources(recipe: RecipeKind): boolean {
 
 function recipeNeedsPastedText(recipe: RecipeKind): boolean {
   return recipe === "inbox_triage";
-}
-
-function formatShortLocalTime(ms: number): string {
-  try {
-    return new Date(ms).toLocaleString([], {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  } catch {
-    return "soon";
-  }
-}
-
-function watcherStatusLine(record: EmailConnectionRecord): string {
-  if (record.status !== "connected") {
-    return "Watcher inactive until connected.";
-  }
-  const backoffUntil = record.watcherBackoffUntilMs ?? null;
-  if (backoffUntil && backoffUntil > Date.now()) {
-    return `Rate-limited or temporarily unavailable. Retrying at ${formatShortLocalTime(backoffUntil)}.`;
-  }
-  const failures = record.watcherConsecutiveFailures ?? 0;
-  if (failures > 0) {
-    return `Watcher recovering (${failures} recent failure${failures === 1 ? "" : "s"}).`;
-  }
-  return "Watcher ready.";
 }
 
 export function App() {
@@ -220,12 +132,7 @@ export function App() {
       })
       .catch((err) => {
         console.error("Failed to load home snapshot:", err);
-        const isFirstFailure = retryCountRef.current === 0;
-        setError(
-          isFirstFailure
-            ? "Could not load data. Using default view."
-            : "Still unable to connect. Check that Tauri backend is running."
-        );
+        setError(homeLoadErrorMessage(retryCountRef.current));
         setSnapshot(fallbackSnapshot);
         setRetryCount((c) => c + 1);
       })
@@ -330,21 +237,7 @@ export function App() {
   const loadConnections = useCallback(() => {
     invoke<EmailConnectionRecord[]>("list_email_connections")
       .then((rows) => {
-        const normalized = rows.map((row: any) => ({
-          provider: row.provider,
-          status: row.status,
-          accountEmail: row.accountEmail ?? row.account_email ?? null,
-          scopes: row.scopes ?? [],
-          connectedAtMs: row.connectedAtMs ?? row.connected_at_ms ?? null,
-          updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? Date.now(),
-          lastError: row.lastError ?? row.last_error ?? null,
-          watcherBackoffUntilMs:
-            row.watcherBackoffUntilMs ?? row.watcher_backoff_until_ms ?? null,
-          watcherConsecutiveFailures:
-            row.watcherConsecutiveFailures ?? row.watcher_consecutive_failures ?? 0,
-          watcherLastError: row.watcherLastError ?? row.watcher_last_error ?? null,
-          watcherUpdatedAtMs: row.watcherUpdatedAtMs ?? row.watcher_updated_at_ms ?? null,
-        })) as EmailConnectionRecord[];
+        const normalized = rows.map(normalizeEmailConnectionRecord);
         setConnections(normalized);
       })
       .catch((err) => {
@@ -399,10 +292,7 @@ export function App() {
 
   const saveRunnerControl = useCallback((next: RunnerControlRecord) => {
     setRunnerControl(next);
-    if (runnerControlSaveTimerRef.current != null) {
-      window.clearTimeout(runnerControlSaveTimerRef.current);
-    }
-    runnerControlSaveTimerRef.current = window.setTimeout(() => {
+    runnerControlSaveTimerRef.current = replaceDebouncedTimer(window, runnerControlSaveTimerRef.current, () => {
       runnerControlSaveTimerRef.current = null;
       persistRunnerControl(next);
     }, 300);
@@ -480,10 +370,7 @@ export function App() {
 
   const saveSendPolicy = useCallback((next: AutopilotSendPolicyRecord) => {
     setSendPolicy(next);
-    if (sendPolicySaveTimerRef.current != null) {
-      window.clearTimeout(sendPolicySaveTimerRef.current);
-    }
-    sendPolicySaveTimerRef.current = window.setTimeout(() => {
+    sendPolicySaveTimerRef.current = replaceDebouncedTimer(window, sendPolicySaveTimerRef.current, () => {
       sendPolicySaveTimerRef.current = null;
       persistSendPolicy(next);
     }, 300);
@@ -546,27 +433,30 @@ export function App() {
   };
 
   const runDraft = () => {
-    if (!draft || runDraftLoading) {
+    const currentDraft = draft;
+    if (!currentDraft || !canStartDraftRun(currentDraft, runDraftLoading)) {
       return;
     }
-    const autopilotId = nowId(draft.kind === "draft_autopilot" ? "autopilot" : "run");
+    const autopilotId = nowId(currentDraft.kind === "draft_autopilot" ? "autopilot" : "run");
     const idempotencyKey = nowId("idem");
-    const dailySources = recipeNeedsSources(draft.plan.recipe) ? draft.plan.dailySources : undefined;
-    const pastedText = recipeNeedsPastedText(draft.plan.recipe) ? draft.plan.inboxSourceText : undefined;
+    const dailySources = recipeNeedsSources(currentDraft.plan.recipe) ? currentDraft.plan.dailySources : undefined;
+    const pastedText = recipeNeedsPastedText(currentDraft.plan.recipe)
+      ? currentDraft.plan.inboxSourceText
+      : undefined;
 
     setRunDraftLoading(true);
     invoke("start_recipe_run", {
       autopilotId,
-      recipe: draft.plan.recipe,
-      intent: draft.plan.intent,
+      recipe: currentDraft.plan.recipe,
+      intent: currentDraft.plan.intent,
       pastedText,
       dailySources,
-      provider: draft.plan.provider.id,
+      provider: currentDraft.plan.provider.id,
       idempotencyKey,
       maxRetries: 2,
     })
       .then(() => {
-        setRunNotice(`${draft.preview.primaryCta} started. Open Activity for live progress.`);
+        setRunNotice(`${currentDraft.preview.primaryCta} started. Open Activity for live progress.`);
         setIntentOpen(false);
         setIntentInput("");
         setDraft(null);
@@ -1222,19 +1112,7 @@ export function App() {
                 <h3>{record.provider === "gmail" ? "Gmail" : "Microsoft 365"}</h3>
                 <p>Status: {record.status === "connected" ? "Connected" : "Disconnected"}</p>
                 {record.accountEmail && <p>Account: {record.accountEmail}</p>}
-                {record.lastError && <p>Connection issue: {record.lastError}</p>}
-                <p>{watcherStatusLine(record)}</p>
-                {(record.watcherConsecutiveFailures ?? 0) > 0 && (
-                  <p>Recent failures: {record.watcherConsecutiveFailures}</p>
-                )}
-                {record.watcherLastError && (
-                  <p>
-                    Last watcher issue: {record.watcherLastError}
-                    {record.watcherUpdatedAtMs
-                      ? ` (${formatShortLocalTime(record.watcherUpdatedAtMs)})`
-                      : ""}
-                  </p>
-                )}
+                <ConnectionHealthSummary record={record} />
                 <div className="connection-actions">
                   <button type="button" onClick={() => startOauth(record.provider)}>
                     {record.status === "connected" ? "Reconnect" : "Connect"}
