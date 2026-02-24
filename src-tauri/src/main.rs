@@ -1,4 +1,5 @@
 mod db;
+mod diagnostics;
 mod email_connections;
 mod inbox_watcher;
 mod learning;
@@ -259,6 +260,24 @@ fn list_pending_clarifications(
 ) -> Result<Vec<ClarificationRecord>, String> {
     let connection = open_connection(&state)?;
     RunnerEngine::list_pending_clarifications(&connection).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_run_diagnostics(
+    state: tauri::State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<diagnostics::RunDiagnosticRecord>, String> {
+    let connection = open_connection(&state)?;
+    diagnostics::list_run_diagnostics(&connection, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn apply_intervention(
+    state: tauri::State<AppState>,
+    input: diagnostics::ApplyInterventionInput,
+) -> Result<diagnostics::ApplyInterventionResult, String> {
+    let mut connection = open_connection(&state)?;
+    diagnostics::apply_intervention(&mut connection, input)
 }
 
 #[tauri::command]
@@ -1152,6 +1171,8 @@ fn main() {
             reject_run_approval,
             list_pending_approvals,
             list_pending_clarifications,
+            list_run_diagnostics,
+            apply_intervention,
             submit_clarification_answer,
             get_run,
             get_terminal_receipt,
