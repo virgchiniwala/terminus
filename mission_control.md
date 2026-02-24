@@ -3,7 +3,7 @@ Last updated: 2026-02-24
 
 ## Current State
 - Mode: Day
-- Branch: `codex/pr26-watcher-health-ux`
+- Branch: `codex/pr27-frontend-test-foundation`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -37,25 +37,27 @@ Last updated: 2026-02-24
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR26 — Watcher health UX (provider backoff/error visibility)
+### PR27 — Frontend test foundation (Vitest + RTL)
 Owner: Friday + Loki
 Status: In progress
 Scope:
-- surface provider watcher health in Connections UI from `inbox_watcher_state`
-- show per-provider backoff timing, recent failure count, and last watcher error (sanitized)
-- keep calm copy (no stack traces / harness jargon)
+- add Vitest + React Testing Library test foundation
+- extract fragile UI normalization/debounce/status logic into testable helpers
+- cover normalization, polling error messaging, debounce guards, and connection health rendering
+- add `npm test` to CI
 Acceptance:
-- user can see why Gmail/Microsoft watcher is delayed or failing without opening logs
-- rate-limit/backoff state is legible in the UI
+- frontend test runner passes locally and in CI
+- high-risk UI logic has deterministic coverage (normalization + debounce + run-start guard)
+- no behavior regressions in build/lint
 Verification:
-- `cd src-tauri && cargo test`
+- `npm test`
+- `npm run lint`
 - `npm run build`
-- Connect provider, trigger watcher failure/backoff path, refresh Home -> Connections card shows retry timing/failure count
 
 ## Next
-1. Frontend test foundation (Vitest + RTL) for polling/debounce/normalization/run-start guards
-2. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
-3. Voice object + rule extraction approval flow (P0.11/P0.12)
+1. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
+2. Voice object + rule extraction approval flow (P0.11/P0.12)
+3. Watcher health UI follow-up: provider-level reconnect/backoff details in a dedicated status surface (beyond connection cards)
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
