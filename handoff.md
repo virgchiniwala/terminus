@@ -150,6 +150,22 @@ Last updated: 2026-02-24
     - no child in `needs_approval` / `needs_clarification` / `blocked`
     - aggregation summary present before `succeeded`
   - minimal Home Missions panel added (list + detail + tick + demo mission create button)
+- Context + Memory Provenance UX (Iteration 3 read-only MVP):
+  - new backend module: `src-tauri/src/context_receipt.rs`
+  - Tauri command: `get_context_receipt(run_id)` returns read-only context provenance for a run:
+    - source artifacts (metadata only)
+    - memory titles + matched memory cards
+    - policy constraints / send policy snapshot
+    - runtime profile overlay
+    - redaction flags + rationale codes + key signals
+    - provider call metadata
+  - Tauri commands for memory provenance:
+    - `list_memory_cards_for_autopilot`
+    - `suppress_memory_card`
+    - `unsuppress_memory_card`
+  - `memory_cards.suppressed` column added (migration-safe) and memory context injection now excludes suppressed cards
+  - Home Missions panel now includes a read-only Context Receipt inspector for child runs + memory-card suppress/unsuppress controls
+  - `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` updated to mark Mission Orchestration MVP shipped and Context/Memory Provenance as next slice
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -201,6 +217,12 @@ Last updated: 2026-02-24
 5. Watcher health payload check:
    - `list_email_connections()`
    - confirm each provider row includes watcher fields and non-zero `watcher_consecutive_failures` / future `watcher_backoff_until_ms` after simulated rate-limit failures
+6. Context receipt check (mission child run):
+   - create/start/tick a `daily_brief_multi_source` mission until child runs have artifacts
+   - `get_context_receipt({ runId })`
+   - confirm response includes `sources`, `memoryTitlesUsed`, `policyConstraints`, `runtimeProfileOverlay`, `redactionFlags`
+   - `list_memory_cards_for_autopilot({ autopilotId })` then `suppress_memory_card(...)`
+   - re-run a Daily Brief step and confirm suppressed card is not injected (`memory_usage` titles omit it)
 
 ## Operational Truths
 - Local-first runtime

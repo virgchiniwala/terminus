@@ -18,7 +18,7 @@ Terminus already implements many strong agentic/runtime best practices (bounded 
 We implemented the first major slice:
 - **Supervisor Loop MVP** (run diagnostics + allowlisted interventions + Home "Needs Attention" panel)
 
-Mission orchestration and context/memory provenance remain planned, not implemented.
+Mission orchestration MVP (Iteration 2) is now implemented. Context/memory provenance UX remains the next planned slice.
 
 ## Sources That Informed the Plan (Conceptually)
 - OpenClaw/Krause-style orchestration patterns (context partitioning, deterministic monitoring, completion contracts, resource-aware concurrency)
@@ -125,15 +125,28 @@ Note:
 
 ## What Is NOT Implemented Yet (from the plan)
 ### Mission Orchestration (Workstream B)
-- No `missions` / `mission_runs` / `mission_events` tables yet
-- No mission commands (`create_mission_draft`, `start_mission`, etc.)
-- No mission templates or completion contracts yet
-- No mission UI surface yet
+- Implemented MVP slice:
+  - `missions` / `mission_runs` / `mission_events` tables
+  - mission commands (`create_mission_draft`, `start_mission`, `get_mission`, `list_missions`, `run_mission_tick`)
+  - mission UI surface (list/detail panel in Home)
+  - `daily_brief_multi_source` template with completion contract
+- Not implemented yet:
+  - additional mission templates (`website_monitor_batch`, `inbox_triage_batch`)
+  - broader resource governance/concurrency controls UI
 
 ### Context + Memory Provenance (Workstream C)
 - No `Context Receipt` read API/UI yet
 - No memory provenance/suppression UI yet
 - No notification readiness gate config surfaced yet
+
+## Workstream B Status Update (Post-PR30)
+Mission Orchestration MVP has now shipped as a follow-on slice:
+- backend module `src-tauri/src/missions.rs`
+- mission tables in `src-tauri/src/db.rs`
+- mission Tauri commands in `src-tauri/src/main.rs`
+- mission UI/types in `src/App.tsx` and `src/types.ts`
+
+This makes **Context + Memory Provenance UX (Workstream C / Iteration 3)** the next recommended step.
 
 ## Current Project State (from latest PR28 worktree docs)
 Source inspected:

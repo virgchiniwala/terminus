@@ -17,7 +17,9 @@ import type {
   RunnerControlRecord,
   AutopilotSendPolicyRecord,
   ClarificationRecord,
+  ContextReceipt,
   IntentDraftKind,
+  MemoryCardRecord,
 } from "./types";
 import {
   canStartDraftRun,
@@ -122,6 +124,11 @@ export function App() {
   const [selectedMission, setSelectedMission] = useState<MissionDetail | null>(null);
   const [missionsMessage, setMissionsMessage] = useState<string | null>(null);
   const [missionActionLoading, setMissionActionLoading] = useState(false);
+  const [selectedMissionChildRunId, setSelectedMissionChildRunId] = useState<string | null>(null);
+  const [selectedMissionContextReceipt, setSelectedMissionContextReceipt] = useState<ContextReceipt | null>(null);
+  const [selectedMissionMemoryCards, setSelectedMissionMemoryCards] = useState<MemoryCardRecord[]>([]);
+  const [contextReceiptLoading, setContextReceiptLoading] = useState(false);
+  const [contextReceiptMessage, setContextReceiptMessage] = useState<string | null>(null);
   const runnerControlSaveTimerRef = useRef<number | null>(null);
   const sendPolicySaveTimerRef = useRef<number | null>(null);
   const intentOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -254,6 +261,122 @@ export function App() {
     },
   }), [normalizeMissionRecord]);
 
+  const normalizeMemoryCard = useCallback((row: any): MemoryCardRecord => ({
+    cardId: row.cardId ?? row.card_id,
+    autopilotId: row.autopilotId ?? row.autopilot_id,
+    cardType: row.cardType ?? row.card_type ?? "unknown",
+    title: row.title ?? "",
+    confidence: row.confidence ?? 0,
+    createdFromRunId: row.createdFromRunId ?? row.created_from_run_id ?? null,
+    updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? Date.now(),
+    version: row.version ?? 1,
+    suppressed: Boolean(row.suppressed ?? false),
+  }), []);
+
+  const normalizeContextReceipt = useCallback((raw: any): ContextReceipt => ({
+    runId: raw.runId ?? raw.run_id,
+    autopilotId: raw.autopilotId ?? raw.autopilot_id,
+    recipe: raw.recipe ?? "unknown",
+    providerKind: raw.providerKind ?? raw.provider_kind ?? "unknown",
+    providerTier: raw.providerTier ?? raw.provider_tier ?? "unknown",
+    runState: raw.runState ?? raw.run_state ?? "unknown",
+    terminalReceiptFound: raw.terminalReceiptFound ?? raw.terminal_receipt_found ?? false,
+    sources: (raw.sources ?? []).map((s: any) => ({
+      sourceKind: s.sourceKind ?? s.source_kind ?? "unknown",
+      sourceId: s.sourceId ?? s.source_id ?? null,
+      url: s.url ?? null,
+      status: s.status ?? "unknown",
+      fetchedAtMs: s.fetchedAtMs ?? s.fetched_at_ms ?? null,
+      contentHash: s.contentHash ?? s.content_hash ?? null,
+      excerptChars: s.excerptChars ?? s.excerpt_chars ?? null,
+      changed: s.changed ?? null,
+      diffScore: s.diffScore ?? s.diff_score ?? null,
+      error: s.error ?? null,
+    })),
+    memoryTitlesUsed: raw.memoryTitlesUsed ?? raw.memory_titles_used ?? [],
+    memoryCardsUsed: (raw.memoryCardsUsed ?? raw.memory_cards_used ?? []).map(normalizeMemoryCard),
+    policyConstraints: {
+      denyByDefaultPrimitives:
+        raw.policyConstraints?.denyByDefaultPrimitives ??
+        raw.policy_constraints?.deny_by_default_primitives ??
+        true,
+      allowedPrimitives:
+        raw.policyConstraints?.allowedPrimitives ??
+        raw.policy_constraints?.allowed_primitives ??
+        [],
+      webAllowedDomains:
+        raw.policyConstraints?.webAllowedDomains ??
+        raw.policy_constraints?.web_allowed_domains ??
+        [],
+      approvalRequiredSteps:
+        raw.policyConstraints?.approvalRequiredSteps ??
+        raw.policy_constraints?.approval_required_steps ??
+        [],
+      sendPolicy: {
+        allowSending:
+          raw.policyConstraints?.sendPolicy?.allowSending ??
+          raw.policy_constraints?.send_policy?.allow_sending ??
+          false,
+        recipientAllowlistCount:
+          raw.policyConstraints?.sendPolicy?.recipientAllowlistCount ??
+          raw.policy_constraints?.send_policy?.recipient_allowlist_count ??
+          0,
+        maxSendsPerDay:
+          raw.policyConstraints?.sendPolicy?.maxSendsPerDay ??
+          raw.policy_constraints?.send_policy?.max_sends_per_day ??
+          0,
+        quietHoursStartLocal:
+          raw.policyConstraints?.sendPolicy?.quietHoursStartLocal ??
+          raw.policy_constraints?.send_policy?.quiet_hours_start_local ??
+          18,
+        quietHoursEndLocal:
+          raw.policyConstraints?.sendPolicy?.quietHoursEndLocal ??
+          raw.policy_constraints?.send_policy?.quiet_hours_end_local ??
+          9,
+        allowOutsideQuietHours:
+          raw.policyConstraints?.sendPolicy?.allowOutsideQuietHours ??
+          raw.policy_constraints?.send_policy?.allow_outside_quiet_hours ??
+          false,
+      },
+    },
+    runtimeProfileOverlay: {
+      learningEnabled:
+        raw.runtimeProfileOverlay?.learningEnabled ??
+        raw.runtime_profile_overlay?.learning_enabled ??
+        true,
+      mode: raw.runtimeProfileOverlay?.mode ?? raw.runtime_profile_overlay?.mode ?? "balanced",
+      suppressUntilMs:
+        raw.runtimeProfileOverlay?.suppressUntilMs ??
+        raw.runtime_profile_overlay?.suppress_until_ms ??
+        null,
+      minDiffScoreToNotify:
+        raw.runtimeProfileOverlay?.minDiffScoreToNotify ??
+        raw.runtime_profile_overlay?.min_diff_score_to_notify ??
+        0.2,
+      maxSources:
+        raw.runtimeProfileOverlay?.maxSources ?? raw.runtime_profile_overlay?.max_sources ?? 5,
+      maxBullets:
+        raw.runtimeProfileOverlay?.maxBullets ?? raw.runtime_profile_overlay?.max_bullets ?? 6,
+      replyLengthHint:
+        raw.runtimeProfileOverlay?.replyLengthHint ??
+        raw.runtime_profile_overlay?.reply_length_hint ??
+        "medium",
+    },
+    redactionFlags: raw.redactionFlags ?? raw.redaction_flags ?? [],
+    rationaleCodes: raw.rationaleCodes ?? raw.rationale_codes ?? [],
+    keySignals: raw.keySignals ?? raw.key_signals ?? [],
+    providerCalls: (raw.providerCalls ?? raw.provider_calls ?? []).map((p: any) => ({
+      provider: p.provider ?? "unknown",
+      model: p.model ?? "unknown",
+      requestKind: p.requestKind ?? p.request_kind ?? "unknown",
+      inputChars: p.inputChars ?? p.input_chars ?? null,
+      outputChars: p.outputChars ?? p.output_chars ?? null,
+      latencyMs: p.latencyMs ?? p.latency_ms ?? null,
+      costCentsEst: p.costCentsEst ?? p.cost_cents_est ?? null,
+      createdAtMs: p.createdAtMs ?? p.created_at_ms ?? Date.now(),
+    })),
+  }), [normalizeMemoryCard]);
+
   const loadMissions = useCallback(() => {
     invoke<MissionRecord[]>("list_missions", { limit: 10 })
       .then((rows: any[]) => {
@@ -275,6 +398,53 @@ export function App() {
         setMissionsMessage(typeof err === "string" ? err : "Could not load mission details.");
       });
   }, [normalizeMissionDetail]);
+
+  const loadContextReceiptForRun = useCallback((runId: string) => {
+    setContextReceiptLoading(true);
+    setContextReceiptMessage(null);
+    setSelectedMissionChildRunId(runId);
+    invoke<ContextReceipt>("get_context_receipt", { runId })
+      .then((receipt: any) => {
+        const normalizedReceipt = normalizeContextReceipt(receipt);
+        setSelectedMissionContextReceipt(normalizedReceipt);
+        return invoke<MemoryCardRecord[]>("list_memory_cards_for_autopilot", {
+          autopilotId: normalizedReceipt.autopilotId,
+        });
+      })
+      .then((cards: any[]) => {
+        setSelectedMissionMemoryCards((cards ?? []).map(normalizeMemoryCard));
+      })
+      .catch((err) => {
+        console.error("Failed to load context receipt:", err);
+        setContextReceiptMessage(typeof err === "string" ? err : "Could not load context receipt.");
+      })
+      .finally(() => setContextReceiptLoading(false));
+  }, [normalizeContextReceipt, normalizeMemoryCard]);
+
+  const toggleMemoryCardSuppression = useCallback((autopilotId: string, cardId: string, nextSuppressed: boolean) => {
+    const command = nextSuppressed ? "suppress_memory_card" : "unsuppress_memory_card";
+    invoke<MemoryCardRecord>(command, { autopilotId, cardId })
+      .then((updated: any) => {
+        const normalized = normalizeMemoryCard(updated);
+        setSelectedMissionMemoryCards((prev) =>
+          prev.map((item) => (item.cardId === normalized.cardId ? normalized : item)),
+        );
+        setSelectedMissionContextReceipt((prev) =>
+          prev
+            ? {
+                ...prev,
+                memoryCardsUsed: prev.memoryCardsUsed.map((item) =>
+                  item.cardId === normalized.cardId ? normalized : item,
+                ),
+              }
+            : prev,
+        );
+      })
+      .catch((err) => {
+        console.error("Failed to update memory card suppression:", err);
+        setContextReceiptMessage(typeof err === "string" ? err : "Could not update memory card.");
+      });
+  }, [normalizeMemoryCard]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -464,6 +634,9 @@ export function App() {
   useEffect(() => {
     if (!selectedMissionId) {
       setSelectedMission(null);
+      setSelectedMissionChildRunId(null);
+      setSelectedMissionContextReceipt(null);
+      setSelectedMissionMemoryCards([]);
       return;
     }
     loadMissionDetail(selectedMissionId);
@@ -972,6 +1145,18 @@ export function App() {
                         </p>
                         {child.sourceLabel && <p>{child.sourceLabel}</p>}
                         {child.runFailureReason && <p>Reason: {child.runFailureReason}</p>}
+                        <div className="diagnostic-actions">
+                          <button
+                            type="button"
+                            className="clarification-chip"
+                            onClick={() => loadContextReceiptForRun(child.runId)}
+                            disabled={contextReceiptLoading}
+                          >
+                            {contextReceiptLoading && selectedMissionChildRunId === child.runId
+                              ? "Loading context..."
+                              : "View Context"}
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -996,6 +1181,124 @@ export function App() {
                       return null;
                     }
                   })()}
+                </>
+              )}
+            </article>
+
+            <article className="connection-card">
+              <h3>Context Receipt (Read-only MVP)</h3>
+              {!selectedMissionContextReceipt ? (
+                <p>Select a child run and click “View Context”.</p>
+              ) : (
+                <>
+                  <p className="clarification-meta">
+                    Run <code>{selectedMissionContextReceipt.runId}</code> · {selectedMissionContextReceipt.recipe} ·{" "}
+                    <code>{selectedMissionContextReceipt.runState}</code>
+                  </p>
+                  {contextReceiptMessage && <p className="connection-message">{contextReceiptMessage}</p>}
+                  <p>
+                    Provider: {selectedMissionContextReceipt.providerKind} ({selectedMissionContextReceipt.providerTier})
+                    {" · "}
+                    Receipt: {selectedMissionContextReceipt.terminalReceiptFound ? "present" : "not yet terminal"}
+                  </p>
+                  <p>
+                    Redaction flags:{" "}
+                    {selectedMissionContextReceipt.redactionFlags.length > 0
+                      ? selectedMissionContextReceipt.redactionFlags.join(", ")
+                      : "none"}
+                  </p>
+
+                  <div className="runner-suppressed-list">
+                    <p><strong>Sources</strong></p>
+                    {selectedMissionContextReceipt.sources.length === 0 ? (
+                      <p>No source artifacts yet.</p>
+                    ) : (
+                      <ul>
+                        {selectedMissionContextReceipt.sources.slice(0, 8).map((source, idx) => (
+                          <li key={`${source.sourceKind}_${source.sourceId ?? source.url ?? idx}`}>
+                            {source.sourceKind}
+                            {source.url ? ` · ${source.url}` : ""}
+                            {source.status ? ` · ${source.status}` : ""}
+                            {typeof source.excerptChars === "number" ? ` · ${source.excerptChars} chars` : ""}
+                            {typeof source.diffScore === "number" ? ` · diff ${source.diffScore.toFixed(2)}` : ""}
+                            {source.error ? ` · ${source.error}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+
+                  <div className="runner-suppressed-list">
+                    <p><strong>Memory + Profile</strong></p>
+                    <p>
+                      Titles used:{" "}
+                      {selectedMissionContextReceipt.memoryTitlesUsed.length > 0
+                        ? selectedMissionContextReceipt.memoryTitlesUsed.join(", ")
+                        : "none"}
+                    </p>
+                    <p>
+                      Learning mode: {selectedMissionContextReceipt.runtimeProfileOverlay.mode} · enabled=
+                      {selectedMissionContextReceipt.runtimeProfileOverlay.learningEnabled ? "yes" : "no"} ·
+                      maxSources={selectedMissionContextReceipt.runtimeProfileOverlay.maxSources} ·
+                      maxBullets={selectedMissionContextReceipt.runtimeProfileOverlay.maxBullets}
+                    </p>
+                    <div className="clarification-list">
+                      {selectedMissionMemoryCards.slice(0, 8).map((card) => (
+                        <div key={card.cardId} className="clarification-card">
+                          <p className="clarification-meta">
+                            {card.title} · <code>{card.cardType}</code> · {card.suppressed ? "suppressed" : "active"}
+                          </p>
+                          <p>Confidence: {card.confidence}</p>
+                          <button
+                            type="button"
+                            className="clarification-chip"
+                            onClick={() =>
+                              toggleMemoryCardSuppression(card.autopilotId, card.cardId, !card.suppressed)
+                            }
+                          >
+                            {card.suppressed ? "Unsuppress" : "Suppress"}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="runner-suppressed-list">
+                    <p><strong>Policy + Rationale</strong></p>
+                    <p>
+                      Deny-by-default primitives:{" "}
+                      {selectedMissionContextReceipt.policyConstraints.denyByDefaultPrimitives ? "yes" : "no"}
+                    </p>
+                    <p>
+                      Allowed domains:{" "}
+                      {selectedMissionContextReceipt.policyConstraints.webAllowedDomains.length > 0
+                        ? selectedMissionContextReceipt.policyConstraints.webAllowedDomains.join(", ")
+                        : "none"}
+                    </p>
+                    <p>
+                      Approval-required steps:{" "}
+                      {selectedMissionContextReceipt.policyConstraints.approvalRequiredSteps.length > 0
+                        ? selectedMissionContextReceipt.policyConstraints.approvalRequiredSteps.join(", ")
+                        : "none"}
+                    </p>
+                    <p>
+                      Send policy: allow={selectedMissionContextReceipt.policyConstraints.sendPolicy.allowSending ? "yes" : "no"}
+                      {" · "}allowlist={selectedMissionContextReceipt.policyConstraints.sendPolicy.recipientAllowlistCount}
+                      {" · "}max/day={selectedMissionContextReceipt.policyConstraints.sendPolicy.maxSendsPerDay}
+                    </p>
+                    <p>
+                      Rationale codes:{" "}
+                      {selectedMissionContextReceipt.rationaleCodes.length > 0
+                        ? selectedMissionContextReceipt.rationaleCodes.join(", ")
+                        : "none"}
+                    </p>
+                    <p>
+                      Key signals:{" "}
+                      {selectedMissionContextReceipt.keySignals.length > 0
+                        ? selectedMissionContextReceipt.keySignals.join(", ")
+                        : "none"}
+                    </p>
+                  </div>
                 </>
               )}
             </article>

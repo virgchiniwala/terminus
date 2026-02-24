@@ -693,6 +693,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "adaptation_hash",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    ensure_column(
+        connection,
+        "memory_cards",
+        "suppressed",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
 
     // Best-effort backfill from legacy float columns for existing vaults.
     connection

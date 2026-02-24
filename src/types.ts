@@ -224,6 +224,80 @@ export interface MissionTickResult {
   childRunsTicked: number;
 }
 
+export interface MemoryCardRecord {
+  cardId: string;
+  autopilotId: string;
+  cardType: string;
+  title: string;
+  confidence: number;
+  createdFromRunId?: string | null;
+  updatedAtMs: number;
+  version: number;
+  suppressed: boolean;
+}
+
+export interface ContextSourceRecord {
+  sourceKind: string;
+  sourceId?: string | null;
+  url?: string | null;
+  status: string;
+  fetchedAtMs?: number | null;
+  contentHash?: string | null;
+  excerptChars?: number | null;
+  changed?: boolean | null;
+  diffScore?: number | null;
+  error?: string | null;
+}
+
+export interface ContextReceipt {
+  runId: string;
+  autopilotId: string;
+  recipe: string;
+  providerKind: string;
+  providerTier: string;
+  runState: string;
+  terminalReceiptFound: boolean;
+  sources: ContextSourceRecord[];
+  memoryTitlesUsed: string[];
+  memoryCardsUsed: MemoryCardRecord[];
+  policyConstraints: {
+    denyByDefaultPrimitives: boolean;
+    allowedPrimitives: string[];
+    webAllowedDomains: string[];
+    approvalRequiredSteps: string[];
+    sendPolicy: {
+      allowSending: boolean;
+      recipientAllowlistCount: number;
+      maxSendsPerDay: number;
+      quietHoursStartLocal: number;
+      quietHoursEndLocal: number;
+      allowOutsideQuietHours: boolean;
+    };
+  };
+  runtimeProfileOverlay: {
+    learningEnabled: boolean;
+    mode: string;
+    suppressUntilMs?: number | null;
+    minDiffScoreToNotify: number;
+    maxSources: number;
+    maxBullets: number;
+    replyLengthHint: string;
+  };
+  redactionFlags: string[];
+  rationaleCodes: string[];
+  keySignals: string[];
+  providerCalls: Array<{
+    provider: string;
+    model: string;
+    requestKind: string;
+    inputChars?: number | null;
+    outputChars?: number | null;
+    latencyMs?: number | null;
+    costCentsEst?: number | null;
+    createdAtMs: number;
+  }>;
+}
+
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 
 export type RiskTier = "low" | "medium" | "high";
