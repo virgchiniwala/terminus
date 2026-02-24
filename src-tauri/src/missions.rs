@@ -230,9 +230,13 @@ pub fn start_mission(
 ) -> Result<MissionDetail, String> {
     validate_mission_draft(&input.draft)?;
     let mission_id = make_id("mission");
-    let mission_key = input
-        .idempotency_key
-        .unwrap_or_else(|| format!("mission:{}:{}", input.draft.template_kind.as_str(), mission_id));
+    let mission_key = input.idempotency_key.unwrap_or_else(|| {
+        format!(
+            "mission:{}:{}",
+            input.draft.template_kind.as_str(),
+            mission_id
+        )
+    });
     let now = now_ms();
     let provider_id = parse_provider(&input.draft.provider)?;
     let config_json = serde_json::to_string(&input.draft).map_err(|e| e.to_string())?;
@@ -270,8 +274,14 @@ pub fn start_mission(
         let child_autopilot_id = format!("{}_{}", mission_id, group.child_key);
         let child_idempotency_key = format!("mission:{}:{}", mission_id, group.child_key);
         let plan = build_daily_brief_child_plan(&input.draft.intent, provider_id, &group.sources);
-        let run = RunnerEngine::start_run(connection, &child_autopilot_id, plan, &child_idempotency_key, 2)
-            .map_err(|e| e.to_string())?;
+        let run = RunnerEngine::start_run(
+            connection,
+            &child_autopilot_id,
+            plan,
+            &child_idempotency_key,
+            2,
+        )
+        .map_err(|e| e.to_string())?;
 
         connection
             .execute(
@@ -417,7 +427,10 @@ pub fn get_mission(connection: &Connection, mission_id: &str) -> Result<MissionD
     })
 }
 
-pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result<MissionTickResult, String> {
+pub fn run_mission_tick(
+    connection: &mut Connection,
+    mission_id: &str,
+) -> Result<MissionTickResult, String> {
     let mission = get_mission(connection, mission_id)?;
     let mut child_runs_ticked = 0usize;
 
@@ -425,7 +438,10 @@ pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result
         mission.mission.status,
         MissionStatus::Succeeded | MissionStatus::Failed | MissionStatus::Blocked
     ) {
-        return Ok(MissionTickResult { mission, child_runs_ticked });
+        return Ok(MissionTickResult {
+            mission,
+            child_runs_ticked,
+        });
     }
 
     for child in &mission.child_runs {
@@ -435,7 +451,8 @@ pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result
         let run_state = RunState::from_str(state_text).map_err(|e| e.to_string())?;
         match run_state {
             RunState::Ready | RunState::Running | RunState::Retrying => {
-                let _ = RunnerEngine::run_tick(connection, &child.run_id).map_err(|e| e.to_string())?;
+                let _ =
+                    RunnerEngine::run_tick(connection, &child.run_id).map_err(|e| e.to_string())?;
                 child_runs_ticked += 1;
             }
             RunState::NeedsApproval | RunState::NeedsClarification | RunState::Blocked => {}
@@ -456,7 +473,12 @@ pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result
                     Some("needs_approval" | "needs_clarification" | "blocked")
                 )
             })
-            .map(|c| format!("Child {} requires attention before aggregation.", c.child_key))
+            .map(|c| {
+                format!(
+                    "Child {} requires attention before aggregation.",
+                    c.child_key
+                )
+            })
             .unwrap_or_else(|| "A child run requires attention before aggregation.".to_string());
         update_mission_status(
             connection,
@@ -468,7 +490,10 @@ pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result
             json!({}),
         )?;
         let mission = get_mission(connection, mission_id)?;
-        return Ok(MissionTickResult { mission, child_runs_ticked });
+        return Ok(MissionTickResult {
+            mission,
+            child_runs_ticked,
+        });
     }
 
     if !contract.all_children_terminal {
@@ -482,24 +507,35 @@ pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result
             json!({"childRunsTicked": child_runs_ticked}),
         )?;
         let mission = get_mission(connection, mission_id)?;
-        return Ok(MissionTickResult { mission, child_runs_ticked });
+        return Ok(MissionTickResult {
+            mission,
+            child_runs_ticked,
+        });
     }
 
     let any_failed = refreshed.child_runs.iter().any(|c| {
-        matches!(c.run_state.as_deref(), Some("failed" | "canceled" | "blocked"))
+        matches!(
+            c.run_state.as_deref(),
+            Some("failed" | "canceled" | "blocked")
+        )
     });
     if any_failed {
         update_mission_status(
             connection,
             mission_id,
             MissionStatus::Failed,
-            Some("One or more child runs failed. Review child receipts and retry the mission later."),
+            Some(
+                "One or more child runs failed. Review child receipts and retry the mission later.",
+            ),
             None,
             "Mission failed because at least one child run failed.",
             json!({}),
         )?;
         let mission = get_mission(connection, mission_id)?;
-        return Ok(MissionTickResult { mission, child_runs_ticked });
+        return Ok(MissionTickResult {
+            mission,
+            child_runs_ticked,
+        });
     }
 
     update_mission_status(
@@ -525,7 +561,10 @@ pub fn run_mission_tick(connection: &mut Connection, mission_id: &str) -> Result
     )?;
 
     let mission = get_mission(connection, mission_id)?;
-    Ok(MissionTickResult { mission, child_runs_ticked })
+    Ok(MissionTickResult {
+        mission,
+        child_runs_ticked,
+    })
 }
 
 fn map_mission_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRecord> {
@@ -533,10 +572,16 @@ fn map_mission_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRecord> {
     let status: String = row.get(2)?;
     Ok(MissionRecord {
         id: row.get(0)?,
-        template_kind: MissionTemplateKind::parse(&template_kind)
-            .map_err(|_| rusqlite::Error::InvalidColumnType(1, "template_kind".to_string(), rusqlite::types::Type::Text))?,
-        status: MissionStatus::parse(&status)
-            .map_err(|_| rusqlite::Error::InvalidColumnType(2, "status".to_string(), rusqlite::types::Type::Text))?,
+        template_kind: MissionTemplateKind::parse(&template_kind).map_err(|_| {
+            rusqlite::Error::InvalidColumnType(
+                1,
+                "template_kind".to_string(),
+                rusqlite::types::Type::Text,
+            )
+        })?,
+        status: MissionStatus::parse(&status).map_err(|_| {
+            rusqlite::Error::InvalidColumnType(2, "status".to_string(), rusqlite::types::Type::Text)
+        })?,
         provider: row.get(3)?,
         failure_reason: row.get(4)?,
         summary_json: row.get(5)?,
@@ -547,7 +592,10 @@ fn map_mission_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRecord> {
     })
 }
 
-fn build_contract_status(mission: &MissionRecord, child_runs: &[MissionRunLink]) -> MissionContractStatus {
+fn build_contract_status(
+    mission: &MissionRecord,
+    child_runs: &[MissionRunLink],
+) -> MissionContractStatus {
     let all_children_terminal = !child_runs.is_empty()
         && child_runs.iter().all(|c| {
             matches!(
@@ -561,12 +609,17 @@ fn build_contract_status(mission: &MissionRecord, child_runs: &[MissionRunLink])
             Some("needs_approval" | "needs_clarification" | "blocked")
         )
     });
-    let aggregation_summary_exists = mission.summary_json.as_ref().is_some_and(|s| !s.trim().is_empty());
+    let aggregation_summary_exists = mission
+        .summary_json
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty());
     MissionContractStatus {
         all_children_terminal,
         has_blocked_or_pending_child,
         aggregation_summary_exists,
-        ready_to_complete: all_children_terminal && !has_blocked_or_pending_child && aggregation_summary_exists,
+        ready_to_complete: all_children_terminal
+            && !has_blocked_or_pending_child
+            && aggregation_summary_exists,
     }
 }
 
@@ -594,7 +647,11 @@ fn parse_provider(value: &str) -> Result<ProviderId, String> {
     }
 }
 
-fn build_daily_brief_child_plan(intent: &str, provider: ProviderId, sources: &[String]) -> AutopilotPlan {
+fn build_daily_brief_child_plan(
+    intent: &str,
+    provider: ProviderId,
+    sources: &[String],
+) -> AutopilotPlan {
     let mut plan = AutopilotPlan::from_intent(
         RecipeKind::DailyBrief,
         format!("{intent} (mission child)"),
@@ -605,7 +662,12 @@ fn build_daily_brief_child_plan(intent: &str, provider: ProviderId, sources: &[S
     plan.steps = plan
         .steps
         .into_iter()
-        .filter(|step| matches!(step.primitive, PrimitiveId::ReadSources | PrimitiveId::AggregateDailySummary))
+        .filter(|step| {
+            matches!(
+                step.primitive,
+                PrimitiveId::ReadSources | PrimitiveId::AggregateDailySummary
+            )
+        })
         .map(strip_step_approval)
         .collect::<Vec<PlanStep>>();
     if plan.steps.is_empty() {
@@ -669,7 +731,10 @@ fn build_daily_brief_multi_source_summary(
                 .get("sourceLabel")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Source");
-            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("Summary");
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Summary");
             format!("{source}: {title}")
         })
         .collect::<Vec<String>>();
@@ -701,7 +766,13 @@ fn update_mission_status(
                  summary_json = COALESCE(?3, summary_json),
                  updated_at_ms = ?4
              WHERE id = ?5",
-            params![status.as_str(), failure_reason, summary_json, now, mission_id],
+            params![
+                status.as_str(),
+                failure_reason,
+                summary_json,
+                now,
+                mission_id
+            ],
         )
         .map_err(|e| format!("Failed to update mission state: {e}"))?;
     insert_mission_event(
@@ -717,7 +788,10 @@ fn update_mission_status(
     Ok(())
 }
 
-fn refresh_mission_run_status_snapshots(connection: &Connection, mission_id: &str) -> Result<(), String> {
+fn refresh_mission_run_status_snapshots(
+    connection: &Connection,
+    mission_id: &str,
+) -> Result<(), String> {
     let mut stmt = connection
         .prepare("SELECT run_id FROM mission_runs WHERE mission_id = ?1")
         .map_err(|e| format!("Failed to prepare mission run snapshot refresh: {e}"))?;
@@ -855,7 +929,11 @@ mod tests {
         .expect("start");
         assert_eq!(detail.child_runs.len(), 2);
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM mission_runs WHERE mission_id = ?1", params![detail.mission.id], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM mission_runs WHERE mission_id = ?1",
+                params![detail.mission.id],
+                |r| r.get(0),
+            )
             .expect("count");
         assert_eq!(count, 2);
         let unique_keys: i64 = conn
@@ -884,13 +962,19 @@ mod tests {
         let first = run_mission_tick(&mut conn, &started.mission.id).expect("tick1");
         assert!(matches!(
             first.mission.mission.status,
-            MissionStatus::WaitingChildren | MissionStatus::Running | MissionStatus::Aggregating | MissionStatus::Succeeded
+            MissionStatus::WaitingChildren
+                | MissionStatus::Running
+                | MissionStatus::Aggregating
+                | MissionStatus::Succeeded
         ));
 
         let second = run_mission_tick(&mut conn, &started.mission.id).expect("tick2");
         let final_tick = run_mission_tick(&mut conn, &started.mission.id).expect("tick3");
         let final_state = final_tick.mission.mission.status;
-        assert!(matches!(final_state, MissionStatus::Succeeded | MissionStatus::WaitingChildren | MissionStatus::Aggregating));
+        assert!(matches!(
+            final_state,
+            MissionStatus::Succeeded | MissionStatus::WaitingChildren | MissionStatus::Aggregating
+        ));
         let eventually = if matches!(final_state, MissionStatus::Succeeded) {
             final_tick
         } else if matches!(second.mission.mission.status, MissionStatus::Succeeded) {
