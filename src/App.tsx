@@ -14,6 +14,8 @@ import type {
   OAuthStartResponse,
   RecipeKind,
   RunDiagnosticRecord,
+  RuleCardRecord,
+  RuleProposalDraft,
   RunnerControlRecord,
   AutopilotSendPolicyRecord,
   ClarificationRecord,
@@ -114,6 +116,9 @@ export function App() {
   const [guideScopeId, setGuideScopeId] = useState("");
   const [guideInstruction, setGuideInstruction] = useState("");
   const [guideMessage, setGuideMessage] = useState<string | null>(null);
+  const [guideRuleProposal, setGuideRuleProposal] = useState<RuleProposalDraft | null>(null);
+  const [ruleCards, setRuleCards] = useState<RuleCardRecord[]>([]);
+  const [rulesMessage, setRulesMessage] = useState<string | null>(null);
   const [clarifications, setClarifications] = useState<ClarificationRecord[]>([]);
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
   const [clarificationsMessage, setClarificationsMessage] = useState<string | null>(null);
@@ -273,6 +278,36 @@ export function App() {
     suppressed: Boolean(row.suppressed ?? false),
   }), []);
 
+  const normalizeRuleCard = useCallback((row: any): RuleCardRecord => ({
+    id: row.id,
+    autopilotId: row.autopilotId ?? row.autopilot_id,
+    title: row.title ?? "",
+    ruleType: row.ruleType ?? row.rule_type ?? "unknown",
+    status: row.status ?? "unknown",
+    triggerJson: row.triggerJson ?? row.trigger_json ?? "{}",
+    effectJson: row.effectJson ?? row.effect_json ?? "{}",
+    sourceKind: row.sourceKind ?? row.source_kind ?? "guidance",
+    sourceRunId: row.sourceRunId ?? row.source_run_id ?? null,
+    version: row.version ?? 1,
+    createdAtMs: row.createdAtMs ?? row.created_at_ms ?? Date.now(),
+    updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? Date.now(),
+  }), []);
+
+  const normalizeRuleProposal = useCallback((row: any): RuleProposalDraft => ({
+    id: row.id,
+    autopilotId: row.autopilotId ?? row.autopilot_id,
+    title: row.title ?? "",
+    ruleType: row.ruleType ?? row.rule_type ?? "unknown",
+    scope: row.scope ?? "autopilot",
+    safetySummary: row.safetySummary ?? row.safety_summary ?? "",
+    previewImpact: row.previewImpact ?? row.preview_impact ?? "",
+    triggerJson: row.triggerJson ?? row.trigger_json ?? "{}",
+    effectJson: row.effectJson ?? row.effect_json ?? "{}",
+    sourceKind: row.sourceKind ?? row.source_kind ?? "guidance",
+    sourceRunId: row.sourceRunId ?? row.source_run_id ?? null,
+    status: row.status ?? "pending_approval",
+  }), []);
+
   const normalizeContextReceipt = useCallback((raw: any): ContextReceipt => ({
     runId: raw.runId ?? raw.run_id,
     autopilotId: raw.autopilotId ?? raw.autopilot_id,
@@ -295,6 +330,12 @@ export function App() {
     })),
     memoryTitlesUsed: raw.memoryTitlesUsed ?? raw.memory_titles_used ?? [],
     memoryCardsUsed: (raw.memoryCardsUsed ?? raw.memory_cards_used ?? []).map(normalizeMemoryCard),
+    appliedRules: (raw.appliedRules ?? raw.applied_rules ?? []).map((r: any) => ({
+      ruleId: r.ruleId ?? r.rule_id,
+      ruleTitle: r.ruleTitle ?? r.rule_title ?? "",
+      matchReasonCode: r.matchReasonCode ?? r.match_reason_code ?? "",
+      effectSummary: r.effectSummary ?? r.effect_summary ?? "applied",
+    })),
     policyConstraints: {
       denyByDefaultPrimitives:
         raw.policyConstraints?.denyByDefaultPrimitives ??
@@ -860,7 +901,8 @@ export function App() {
 
   const submitGuide = () => {
     setGuideMessage(null);
-    invoke<{ mode: string; message: string; proposedRule?: string | null }>("submit_guidance", {
+    setGuideRuleProposal(null);
+    invoke<{ mode: string; message: string; proposedRule?: string | null; proposedRulePreview?: unknown }>("submit_guidance", {
       input: {
         scopeType: guideScopeType,
         scopeId: guideScopeId,
@@ -868,16 +910,93 @@ export function App() {
       },
     })
       .then((payload: any) => {
+        const proposal = payload?.proposedRulePreview ?? payload?.proposed_rule_preview ?? null;
+        if (proposal) {
+          setGuideRuleProposal(normalizeRuleProposal(proposal));
+        }
         const msg = payload?.proposedRule
           ? `${payload.message} Proposed rule: ${payload.proposedRule}`
           : payload?.message ?? "Guidance saved.";
         setGuideMessage(msg);
+        if ((guideScopeType === "autopilot" || proposal) && guideScopeId.trim()) {
+          loadRuleCards(guideScopeType === "autopilot" ? guideScopeId.trim() : (proposal?.autopilotId ?? proposal?.autopilot_id ?? ""));
+        }
       })
       .catch((err) => {
         console.error("Failed to submit guidance:", err);
         setGuideMessage(typeof err === "string" ? err : "Could not save guidance.");
       });
   };
+
+  const loadRuleCards = useCallback((autopilotId: string) => {
+    const trimmed = autopilotId.trim();
+    if (!trimmed) {
+      setRuleCards([]);
+      return;
+    }
+    setRulesMessage(null);
+    invoke<RuleCardRecord[]>("list_rule_cards_for_autopilot", { autopilotId: trimmed })
+      .then((rows: any[]) => setRuleCards((rows ?? []).map(normalizeRuleCard)))
+      .catch((err) => {
+        console.error("Failed to load rule cards:", err);
+        setRulesMessage(typeof err === "string" ? err : "Could not load rules.");
+      });
+  }, [normalizeRuleCard]);
+
+  useEffect(() => {
+    if (guideScopeType === "autopilot" && guideScopeId.trim()) {
+      loadRuleCards(guideScopeId.trim());
+    } else if (guideScopeType !== "autopilot") {
+      setRuleCards([]);
+    }
+  }, [guideScopeType, guideScopeId, loadRuleCards]);
+
+  const approveGuideRuleProposal = useCallback((ruleId: string) => {
+    invoke<RuleCardRecord>("approve_rule_proposal", { ruleId })
+      .then((row: any) => {
+        const normalized = normalizeRuleCard(row);
+        setGuideRuleProposal(null);
+        setRuleCards((prev) => {
+          const filtered = prev.filter((r) => r.id !== normalized.id);
+          return [normalized, ...filtered];
+        });
+        setRulesMessage("Rule approved and now active.");
+      })
+      .catch((err) => {
+        console.error("Failed to approve rule proposal:", err);
+        setRulesMessage(typeof err === "string" ? err : "Could not approve rule.");
+      });
+  }, [normalizeRuleCard]);
+
+  const rejectGuideRuleProposal = useCallback((ruleId: string) => {
+    invoke<RuleCardRecord>("reject_rule_proposal", { ruleId })
+      .then((row: any) => {
+        const normalized = normalizeRuleCard(row);
+        setGuideRuleProposal(null);
+        setRuleCards((prev) => {
+          const filtered = prev.filter((r) => r.id !== normalized.id);
+          return [normalized, ...filtered];
+        });
+        setRulesMessage("Rule proposal rejected.");
+      })
+      .catch((err) => {
+        console.error("Failed to reject rule proposal:", err);
+        setRulesMessage(typeof err === "string" ? err : "Could not reject rule.");
+      });
+  }, [normalizeRuleCard]);
+
+  const toggleRuleCard = useCallback((rule: RuleCardRecord) => {
+    const command = rule.status === "active" ? "disable_rule_card" : "enable_rule_card";
+    invoke<RuleCardRecord>(command, { ruleId: rule.id })
+      .then((row: any) => {
+        const normalized = normalizeRuleCard(row);
+        setRuleCards((prev) => prev.map((r) => (r.id === normalized.id ? normalized : r)));
+      })
+      .catch((err) => {
+        console.error("Failed to toggle rule card:", err);
+        setRulesMessage(typeof err === "string" ? err : "Could not update rule.");
+      });
+  }, [normalizeRuleCard]);
 
   const clarificationOptions = (item: ClarificationRecord): string[] => {
     if (!item.optionsJson) {
@@ -1287,6 +1406,14 @@ export function App() {
                       {" · "}max/day={selectedMissionContextReceipt.policyConstraints.sendPolicy.maxSendsPerDay}
                     </p>
                     <p>
+                      Applied rules:{" "}
+                      {selectedMissionContextReceipt.appliedRules.length > 0
+                        ? selectedMissionContextReceipt.appliedRules
+                            .map((r) => `${r.ruleTitle} (${r.effectSummary})`)
+                            .join(", ")
+                        : "none"}
+                    </p>
+                    <p>
                       Rationale codes:{" "}
                       {selectedMissionContextReceipt.rationaleCodes.length > 0
                         ? selectedMissionContextReceipt.rationaleCodes.join(", ")
@@ -1442,6 +1569,14 @@ export function App() {
           setGuideInstruction={setGuideInstruction}
           submitGuide={submitGuide}
           guideMessage={guideMessage}
+          guideRuleProposal={guideRuleProposal}
+          approveGuideRuleProposal={approveGuideRuleProposal}
+          rejectGuideRuleProposal={rejectGuideRuleProposal}
+          rulesAutopilotId={guideScopeType === "autopilot" ? guideScopeId : ""}
+          loadRuleCards={() => loadRuleCards(guideScopeId)}
+          ruleCards={ruleCards}
+          toggleRuleCard={toggleRuleCard}
+          rulesMessage={rulesMessage}
           connections={connections}
           startOauth={startOauth}
           runWatcherTick={runWatcherTick}

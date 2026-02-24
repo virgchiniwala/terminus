@@ -8,6 +8,7 @@ use crate::primitives::PrimitiveGuard;
 use crate::providers::{
     ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
 };
+use crate::rules;
 use crate::schema::{
     AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
     ProviderTier as SchemaProviderTier, RecipeKind,
@@ -222,6 +223,10 @@ pub struct RunReceipt {
     pub adaptation: Option<AdaptationSummary>,
     #[serde(default)]
     pub memory_titles_used: Vec<String>,
+    #[serde(default)]
+    pub applied_rule_titles: Vec<String>,
+    #[serde(default)]
+    pub rule_application_summary: Vec<String>,
     pub redacted: bool,
     pub created_at_ms: i64,
 }
@@ -1128,8 +1133,11 @@ impl RunnerEngine {
             }
         }
 
-        let runtime_profile = learning::get_runtime_profile(connection, &run.autopilot_id)
+        let base_runtime_profile = learning::get_runtime_profile(connection, &run.autopilot_id)
             .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let runtime_profile = rules::apply_runtime_rules(connection, &run, &base_runtime_profile)
+            .map_err(RunnerError::Db)?
+            .runtime_profile;
         if runtime_profile.learning_enabled {
             if let Some(until) = runtime_profile.suppress_until_ms {
                 if until > now_ms() {
@@ -3875,6 +3883,16 @@ impl RunnerEngine {
         receipt.evaluation = Some(evaluation);
         receipt.adaptation = Some(adaptation);
         receipt.memory_titles_used = memory_titles;
+        if let Ok(applied_rules) = rules::list_applied_rules_for_run(connection, run_id) {
+            receipt.applied_rule_titles = applied_rules
+                .iter()
+                .map(|r| r.rule_title.clone())
+                .collect::<Vec<String>>();
+            receipt.rule_application_summary = applied_rules
+                .iter()
+                .map(|r| format!("{} ({})", r.rule_title, r.effect_summary))
+                .collect::<Vec<String>>();
+        }
         let updated =
             serde_json::to_string(&receipt).map_err(|e| RunnerError::Serde(e.to_string()))?;
         connection
@@ -4041,6 +4059,8 @@ fn build_receipt(
         evaluation: None,
         adaptation: None,
         memory_titles_used: Vec::new(),
+        applied_rule_titles: Vec::new(),
+        rule_application_summary: Vec::new(),
         redacted: true,
         created_at_ms: now_ms(),
     }

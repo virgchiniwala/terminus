@@ -4,6 +4,8 @@ import type {
   AutopilotSendPolicyRecord,
   EmailConnectionRecord,
   OAuthStartResponse,
+  RuleCardRecord,
+  RuleProposalDraft,
   RunnerControlRecord,
 } from "../types";
 
@@ -39,6 +41,14 @@ type Props = {
   setGuideInstruction: Dispatch<SetStateAction<string>>;
   submitGuide: () => void;
   guideMessage: string | null;
+  guideRuleProposal: RuleProposalDraft | null;
+  approveGuideRuleProposal: (ruleId: string) => void;
+  rejectGuideRuleProposal: (ruleId: string) => void;
+  rulesAutopilotId: string;
+  loadRuleCards: () => void;
+  ruleCards: RuleCardRecord[];
+  toggleRuleCard: (rule: RuleCardRecord) => void;
+  rulesMessage: string | null;
   connections: EmailConnectionRecord[];
   startOauth: (provider: "gmail" | "microsoft365") => void;
   runWatcherTick: (provider: "gmail" | "microsoft365") => void;
@@ -81,6 +91,14 @@ export function ConnectionPanel(props: Props) {
     setGuideInstruction,
     submitGuide,
     guideMessage,
+    guideRuleProposal,
+    approveGuideRuleProposal,
+    rejectGuideRuleProposal,
+    rulesAutopilotId,
+    loadRuleCards,
+    ruleCards,
+    toggleRuleCard,
+    rulesMessage,
     connections,
     startOauth,
     runWatcherTick,
@@ -332,6 +350,63 @@ export function ConnectionPanel(props: Props) {
         </label>
       </div>
       {guideMessage && <p className="connection-message">{guideMessage}</p>}
+      {guideRuleProposal && (
+        <div className="oauth-flow" aria-label="Rule proposal">
+          <p><strong>Teach Once</strong>: Proposed Rule Card (approval required)</p>
+          <p><strong>{guideRuleProposal.title}</strong> · <code>{guideRuleProposal.ruleType}</code></p>
+          <p>{guideRuleProposal.previewImpact}</p>
+          <p className="clarification-meta">{guideRuleProposal.safetySummary}</p>
+          <p className="clarification-meta">Scope: {guideRuleProposal.scope} · Autopilot: <code>{guideRuleProposal.autopilotId}</code></p>
+          <div className="connection-actions">
+            <button type="button" className="intent-primary" onClick={() => approveGuideRuleProposal(guideRuleProposal.id)}>
+              Approve Rule
+            </button>
+            <button type="button" onClick={() => rejectGuideRuleProposal(guideRuleProposal.id)}>
+              Reject Rule
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="watcher-controls">
+        <label>
+          <span>Rules (Autopilot ID)</span>
+          <input value={rulesAutopilotId} readOnly placeholder="Set Guide scope=Autopilot + Scope ID" />
+        </label>
+        <label>
+          <span>&nbsp;</span>
+          <button type="button" onClick={loadRuleCards} disabled={!rulesAutopilotId.trim()}>
+            Load Rules
+          </button>
+        </label>
+      </div>
+      {rulesMessage && <p className="connection-message">{rulesMessage}</p>}
+      {rulesAutopilotId.trim() && (
+        <div className="connection-cards">
+          <article className="connection-card">
+            <h3>Teach Once (Rule Cards)</h3>
+            {ruleCards.length === 0 ? (
+              <p>No rules yet for this Autopilot.</p>
+            ) : (
+              <div className="clarification-list">
+                {ruleCards.map((rule) => (
+                  <div key={rule.id} className="clarification-card">
+                    <p className="clarification-meta">
+                      <code>{rule.ruleType}</code> · {rule.status} · {rule.sourceKind}
+                    </p>
+                    <p><strong>{rule.title}</strong></p>
+                    <p className="clarification-meta">Updated {new Date(rule.updatedAtMs).toLocaleString()}</p>
+                    {(rule.status === "active" || rule.status === "disabled") && (
+                      <button type="button" className="clarification-chip" onClick={() => toggleRuleCard(rule)}>
+                        {rule.status === "active" ? "Disable" : "Enable"}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+        </div>
+      )}
 
       <div className="connection-cards">
         {connections.map((record) => (
@@ -390,4 +465,3 @@ export function ConnectionPanel(props: Props) {
     </section>
   );
 }
-

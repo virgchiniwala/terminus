@@ -8,6 +8,7 @@ mod learning;
 mod missions;
 mod primitives;
 mod providers;
+mod rules;
 mod runner;
 mod schema;
 mod transport;
@@ -114,6 +115,15 @@ struct GuidanceResponse {
     mode: GuidanceMode,
     message: String,
     proposed_rule: Option<String>,
+    proposed_rule_preview: Option<rules::RuleProposalDraft>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposeRuleFromGuidanceInput {
+    scope_type: String,
+    scope_id: String,
+    instruction: String,
 }
 
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
@@ -346,6 +356,60 @@ fn get_context_receipt(
 ) -> Result<context_receipt::ContextReceipt, String> {
     let connection = open_connection(&state)?;
     context_receipt::get_context_receipt(&connection, run_id.trim())
+}
+
+#[tauri::command]
+fn list_rule_cards_for_autopilot(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+) -> Result<Vec<rules::RuleCardRecord>, String> {
+    let connection = open_connection(&state)?;
+    rules::list_rule_cards_for_autopilot(&connection, autopilot_id.trim())
+}
+
+#[tauri::command]
+fn get_rule_card(
+    state: tauri::State<AppState>,
+    rule_id: String,
+) -> Result<Option<rules::RuleCardRecord>, String> {
+    let connection = open_connection(&state)?;
+    rules::get_rule_card(&connection, rule_id.trim())
+}
+
+#[tauri::command]
+fn approve_rule_proposal(
+    state: tauri::State<AppState>,
+    rule_id: String,
+) -> Result<rules::RuleCardRecord, String> {
+    let connection = open_connection(&state)?;
+    rules::approve_rule_proposal(&connection, rule_id.trim())
+}
+
+#[tauri::command]
+fn reject_rule_proposal(
+    state: tauri::State<AppState>,
+    rule_id: String,
+) -> Result<rules::RuleCardRecord, String> {
+    let connection = open_connection(&state)?;
+    rules::reject_rule_proposal(&connection, rule_id.trim())
+}
+
+#[tauri::command]
+fn disable_rule_card(
+    state: tauri::State<AppState>,
+    rule_id: String,
+) -> Result<rules::RuleCardRecord, String> {
+    let connection = open_connection(&state)?;
+    rules::disable_rule_card(&connection, rule_id.trim())
+}
+
+#[tauri::command]
+fn enable_rule_card(
+    state: tauri::State<AppState>,
+    rule_id: String,
+) -> Result<rules::RuleCardRecord, String> {
+    let connection = open_connection(&state)?;
+    rules::enable_rule_card(&connection, rule_id.trim())
 }
 
 #[tauri::command]
@@ -753,10 +817,27 @@ fn submit_guidance(
         _ => (None, None, None, Some(scope_id.to_string())),
     };
 
+    let proposed_rule_preview = if matches!(mode, GuidanceMode::ProposedRule) {
+        rules::propose_rule_from_guidance(
+            &connection,
+            rules::GuidanceRuleScope {
+                scope_type: scope_type.clone(),
+                scope_id: scope_id.to_string(),
+                autopilot_id: autopilot_id.clone(),
+                run_id: run_id.clone(),
+            },
+            &cleaned_instruction,
+        )
+        .ok()
+    } else {
+        None
+    };
+
     let response = GuidanceResponse {
         mode,
         message,
         proposed_rule: proposed_rule.clone(),
+        proposed_rule_preview,
     };
     let result_json =
         serde_json::to_string(&response).map_err(|e| format!("Failed to store guidance: {e}"))?;
@@ -798,6 +879,69 @@ fn submit_guidance(
     }
 
     Ok(response)
+}
+
+#[tauri::command]
+fn propose_rule_from_guidance(
+    state: tauri::State<AppState>,
+    input: ProposeRuleFromGuidanceInput,
+) -> Result<rules::RuleProposalDraft, String> {
+    let scope_type = input.scope_type.trim().to_ascii_lowercase();
+    if !matches!(
+        scope_type.as_str(),
+        "autopilot" | "run" | "approval" | "outcome"
+    ) {
+        return Err("Choose a valid guidance scope.".to_string());
+    }
+    let scope_id = input.scope_id.trim();
+    if scope_id.is_empty() {
+        return Err("Scope ID is required.".to_string());
+    }
+    let cleaned_instruction = normalize_guidance_instruction(&input.instruction)?;
+    let connection = open_connection(&state)?;
+    let (autopilot_id, run_id) = match scope_type.as_str() {
+        "autopilot" => (Some(scope_id.to_string()), None),
+        "run" => {
+            let autopilot: Option<String> = connection
+                .query_row(
+                    "SELECT autopilot_id FROM runs WHERE id = ?1 LIMIT 1",
+                    rusqlite::params![scope_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("Failed to resolve run scope: {e}"))?;
+            (autopilot, Some(scope_id.to_string()))
+        }
+        "approval" => {
+            let run_ref: Option<(String, String)> = connection
+                .query_row(
+                    "SELECT a.run_id, r.autopilot_id
+                     FROM approvals a
+                     JOIN runs r ON r.id = a.run_id
+                     WHERE a.id = ?1
+                     LIMIT 1",
+                    rusqlite::params![scope_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| format!("Failed to resolve approval scope: {e}"))?;
+            match run_ref {
+                Some((run, auto)) => (Some(auto), Some(run)),
+                None => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
+    rules::propose_rule_from_guidance(
+        &connection,
+        rules::GuidanceRuleScope {
+            scope_type,
+            scope_id: scope_id.to_string(),
+            autopilot_id,
+            run_id,
+        },
+        &cleaned_instruction,
+    )
 }
 
 fn run_watchers(
@@ -1126,6 +1270,12 @@ fn main() {
             get_run,
             get_context_receipt,
             get_terminal_receipt,
+            list_rule_cards_for_autopilot,
+            get_rule_card,
+            approve_rule_proposal,
+            reject_rule_proposal,
+            disable_rule_card,
+            enable_rule_card,
             list_memory_cards_for_autopilot,
             suppress_memory_card,
             unsuppress_memory_card,
@@ -1141,6 +1291,7 @@ fn main() {
             get_autopilot_send_policy,
             update_autopilot_send_policy,
             submit_guidance,
+            propose_rule_from_guidance,
             record_decision_event,
             compact_learning_data
         ])
