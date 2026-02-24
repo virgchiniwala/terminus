@@ -486,6 +486,14 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               created_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS inbox_watcher_state (
+              provider TEXT PRIMARY KEY,
+              backoff_until_ms INTEGER,
+              consecutive_failures INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT,
+              updated_at_ms INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS runner_control (
               singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
               background_enabled INTEGER NOT NULL DEFAULT 0,
@@ -722,6 +730,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to create email ingest events index: {e}"))?;
     connection
         .execute(
+            "CREATE INDEX IF NOT EXISTS idx_inbox_watcher_state_backoff ON inbox_watcher_state(backoff_until_ms)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create inbox watcher state index: {e}"))?;
+    connection
+        .execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_state_updated ON runs(state, updated_at DESC)",
             [],
         )
@@ -732,6 +746,24 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create runs autopilot index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_approvals_run_status_created ON approvals(run_id, status, created_at ASC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create approvals run-status index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_outcomes_run_kind_updated ON outcomes(run_id, kind, updated_at DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create outcomes run-kind index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_clarifications_run_status_created ON clarifications(run_id, status, created_at_ms ASC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create clarifications run-status index: {e}"))?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_actions_run_step ON actions(run_id, step_id)",
@@ -1160,6 +1192,13 @@ pub fn list_primary_outcomes(
     let mut stmt = connection
         .prepare(
             "
+            WITH recent_runs AS (
+              SELECT id, autopilot_id, state, failure_reason, created_at, updated_at
+              FROM runs
+              WHERE state IN ('succeeded', 'failed', 'canceled', 'needs_approval', 'needs_clarification', 'blocked')
+              ORDER BY updated_at DESC
+              LIMIT ?1
+            )
             SELECT
               r.id,
               r.autopilot_id,
@@ -1182,10 +1221,8 @@ pub fn list_primary_outcomes(
                 WHERE o.run_id = r.id AND o.kind = 'receipt'
                 ORDER BY o.updated_at DESC LIMIT 1
               ) AS receipt_content
-            FROM runs r
-            WHERE r.state IN ('succeeded', 'failed', 'canceled', 'needs_approval', 'needs_clarification', 'blocked')
+            FROM recent_runs r
             ORDER BY r.updated_at DESC
-            LIMIT ?1
             ",
         )
         .map_err(|e| format!("Failed to prepare primary outcomes query: {e}"))?;

@@ -713,17 +713,29 @@ fn run_watchers(
         } else {
             control.microsoft_autopilot_id.as_str()
         };
-        let result = inbox_watcher::run_watcher_tick(
+        match inbox_watcher::run_watcher_tick(
             connection,
             &provider.provider,
             autopilot_id,
             control.watcher_max_items as usize,
-        )?;
-        summary.providers_polled += 1;
-        summary.fetched += result.fetched;
-        summary.deduped += result.deduped;
-        summary.started_runs += result.started_runs;
-        summary.failed += result.failed;
+        ) {
+            Ok(result) => {
+                summary.providers_polled += 1;
+                summary.fetched += result.fetched;
+                summary.deduped += result.deduped;
+                summary.started_runs += result.started_runs;
+                summary.failed += result.failed;
+            }
+            Err(err) => {
+                summary.providers_polled += 1;
+                summary.failed += 1;
+                eprintln!(
+                    "inbox watcher tick failed for {}: {}",
+                    provider.provider,
+                    sanitize_log_message(&err)
+                );
+            }
+        }
     }
     Ok(())
 }

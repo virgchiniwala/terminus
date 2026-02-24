@@ -39,7 +39,6 @@ const MS_PER_DAY: i64 = 86_400_000; // Milliseconds in 24 hours
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
-    Draft,
     Ready,
     Running,
     NeedsApproval,
@@ -54,7 +53,6 @@ pub enum RunState {
 impl RunState {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Draft => "draft",
             Self::Ready => "ready",
             Self::Running => "running",
             Self::NeedsApproval => "needs_approval",
@@ -80,7 +78,6 @@ impl FromStr for RunState {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "draft" => Ok(Self::Draft),
             "ready" => Ok(Self::Ready),
             "running" => Ok(Self::Running),
             "needs_approval" => Ok(Self::NeedsApproval),

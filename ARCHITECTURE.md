@@ -1,668 +1,179 @@
 # Architecture Overview
 
-**Last Updated:** 2026-02-21  
-**Version:** MVP (v0.1.0)
-
----
-
-## System Design
-
-Terminus is a **Personal AI OS** built as a native desktop app (Tauri) with a Rust backend and React frontend. It enables anyone to automate tasks through natural language intent, with strong safety guarantees and minimal token costs.
-
-### Core Principles
-
-1. **Action-First Completion** - Primary outputs are completed outcomes and executable actions.
-2. **Safety First** - Risky actions require explicit approval; no silent side-effects.
-3. **Billing-Safe** - Integer cent accounting, enforced spend caps.
-4. **Transparent** - Receipts explain what executed, what was blocked, and why.
-5. **Calm UX** - Object-first UI (not chat-based), minimal noise.
-6. **Local-First** - All execution and secrets stay on device.
-
----
-
-## Architecture Layers
-
-```
-┌─────────────────────────────────────────┐
-│          Frontend (React)               │  
-│  - Intent Input                         │
-│  - Plan Preview                         │
-│  - Approval Gates                       │
-│  - Activity Feed                        │
-└─────────────────────────────────────────┘
-              ↕ Tauri IPC
-┌─────────────────────────────────────────┐
-│        Backend (Rust)                   │
-│  ┌────────────────────────────────┐    │
-│  │   Runner (State Machine)        │    │
-│  │  - Tick-based execution         │    │
-│  │  - Retry with backoff           │    │
-│  │  - Approval orchestration       │    │
-│  │  - Clarification queue          │    │
-│  └────────────────────────────────┘    │
-│  ┌────────────────────────────────┐    │
-│  │   Action Layer                 │    │
-│  │  - Typed executable actions    │    │
-│  │  - Idempotent execution logs   │    │
-│  └────────────────────────────────┘    │
-│  ┌────────────────────────────────┐    │
-│  │   Provider Layer                │    │
-│  │  - OpenAI / Anthropic / Gemini  │    │
-│  │  - Retryable error detection    │    │
-│  │  - Spend tracking               │    │
-│  └────────────────────────────────┘    │
-│  ┌────────────────────────────────┐    │
-│  │   Transport Layer               │    │
-│  │  - Mock (tests)                 │    │
-│  │  - LocalHTTP (real API)         │    │
-│  │  - (Future: Relay)              │    │
-│  └────────────────────────────────┘    │
-│  ┌────────────────────────────────┐    │
-│  │   Persistence (SQLite)          │    │
-│  │  - Runs                         │    │
-│  │  - Activities                   │    │
-│  │  - Approvals                    │    │
-│  │  - Outcomes                     │    │
-│  │  - Spend Ledger                 │    │
-│  └────────────────────────────────┘    │
-└─────────────────────────────────────────┘
-              ↕
-┌─────────────────────────────────────────┐
-│       macOS Keychain (Secrets)          │
-└─────────────────────────────────────────┘
-```
-
----
-
-## Core Components
-
-### 1. Runner (State Machine)
-
-**File:** `src-tauri/src/runner.rs`
-
-The runner is the heart of Terminus. It orchestrates execution through a **tick-based state machine** with persisted state in SQLite.
-
-#### State Machine
-
-```
-Draft → Ready → Running → Succeeded
-                  ↓
-              Retrying ⟲ (bounded)
-                  ↓
-              Failed / Blocked
-
-              NeedsApproval → (approve) → Ready
-                           → (reject)  → Canceled
-```
-
-#### Key Methods
-
-- `start_run()` - Create a new run from an AutopilotPlan
-- `run_tick()` - Advance the state machine by one step
-- `resume_due_runs()` - Resume retries that are due
-- `approve()` / `reject()` - Handle approval decisions
-- `get_run()` - Fetch current run state
-
-#### Execution Model
-
-**Tick-based (not recursive):**
-- Each `run_tick()` call executes **exactly one step**
-- State is persisted **before** returning
-- Caller decides when to tick again (enables bounded work)
-- No stack overflow, easy to pause/resume
-
-**Idempotency:**
-- Every run requires a unique `idempotency_key`
-- Duplicate keys return the existing run
-- Prevents accidental double-execution
-
-**Retry Logic:**
-- Exponential backoff: 100ms * 2^retry_count
-- Max retries configurable per run
-- Only retryable errors trigger retries (non-retryable → Failed immediately)
-- `next_retry_at_ms` stored for deterministic resume
-
----
-
-### 2. Provider Layer
-
-**File:** `src-tauri/src/providers/`
-
-Abstracts LLM providers (OpenAI, Anthropic, Gemini) behind a common interface.
-
-#### Provider Tiers
-
-- **Supported** - OpenAI, Anthropic (CI-tested, production-ready)
-- **Experimental** - Gemini (available, not CI-blocking)
-- **Future** - Hosted relay transport (not implemented)
-
-#### Error Classification
-
-Providers classify errors as **retryable** or **non-retryable**:
-
-**Retryable:**
-- Rate limits (429)
-- Temporary server errors (500, 503)
-- Network timeouts
-
-**Non-Retryable:**
-- Invalid API key (401)
-- Malformed request (400)
-- Content policy violation
-- Model not found
-
-#### Spend Tracking
-
-Every provider call logs spend to the spend ledger:
-- **Estimated** - Before execution (based on plan)
-- **Actual** - After execution (real API cost)
-- Stored as **integer cents** (no float money math)
-
----
-
-### 3. Transport Layer
-
-**File:** `src-tauri/src/transport/`
-
-Handles actual API communication.
-
-#### Transports
-
-1. **MockTransport** (default)
-   - Deterministic test responses
-   - Simulates errors, caps, retries
-   - No real API calls
-
-2. **LocalHttpTransport** (env-flagged: `TERMINUS_TRANSPORT=local_http`)
-   - Real OpenAI/Anthropic API calls
-   - Keys from macOS Keychain
-   - Production execution
-
-3. **Relay Transport** (future)
-   - Hosted backend for shared API keys
-   - Not implemented yet
-
----
-
-### 4. Persistence (SQLite)
-
-**File:** `src-tauri/src/db.rs`
-
-All runtime state lives in SQLite for durability.
-
-#### Schema
-
-**runs** - Execution state
-```sql
-CREATE TABLE runs (
-  id TEXT PRIMARY KEY,
-  autopilot_id TEXT NOT NULL,
-  idempotency_key TEXT UNIQUE NOT NULL,
-  state TEXT NOT NULL, -- RunState enum
-  current_step_index INTEGER,
-  retry_count INTEGER,
-  max_retries INTEGER,
-  next_retry_at_ms INTEGER,
-  soft_cap_approved INTEGER,
-  usd_cents_estimate INTEGER,
-  usd_cents_actual INTEGER,
-  failure_reason TEXT,
-  plan TEXT NOT NULL, -- JSON AutopilotPlan
-  provider_kind TEXT,
-  provider_tier TEXT,
-  created_at INTEGER,
-  updated_at INTEGER
-);
-```
-
-**activities** - Audit log
-```sql
-CREATE TABLE activities (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  activity_type TEXT NOT NULL,
-  from_state TEXT,
-  to_state TEXT,
-  user_message TEXT,
-  created_at INTEGER,
-  FOREIGN KEY (run_id) REFERENCES runs(id)
-);
-```
-
-**approvals** - Pending action decisions
-```sql
-CREATE TABLE approvals (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  step_id TEXT NOT NULL,
-  action_id TEXT,
-  status TEXT NOT NULL, -- pending/approved/rejected
-  preview TEXT,
-  created_at INTEGER,
-  updated_at INTEGER,
-  FOREIGN KEY (run_id) REFERENCES runs(id)
-);
-```
-
-**actions / action_executions** - Canonical executable work
-```sql
-CREATE TABLE actions (...);
-CREATE TABLE action_executions (...);
-```
-
-**outcomes** - Completed outcome cards + receipts
-```sql
-CREATE TABLE outcomes (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  step_id TEXT,
-  kind TEXT NOT NULL, -- completed_outcome/receipt/internal_payload
-  content TEXT NOT NULL,
-  created_at INTEGER,
-  FOREIGN KEY (run_id) REFERENCES runs(id)
-);
-```
-
-**spend_ledger** - Billing records
-```sql
-CREATE TABLE spend_ledger (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  step_id TEXT,
-  entry_kind TEXT NOT NULL, -- estimate/actual
-  amount_usd_cents INTEGER NOT NULL,
-  provider_kind TEXT,
-  created_at INTEGER,
-  UNIQUE(run_id, step_id, entry_kind), -- Idempotency
-  FOREIGN KEY (run_id) REFERENCES runs(id)
-);
-```
-
----
-
-### 5. Schema & Plans
-
-**File:** `src-tauri/src/schema.rs`
-
-Defines the **AutopilotPlan** format - the shared representation for all recipes.
-
-#### AutopilotPlan
-
-```rust
-pub struct AutopilotPlan {
-    pub schema_version: String,
-    pub recipe: RecipeKind, // WebsiteMonitor, InboxTriage, DailyBrief
-    pub intent: String,
-    pub provider: ProviderMetadata,
-    pub allowed_primitives: Vec<PrimitiveId>,
-    pub steps: Vec<PlanStep>,
-}
-
-pub struct PlanStep {
-    pub id: String,
-    pub label: String,
-    pub primitive: PrimitiveId,
-    pub requires_approval: bool,
-    pub risk_tier: RiskTier,
-}
-```
-
-#### Primitives
-
-Actions that steps can perform:
-- `ReadWebsite` - Fetch URL content
-- `WriteOutcomeDraft` - Internal payload generation (compatibility only)
-- `SendEmail` - Send email (approval required)
-
-New primitives are **deny-by-default** and require explicit allowlisting. Primary user-facing completion remains executed outcomes, pending approvals, or blocked clarification cards.
-
----
-
-## Safety Guarantees
-
-### 1. Approval Gates
-
-**All write/send actions require approval by default.**
-
-Approval flow:
-1. Runner executes step that needs approval
-2. Transitions to `NeedsApproval` state
-3. Creates `Approval` record with preview
-4. Pauses execution
-5. User approves/rejects
-6. Runner resumes or cancels
-
-### 2. Spend Caps
-
-**Per-Run Caps:**
-- Soft cap: $0.40 (requires approval to proceed)
-- Hard cap: $0.80 (blocks execution, no approval option)
-
-**Daily Caps (future):**
-- Soft cap: $3.00
-- Hard cap: $5.00
-
-Caps are enforced **before** side-effects occur.
-
-### 3. Idempotency
-
-- Every run requires a unique `idempotency_key`
-- Duplicate starts return existing run
-- Spend ledger uses `(run_id, step_id, entry_kind)` uniqueness
-- Prevents double-billing on retry
-
-### 4. Atomic Transactions
-
-**All state transitions are atomic:**
-- `UPDATE runs SET state = X` + `INSERT INTO activities` → single transaction
-- Failures rollback both changes
-- No partial state updates
-
-### 5. Terminal Receipts
-
-Every terminal run (Succeeded/Failed/Blocked/Canceled) generates a **receipt**:
-- Provider tier used
-- Total spend (actual cents)
-- Redacted sensitive data (API keys, emails)
-- Stored in `outcomes` table
-
----
-
-## Data Flow Example
-
-**User Action:** "Monitor example.com for changes"
-
-1. **Frontend → Backend (IPC):**
-   ```typescript
-   invoke('start_recipe_run', {
-     autopilotId: 'auto_001',
-     recipe: 'website_monitor',
-     intent: 'Monitor example.com for changes',
-     provider: 'openai',
-     idempotencyKey: 'user_run_123',
-     maxRetries: 2
-   })
-   ```
-
-2. **Backend creates plan:**
-   ```rust
-   AutopilotPlan {
-     recipe: WebsiteMonitor,
-     steps: [
-       { primitive: ReadWebsite, requires_approval: false },
-       { primitive: WriteOutcomeDraft, requires_approval: true }
-     ]
-   }
-   ```
-
-3. **Runner persists run:**
-   ```sql
-   INSERT INTO runs (state='ready', plan=...) ...
-   ```
-
-4. **Frontend polls for tick:**
-   ```typescript
-   invoke('run_tick', { runId: 'run_001' })
-   ```
-
-5. **Runner executes step 1 (ReadWebsite):**
-   - Calls `MockTransport` or `LocalHttpTransport`
-   - Logs spend to ledger
-   - Returns `RunRecord { state: Ready, current_step_index: 1 }`
-
-6. **Frontend ticks again, hits approval:**
-   ```typescript
-   invoke('run_tick', { runId: 'run_001' })
-   // Returns: { state: 'needs_approval' }
-   ```
-
-7. **Frontend shows approval UI:**
-   ```typescript
-   const approvals = await invoke('list_pending_approvals')
-   // Show preview: "Approve step: Write draft outcome"
-   ```
-
-8. **User approves:**
-   ```typescript
-   invoke('approve_run_approval', { approvalId: 'approval_001' })
-   ```
-
-9. **Runner executes step 2, completes:**
-   ```rust
-   // Execute WriteOutcomeDraft
-   // Transition to Succeeded
-   // Write terminal receipt
-   ```
-
-10. **Frontend shows result:**
-    ```typescript
-    const run = await invoke('get_run', { runId: 'run_001' })
-    // { state: 'succeeded', usd_cents_actual: 8 }
-    ```
-
----
-
-## Error Handling
-
-### Provider Errors
-
-**Retryable (automatic retry with backoff):**
-```rust
-ProviderError::RateLimitExceeded
-ProviderError::TemporaryFailure
-```
-
-**Non-Retryable (immediate failure):**
-```rust
-ProviderError::InvalidApiKey
-ProviderError::InvalidRequest
-ProviderError::ContentPolicyViolation
-```
-
-### Spend Cap Violations
-
-**Soft cap (pausable):**
-```rust
-// Run pauses, creates approval with step_id = "__soft_cap__"
-// User can approve to proceed or reject to cancel
-```
-
-**Hard cap (terminal block):**
-```rust
-// Run transitions to Blocked state
-// No approval option, execution stops
-// Receipt written with block reason
-```
-
-### Retry Exhaustion
-
-```rust
-// After max_retries attempts:
-// Transition to Failed state
-// failure_reason = "Max retries exhausted (3 attempts)"
-```
-
----
-
-## Testing Strategy
-
-See `TESTING.md` for full details.
-
-**Unit Tests:**
-- All business logic in `runner.rs` has test coverage
-- Provider error classification
-- Spend cap boundaries
-- Idempotency guarantees
-- Atomic transaction rollback
-
-**Integration Tests:**
-- End-to-end flows for all 3 recipes
-- Approval/rejection paths
-- Retry with resume
-
-**Test Transports:**
-- `MockTransport` for deterministic test execution
-- Special intents trigger test scenarios:
-  - `"simulate_provider_retryable_failure"` → retry test
-  - `"simulate_cap_hard"` → hard cap test
-  - `"simulate_spend_40"` → boundary test
-
----
-
-## Configuration
-
-### Environment Variables
-
-**`TERMINUS_TRANSPORT`**
-- `mock` (default) - Use MockTransport (no real API calls)
-- `local_http` - Use LocalHttpTransport (real OpenAI/Anthropic)
-
-### Secrets (macOS Keychain)
-
-**OpenAI:**
-```bash
-security add-generic-password -a Terminus \
-  -s terminus.openai.api_key \
-  -w "$OPENAI_API_KEY" -U
-```
-
-**Anthropic:**
-```bash
-security add-generic-password -a Terminus \
-  -s terminus.anthropic.api_key \
-  -w "$ANTHROPIC_API_KEY" -U
-```
-
-Secrets are **never** stored in SQLite or version control.
-
----
-
-## Future Architecture
-
-### Planned Enhancements
-
-1. **Relay Transport**
-   - Hosted backend for shared API keys
-   - Multi-tenant billing
-   - Rate limit pooling
-
-2. **Background Scheduler**
-   - Cron-like recurring runs
-   - Wake-on-demand triggers
-
-3. **Multi-Provider Routing**
-   - Automatic fallback on provider failure
-   - Cost-based routing
-
-4. **Workflow Composition**
-   - Chain multiple recipes
-   - Conditional branching
-
----
-
-## Performance Characteristics
-
-**SQLite:**
-- All operations use indexed queries
-- Transaction-scoped writes
-- ~1ms per tick on M1 Mac
-
-**Memory:**
-- Plans stored as JSON in DB (not in memory)
-- Stateless runner (fetch from DB each tick)
-- ~10MB baseline memory footprint
-
-**Startup Time:**
-- Cold start: <500ms
-- Schema bootstrap: <50ms
-- Keychain read: <100ms
-
----
-
-## Security Model
-
-See `docs/threat_model.md` for full threat analysis.
-
-**Key Mitigations:**
-
-1. **No eval/arbitrary code execution** - Only predefined primitives
-2. **Approval gates on all writes** - User confirms before side-effects
-3. **Secrets in Keychain** - Never in SQLite or logs
-4. **Redacted receipts** - API keys, emails, PII stripped
-5. **Bounded execution** - Spend caps, retry limits, timeout protection
-
----
-
-## Debugging
-
-### Enable SQL Logging
-
-```rust
-// In db.rs:
-conn.trace(Some(|stmt| println!("SQL: {}", stmt)));
-```
-
-### Inspect Database
-
-```bash
-cd ~/.openclaw/workspace/terminus/src-tauri
-sqlite3 terminus.db
-
-.tables
-SELECT * FROM runs;
-SELECT * FROM activities ORDER BY created_at DESC LIMIT 10;
-```
-
-### Test Mock Scenarios
-
-```typescript
-// Trigger specific test behavior via intent text:
-const run = await invoke('start_recipe_run', {
-  intent: 'simulate_provider_retryable_failure', // Forces retry
-  // ...
-})
-```
-
----
-
-## File Structure
-
-```
-terminus/
-├── src-tauri/              # Rust backend
-│   ├── src/
-│   │   ├── main.rs         # Tauri entry point + IPC commands
-│   │   ├── runner.rs       # State machine (1800+ lines)
-│   │   ├── db.rs           # SQLite schema + bootstrap
-│   │   ├── schema.rs       # AutopilotPlan + recipes
-│   │   ├── primitives.rs   # Primitive guard
-│   │   ├── providers/      # Provider abstraction
-│   │   │   ├── mod.rs      # ProviderRuntime
-│   │   │   ├── types.rs    # Request/Response/Error
-│   │   │   ├── keychain.rs # macOS Keychain reader
-│   │   │   └── runtime.rs  # Error classification
-│   │   └── transport/      # Execution transports
-│   │       ├── mod.rs
-│   │       ├── mock.rs     # Test transport
-│   │       └── local_http.rs # Real API calls
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── src/                    # React frontend
-│   ├── App.tsx             # Main UI
-│   ├── types.ts            # TypeScript types
-│   └── styles.css
-├── docs/                   # Design docs
-│   ├── plan.md
-│   ├── plan_schema_examples.json
-│   └── threat_model.md     # (from Phase B)
-├── ARCHITECTURE.md         # This file
-├── CONTRIBUTING.md         # Dev guide
-├── TESTING.md              # Test strategy
-├── README.md
-└── mission_control.md      # Task tracker
-```
-
----
-
-**For setup instructions, see `CONTRIBUTING.md`**  
-**For test details, see `TESTING.md`**
+Last updated: 2026-02-22
+Version: MVP (v0.1.x, local-first desktop)
+
+## What Terminus Is
+Terminus is a local-first desktop system for repeatable follow-through.
+The product surface is object-first: `Autopilots / Outcomes / Approvals / Activity`.
+Chat-style input exists only as an intake method (Intent Bar), not as the primary runtime surface.
+
+## Current Stack
+- Desktop shell: Tauri (macOS target first)
+- Frontend: React + TypeScript
+- Runtime: Rust (tick-based runner)
+- Storage: SQLite + local vault files (vault usage remains constrained)
+- Secrets: macOS Keychain only
+- Model providers: OpenAI + Anthropic (Supported), Gemini (Experimental)
+
+## Runtime Model (Canonical)
+The runtime is a persisted, bounded state machine.
+
+Core commands:
+- `start_recipe_run(...)` creates/persists a run and returns immediately
+- `run_tick(run_id)` advances bounded work (single step / bounded transition)
+- `resume_due_runs(limit)` resumes retrying runs that are due
+- `tick_runner_cycle()` performs a bounded background/app-open cycle (runner + watcher cadence)
+
+### Run states (current)
+- `ready`
+- `running`
+- `needs_approval`
+- `needs_clarification` (non-terminal pause)
+- `retrying`
+- `succeeded`
+- `failed`
+- `blocked` (hard blocked, e.g. hard cap/policy)
+- `canceled`
+
+Key behavior:
+- Clarifications are not terminal. Runs pause in `needs_clarification` and resume on answer.
+- Hard caps block before side effects.
+- Retries are bounded and scheduled via `next_retry_at_ms` with persisted backoff metadata.
+- State transitions and activity rows are written atomically in one transaction.
+
+## Action-First Completion Model
+Terminus is transitioning from draft-first internals to action-canonical behavior.
+
+Canonical runtime primitives produce:
+- `Actions` (typed executable work)
+- `Approvals` (authorization gates for risky actions)
+- `Outcomes` (completed work summary + receipts)
+
+Important distinction:
+- Generated text may still exist as payload/internal compatibility artifacts.
+- The user-facing product surface should represent completed work or a one-tap approval to execute.
+
+## Objects and Persistence
+SQLite is the source of truth for runtime state.
+
+Primary tables (selected):
+- `runs` — persisted state machine, spend, retry metadata, provider kind/tier, plan JSON
+- `activities` — human-readable audit trail of transitions/events
+- `approvals` — pending/approved/rejected approvals, typed payload metadata, optional `action_id`
+- `clarifications` — single-slot missing info cards (pending/answered/canceled)
+- `actions` — canonical executable actions with idempotency keys
+- `action_executions` — action execution attempts/results (idempotent execution receipts)
+- `outcomes` — completed outcome payloads + terminal receipts
+- `spend_ledger` — per-step spend entries (integer cents, idempotent keys)
+- `provider_calls` — provider observability metadata (latency/usage/cost estimates)
+- `autopilot_profile`, `decision_events`, `run_evaluations`, `adaptation_log`, `memory_cards` — Learning Layer data
+- `email_ingest_events`, `inbox_watcher_state` — inbox watcher ingestion + watcher backoff state
+- `runner_control` — background runner + watcher cadence config/status
+
+SQLite runtime hardening already in place:
+- WAL mode
+- busy timeout
+- migration-safe `ensure_column(...)` style upgrades
+- schema metadata row (`schema_meta`)
+
+## Shared MVP Preset Runtime
+All three MVP presets run on one shared schema + runner + approvals + receipts stack.
+
+1. Website Monitor
+- `read_web` (allowlisted domains only)
+- snapshot persistence + change detection
+- summarization / outcome generation
+- approval-gated follow-through (e.g. email send remains gated)
+
+2. Inbox Triage (MVP input: paste/forward/share-in + watcher path)
+- `read_forwarded_email`
+- triage/classify/extract
+- outcome/task-style completion and optional gated outbound/send
+- OAuth watcher path exists but mailbox mutations/sends remain policy-gated
+
+3. Daily Brief
+- `read_sources`
+- `aggregate_daily_summary`
+- dedupe/history persistence
+- outcome generation / delivery path stays constrained
+
+## Provider + Transport Architecture
+Provider execution is abstracted behind provider and transport seams.
+
+Provider layer:
+- `ProviderKind`: OpenAI / Anthropic / Gemini
+- `ProviderTier`: Supported / Experimental
+- `ProviderRequest`, `ProviderResponse`, `ProviderError` (retryable classification)
+
+Transport layer:
+- `MockTransport` (deterministic tests)
+- `LocalHttpTransport` (real BYOK local execution)
+- Future seam: hosted Relay transport (not implemented)
+
+Secrets:
+- Provider keys and OAuth tokens are stored in macOS Keychain
+- Never stored in SQLite
+- Never logged or exported in receipts
+
+## Security and Control Boundaries
+Non-negotiable runtime boundaries enforced in code:
+- deny-by-default primitive allowlists
+- approvals required for write/send actions by default
+- compose-first email policy with explicit send enable + allowlists + quiet hours + max/day
+- spend rails enforced at runtime in integer cents
+- receipts are redacted and human-readable
+
+Web fetch hardening (current):
+- HTTP/HTTPS only
+- domain allowlist required
+- redirect re-validation per hop
+- private/local/loopback rejection
+- resolved IP pinning into `curl` (`--resolve`) to reduce DNS rebinding risk
+- response size/content-type limits
+
+Tauri hardening (current baseline):
+- production CSP enabled (separate dev override config)
+- main window has explicit capability file boundary (`src-tauri/capabilities/main-window.json`)
+
+## Background Runtime and Watchers
+Terminus remains local-first:
+- background runner works while app process is alive and Mac is awake
+- app-open mode is explicit when background mode is off
+- missed cycles are detected and surfaced as user-visible truth
+
+Inbox watcher behavior:
+- provider-specific polling (Gmail / Microsoft 365)
+- per-provider dedupe (`email_ingest_events`)
+- provider-level backoff state (`inbox_watcher_state`) for rate-limit/retryable failures
+- Gmail path uses batch message-details fetch (with sequential fallback)
+
+## Learning Layer (Evaluate → Adapt → Memory)
+Learning is local-first, bounded, and non-capability-expanding.
+
+Pipeline (terminal runs only, and only when enabled):
+1. Evaluate run
+2. Apply bounded adaptation rules (allowlisted knobs only)
+3. Update compact memory cards
+4. Enrich terminal receipt with evaluation/adaptation/memory titles
+
+Safety constraints:
+- no raw email/web/provider payload storage in learning tables
+- bounded JSON schemas, rate limits, retention/compaction
+- learning cannot expand primitive allowlists, recipients, send toggles, or capabilities
+
+## Current Known Debt (intentional / deferred)
+- `runner.rs` and `App.tsx` are still large and need structural decomposition
+- fine-grained per-command Tauri app IPC permissions are not yet defined (window capability boundary exists)
+- some DB schema inconsistencies (legacy columns/timestamps) remain for compatibility and need a cleanup migration plan
+- Gmail watcher batching is implemented, but broader watcher observability/backoff UX can be improved further
+
+## How to Reason About the System
+If you are modifying Terminus, preserve these invariants:
+- object-first UX (not chat-first)
+- tick-based bounded execution (no loop-to-terminal blocking)
+- deny-by-default primitives
+- approvals for risky writes/sends
+- idempotent side effects + persisted receipts
+- local secrets only (Keychain)
+- no capability growth from learning/guidance paths
