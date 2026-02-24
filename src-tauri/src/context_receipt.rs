@@ -1,5 +1,6 @@
 use crate::db;
 use crate::learning;
+use crate::rules;
 use crate::runner::{RunReceipt, RunnerEngine};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -18,6 +19,7 @@ pub struct ContextReceipt {
     pub sources: Vec<ContextSourceRecord>,
     pub memory_titles_used: Vec<String>,
     pub memory_cards_used: Vec<learning::MemoryCardRecord>,
+    pub applied_rules: Vec<rules::RuleMatchRecord>,
     pub policy_constraints: PolicyConstraintsView,
     pub runtime_profile_overlay: RuntimeProfileOverlayView,
     pub redaction_flags: Vec<String>,
@@ -102,6 +104,7 @@ pub fn get_context_receipt(
         db::get_autopilot_send_policy(connection, &run.autopilot_id).map_err(|e| e.to_string())?;
     let provider_calls = load_provider_calls(connection, run_id)?;
     let sources = load_context_sources(connection, run_id)?;
+    let applied_rules = rules::list_applied_rules_for_run(connection, run_id)?;
 
     let (memory_titles_used, rationale_codes, key_signals, redaction_flags) =
         derive_context_metadata(&terminal_receipt);
@@ -135,6 +138,7 @@ pub fn get_context_receipt(
         sources,
         memory_titles_used,
         memory_cards_used,
+        applied_rules,
         policy_constraints: PolicyConstraintsView {
             deny_by_default_primitives: true,
             allowed_primitives,

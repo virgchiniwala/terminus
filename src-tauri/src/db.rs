@@ -470,6 +470,36 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (created_from_run_id) REFERENCES runs(id)
             );
 
+            CREATE TABLE IF NOT EXISTS rule_cards (
+              id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              rule_type TEXT NOT NULL,
+              status TEXT NOT NULL,
+              trigger_json TEXT NOT NULL,
+              effect_json TEXT NOT NULL,
+              source_kind TEXT NOT NULL,
+              source_run_id TEXT,
+              version INTEGER NOT NULL DEFAULT 1,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id),
+              FOREIGN KEY (source_run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS rule_match_events (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              step_id TEXT NOT NULL DEFAULT '',
+              rule_id TEXT NOT NULL,
+              rule_title TEXT NOT NULL,
+              match_reason_code TEXT NOT NULL,
+              effect_applied_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (run_id) REFERENCES runs(id),
+              FOREIGN KEY (rule_id) REFERENCES rule_cards(id)
+            );
+
             CREATE TABLE IF NOT EXISTS guidance_events (
               id TEXT PRIMARY KEY,
               scope_type TEXT NOT NULL,
@@ -766,6 +796,24 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create memory card index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_rule_cards_autopilot_status_updated ON rule_cards(autopilot_id, status, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create rule card index: {e}"))?;
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_match_events_run_step_rule ON rule_match_events(run_id, step_id, rule_id)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create rule match uniqueness index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_rule_match_events_run_created ON rule_match_events(run_id, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create rule match run index: {e}"))?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_guidance_events_scope_created ON guidance_events(scope_type, scope_id, created_at_ms DESC)",

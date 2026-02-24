@@ -40,18 +40,20 @@ Last updated: 2026-02-24
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### Context + Memory Provenance UX (Legibility Layer) — Iteration 3 MVP
-Owner: Loki + Jarvis + Friday
+### Teach Once (Rule Cards) — MVP Slice
+Owner: Loki + Jarvis + Friday + Fury
 Status: In progress
 Scope:
-- add read-only `Context Receipt` API per run (sources, memory titles/cards, policy constraints, runtime profile overlays, redaction flags, rationale codes)
-- add memory provenance read APIs and safe suppression controls (`suppress/unsuppress`)
-- add minimal mission-detail Context Receipt panel (read-only first)
-- update agentic best-practices status doc to mark Iteration 2 shipped and Iteration 3 active
+- add `rule_cards` + `rule_match_events` persistence and indexes
+- add deterministic rule proposal flow from Guide (`submit_guidance` + `propose_rule_from_guidance`)
+- add rule approval/enable/disable commands
+- apply bounded rule overlays at run preflight (`noise_suppression`, `daily_brief_scope`, `reply_style`)
+- add rule provenance to receipts + Context Receipt
+- add minimal Rule Cards panel + approve/reject proposal UI in Connections/Guide surface
 Acceptance:
-- context receipt is readable for mission child runs without exposing raw source/email/provider payloads
-- memory cards list is autopilot-scoped and suppression toggles do not allow freeform edits
-- `build_memory_context` excludes suppressed memory cards
+- rule proposals are bounded, approval-gated, and cannot expand protected capabilities
+- active rules change future run behavior only via allowed overlays (no new primitives/capabilities)
+- receipts/context show applied rule titles/effect summaries
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 - `cd src-tauri && cargo fmt --check`
@@ -61,9 +63,9 @@ Verification:
 - `npm run build`
 
 ## Next
-1. Mission outcomes integration: first-class mission receipts/outcomes on object surfaces
-2. Notification/readiness gate wiring for mission/context legibility (only after context surfaces stabilize)
-3. Voice object + rule extraction approval flow (P0.11/P0.12)
+1. Behavior-suggested Rule Cards from repeated signals (approval-gated)
+2. Mission outcomes integration: first-class mission receipts/outcomes on object surfaces
+3. Voice object + rule extraction approval flow (P0.11/P0.12) on top of Rule Cards
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution

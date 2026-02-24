@@ -260,6 +260,12 @@ export interface ContextReceipt {
   sources: ContextSourceRecord[];
   memoryTitlesUsed: string[];
   memoryCardsUsed: MemoryCardRecord[];
+  appliedRules: Array<{
+    ruleId: string;
+    ruleTitle: string;
+    matchReasonCode: string;
+    effectSummary: string;
+  }>;
   policyConstraints: {
     denyByDefaultPrimitives: boolean;
     allowedPrimitives: string[];
@@ -296,6 +302,36 @@ export interface ContextReceipt {
     costCentsEst?: number | null;
     createdAtMs: number;
   }>;
+}
+
+export interface RuleCardRecord {
+  id: string;
+  autopilotId: string;
+  title: string;
+  ruleType: string;
+  status: string;
+  triggerJson: string;
+  effectJson: string;
+  sourceKind: string;
+  sourceRunId?: string | null;
+  version: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface RuleProposalDraft {
+  id: string;
+  autopilotId: string;
+  title: string;
+  ruleType: string;
+  scope: string;
+  safetySummary: string;
+  previewImpact: string;
+  triggerJson: string;
+  effectJson: string;
+  sourceKind: string;
+  sourceRunId?: string | null;
+  status: string;
 }
 
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";

@@ -166,6 +166,35 @@ Last updated: 2026-02-24
   - `memory_cards.suppressed` column added (migration-safe) and memory context injection now excludes suppressed cards
   - Home Missions panel now includes a read-only Context Receipt inspector for child runs + memory-card suppress/unsuppress controls
   - `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` updated to mark Mission Orchestration MVP shipped and Context/Memory Provenance as next slice
+- Teach Once (Rule Cards) MVP slice:
+  - new backend module: `src-tauri/src/rules.rs`
+  - new tables: `rule_cards`, `rule_match_events`
+  - new Tauri commands:
+    - `propose_rule_from_guidance`
+    - `list_rule_cards_for_autopilot`
+    - `get_rule_card`
+    - `approve_rule_proposal`
+    - `reject_rule_proposal`
+    - `disable_rule_card`
+    - `enable_rule_card`
+  - `submit_guidance` now returns structured `proposedRulePreview` when a safe reusable rule is detected
+  - deterministic rule parser/validator (bounded MVP categories):
+    - `noise_suppression`
+    - `daily_brief_scope`
+    - `reply_style`
+  - protected-capability rule requests are rejected (no send/allowlist/primitive expansion)
+  - runner preflight applies active rule overlays to runtime profile (no plan mutation):
+    - `min_diff_score_to_notify`
+    - `max_sources`
+    - `max_bullets`
+    - `reply_length_hint`
+  - rule provenance persisted in `rule_match_events` and surfaced in:
+    - terminal receipts (`applied_rule_titles`, `rule_application_summary`)
+    - `get_context_receipt` (`appliedRules`)
+  - Connections/Guide UI now supports:
+    - “Teach Once” proposed rule approval card
+    - Rule Cards list for an Autopilot
+    - enable/disable toggles
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -223,6 +252,13 @@ Last updated: 2026-02-24
    - confirm response includes `sources`, `memoryTitlesUsed`, `policyConstraints`, `runtimeProfileOverlay`, `redactionFlags`
    - `list_memory_cards_for_autopilot({ autopilotId })` then `suppress_memory_card(...)`
    - re-run a Daily Brief step and confirm suppressed card is not injected (`memory_usage` titles omit it)
+7. Rule Cards flow check:
+   - set Guide scope to an existing Autopilot (one with at least one completed run)
+   - enter: `Keep Daily Brief to 4 sources and 4 bullets`
+   - `submit_guidance` should return `proposed_rule` + `proposedRulePreview`
+   - approve rule in UI or `approve_rule_proposal({ ruleId })`
+   - run the Autopilot again and confirm receipt/context shows applied rule
+   - `get_context_receipt({ runId })` includes `appliedRules`
 
 ## Operational Truths
 - Local-first runtime
