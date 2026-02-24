@@ -184,6 +184,20 @@ pub struct MemoryContext {
     pub prompt_block: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCardRecord {
+    pub card_id: String,
+    pub autopilot_id: String,
+    pub card_type: String,
+    pub title: String,
+    pub confidence: i64,
+    pub created_from_run_id: Option<String>,
+    pub updated_at_ms: i64,
+    pub version: i64,
+    pub suppressed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct LearningCompactionSummary {
     pub autopilot_id: Option<String>,
@@ -762,6 +776,7 @@ pub fn build_memory_context(
             SELECT card_type, title, content_json
             FROM memory_cards
             WHERE autopilot_id = ?1
+              AND COALESCE(suppressed, 0) = 0
             ORDER BY updated_at_ms DESC
             LIMIT 20
             ",
@@ -925,6 +940,78 @@ pub fn list_memory_titles_for_run(
         }
     }
     Ok(out)
+}
+
+pub fn list_memory_cards_for_autopilot(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<Vec<MemoryCardRecord>, LearningError> {
+    let mut stmt = connection
+        .prepare(
+            "
+            SELECT card_id, autopilot_id, card_type, title, confidence,
+                   created_from_run_id, updated_at_ms, version, COALESCE(suppressed, 0)
+            FROM memory_cards
+            WHERE autopilot_id = ?1
+            ORDER BY updated_at_ms DESC, title ASC
+            ",
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![autopilot_id], |row| {
+            Ok(MemoryCardRecord {
+                card_id: row.get(0)?,
+                autopilot_id: row.get(1)?,
+                card_type: row.get(2)?,
+                title: row.get(3)?,
+                confidence: row.get(4)?,
+                created_from_run_id: row.get(5)?,
+                updated_at_ms: row.get(6)?,
+                version: row.get(7)?,
+                suppressed: row.get::<_, i64>(8)? != 0,
+            })
+        })
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+
+    let mut cards = Vec::new();
+    for row in rows {
+        cards.push(row.map_err(|e| LearningError::Db(e.to_string()))?);
+    }
+    Ok(cards)
+}
+
+pub fn set_memory_card_suppressed(
+    connection: &Connection,
+    autopilot_id: &str,
+    card_id: &str,
+    suppressed: bool,
+) -> Result<MemoryCardRecord, LearningError> {
+    let updated = connection
+        .execute(
+            "
+            UPDATE memory_cards
+            SET suppressed = ?1, updated_at_ms = ?2
+            WHERE card_id = ?3 AND autopilot_id = ?4
+            ",
+            params![
+                if suppressed { 1 } else { 0 },
+                now_ms(),
+                card_id,
+                autopilot_id
+            ],
+        )
+        .map_err(|e| LearningError::Db(e.to_string()))?;
+    if updated == 0 {
+        return Err(LearningError::Invalid(
+            "Memory card not found for this Autopilot".to_string(),
+        ));
+    }
+    let mut cards = list_memory_cards_for_autopilot(connection, autopilot_id)?;
+    cards.retain(|c| c.card_id == card_id);
+    cards
+        .into_iter()
+        .next()
+        .ok_or_else(|| LearningError::Db("Updated memory card could not be reloaded".to_string()))
 }
 
 pub fn persist_memory_usage(

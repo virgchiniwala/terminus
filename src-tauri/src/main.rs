@@ -1,3 +1,4 @@
+mod context_receipt;
 mod db;
 mod diagnostics;
 mod email_connections;
@@ -336,6 +337,47 @@ fn submit_clarification_answer(
 fn get_run(state: tauri::State<AppState>, run_id: String) -> Result<RunRecord, String> {
     let connection = open_connection(&state)?;
     RunnerEngine::get_run(&connection, &run_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_context_receipt(
+    state: tauri::State<AppState>,
+    run_id: String,
+) -> Result<context_receipt::ContextReceipt, String> {
+    let connection = open_connection(&state)?;
+    context_receipt::get_context_receipt(&connection, run_id.trim())
+}
+
+#[tauri::command]
+fn list_memory_cards_for_autopilot(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+) -> Result<Vec<learning::MemoryCardRecord>, String> {
+    let connection = open_connection(&state)?;
+    learning::list_memory_cards_for_autopilot(&connection, autopilot_id.trim())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn suppress_memory_card(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+    card_id: String,
+) -> Result<learning::MemoryCardRecord, String> {
+    let connection = open_connection(&state)?;
+    learning::set_memory_card_suppressed(&connection, autopilot_id.trim(), card_id.trim(), true)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn unsuppress_memory_card(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+    card_id: String,
+) -> Result<learning::MemoryCardRecord, String> {
+    let connection = open_connection(&state)?;
+    learning::set_memory_card_suppressed(&connection, autopilot_id.trim(), card_id.trim(), false)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1082,7 +1124,11 @@ fn main() {
             apply_intervention,
             submit_clarification_answer,
             get_run,
+            get_context_receipt,
             get_terminal_receipt,
+            list_memory_cards_for_autopilot,
+            suppress_memory_card,
+            unsuppress_memory_card,
             list_email_connections,
             save_email_oauth_config,
             start_email_oauth,

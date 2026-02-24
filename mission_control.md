@@ -40,18 +40,18 @@ Last updated: 2026-02-24
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### Mission Orchestration MVP — Iteration 2
-Owner: Friday
+### Context + Memory Provenance UX (Legibility Layer) — Iteration 3 MVP
+Owner: Loki + Jarvis + Friday
 Status: In progress
 Scope:
-- add mission persistence tables (`missions`, `mission_runs`, `mission_events`)
-- add mission orchestration module (`missions.rs`) with one template: `daily_brief_multi_source`
-- add mission Tauri commands (`create_mission_draft`, `start_mission`, `get_mission`, `list_missions`, `run_mission_tick`)
-- add minimal Missions panel (list/detail/tick) in Home for visibility
+- add read-only `Context Receipt` API per run (sources, memory titles/cards, policy constraints, runtime profile overlays, redaction flags, rationale codes)
+- add memory provenance read APIs and safe suppression controls (`suppress/unsuppress`)
+- add minimal mission-detail Context Receipt panel (read-only first)
+- update agentic best-practices status doc to mark Iteration 2 shipped and Iteration 3 active
 Acceptance:
-- child runs fan out with unique idempotency keys
-- mission waits on child terminal states and blocks on blocked/pending child runs
-- aggregation summary persists only after child success
+- context receipt is readable for mission child runs without exposing raw source/email/provider payloads
+- memory cards list is autopilot-scoped and suppression toggles do not allow freeform edits
+- `build_memory_context` excludes suppressed memory cards
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 - `cd src-tauri && cargo fmt --check`
@@ -62,7 +62,7 @@ Verification:
 
 ## Next
 1. Mission outcomes integration: first-class mission receipts/outcomes on object surfaces
-2. Add second mission template (`website_monitor_batch`) once mission contract behavior is validated
+2. Notification/readiness gate wiring for mission/context legibility (only after context surfaces stabilize)
 3. Voice object + rule extraction approval flow (P0.11/P0.12)
 
 ## Non-goals (MVP)
