@@ -3,7 +3,7 @@ Last updated: 2026-02-24
 
 ## Current State
 - Mode: Day
-- Branch: `codex/pr27-frontend-test-foundation`
+- Branch: `codex/pr28-refactor-prep`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -37,26 +37,26 @@ Last updated: 2026-02-24
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR27 — Frontend test foundation (Vitest + RTL)
-Owner: Friday + Loki
+### PR28 — Structural refactor / prep (no behavior change)
+Owner: Friday
 Status: In progress
 Scope:
-- add Vitest + React Testing Library test foundation
-- extract fragile UI normalization/debounce/status logic into testable helpers
-- cover normalization, polling error messaging, debounce guards, and connection health rendering
-- add `npm test` to CI
+- split large UI surface code in `App.tsx` by extracting `ConnectionPanel`
+- extract `main.rs` pure guidance/log-sanitization/retry helpers into `guidance_utils.rs`
+- preserve behavior while reducing file size and creating cleaner seams for Voice/Rules + further decomposition
 Acceptance:
-- frontend test runner passes locally and in CI
-- high-risk UI logic has deterministic coverage (normalization + debounce + run-start guard)
-- no behavior regressions in build/lint
+- `cargo test`, `npm test`, `npm run lint`, `npm run build` all pass
+- no behavior change in connections / watcher / guide controls
+- `App.tsx` and `main.rs` are smaller with clearer boundaries
 Verification:
+- `cd src-tauri && cargo test`
 - `npm test`
 - `npm run lint`
 - `npm run build`
 
 ## Next
-1. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
-2. Voice object + rule extraction approval flow (P0.11/P0.12)
+1. Voice object + rule extraction approval flow (P0.11/P0.12)
+2. Structural hardening follow-up: split intent overlay / clarification panel and continue `runner.rs` decomposition
 3. Watcher health UI follow-up: provider-level reconnect/backoff details in a dedicated status surface (beyond connection cards)
 
 ## Non-goals (MVP)

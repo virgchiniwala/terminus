@@ -125,6 +125,13 @@ Last updated: 2026-02-24
     - debounce timer replacement helper
     - run-start guard helper
   - `ConnectionHealthSummary` extracted and covered with RTL rendering tests
+- Structural refactor / prep (PR28):
+  - `App.tsx` Connections surface extracted to `src/components/ConnectionPanel.tsx` (behavior-preserving)
+  - `main.rs` pure guidance/retry/log sanitization helpers extracted to `src-tauri/src/guidance_utils.rs`
+  - moved guidance/retry helper unit tests into `guidance_utils` module tests
+  - reduced primary file sizes to improve next-step refactors:
+    - `src/App.tsx`: 1166 -> 911 lines
+    - `src-tauri/src/main.rs`: 1175 -> 1033 lines
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
