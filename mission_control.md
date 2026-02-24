@@ -3,7 +3,7 @@ Last updated: 2026-02-22
 
 ## Current State
 - Mode: Day
-- Branch: `codex/pr24-reliability-cleanup-bundle`
+- Branch: `codex/pr25-ci-quality-gates`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -37,27 +37,26 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR24 — Reliability/cleanup bundle (watchers + query hygiene + architecture refresh)
-Owner: Friday + Fury + Loki
+### PR25 — CI + baseline quality gates
+Owner: Friday + Fury
 Status: In progress
 Scope:
-- add Gmail batch details fetch (reduce list+detail N+1 pattern) with safe sequential fallback
-- add provider-level inbox watcher backoff state for rate-limit/retryable failures
-- prevent one provider watcher failure from aborting the whole watcher cycle
-- optimize primary outcomes query shape (limit recent runs first via CTE) and add subquery indexes
-- remove dead `RunState::Draft` variant and refresh `ARCHITECTURE.md`
+- add GitHub Actions CI workflow for PRs/main (macOS runner)
+- enforce baseline checks: `cargo fmt --check`, `cargo test`, `npm run lint`, `npm run build`
+- add lightweight ESLint config + `npm run lint` script (minimal friction)
 Acceptance:
-- `cargo test` and `npm run build` pass
-- watcher batching/backoff tests pass
-- primary outcomes query behavior remains compatible
+- local and CI checks are aligned and passing
+- lint runs without requiring broad frontend refactors
 Verification:
+- `cd src-tauri && cargo fmt --check`
 - `cd src-tauri && cargo test`
+- `npm run lint`
 - `npm run build`
 
 ## Next
-1. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, move `main.rs` business logic
-2. DB compatibility cleanup: legacy float spend columns/timestamp normalization/cascade strategy
-3. Fine-grained Tauri app command ACLs (per-command permissions beyond window boundary)
+1. Watcher health UX: surface provider backoff/error state in UI
+2. Frontend test foundation (Vitest + RTL) for polling/debounce/normalization/run-start guards
+3. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution
