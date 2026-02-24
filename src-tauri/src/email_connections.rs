@@ -194,6 +194,10 @@ pub struct EmailConnectionRecord {
     pub connected_at_ms: Option<i64>,
     pub updated_at_ms: i64,
     pub last_error: Option<String>,
+    pub watcher_backoff_until_ms: Option<i64>,
+    pub watcher_consecutive_failures: i64,
+    pub watcher_last_error: Option<String>,
+    pub watcher_updated_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,6 +228,16 @@ pub struct OAuthCompleteInput {
 pub fn list_connections(connection: &Connection) -> Result<Vec<EmailConnectionRecord>, String> {
     let mut output = Vec::new();
     for provider in [EmailProvider::Gmail, EmailProvider::Microsoft365] {
+        let watcher_row: Option<(Option<i64>, i64, Option<String>, i64)> = connection
+            .query_row(
+                "SELECT backoff_until_ms, consecutive_failures, last_error, updated_at_ms
+                 FROM inbox_watcher_state
+                 WHERE provider = ?1",
+                params![provider.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to query watcher state: {e}"))?;
         let row: Option<(String, Option<String>, String, Option<i64>, i64, Option<String>)> =
             connection
                 .query_row(
@@ -262,6 +276,10 @@ pub fn list_connections(connection: &Connection) -> Result<Vec<EmailConnectionRe
                 connected_at_ms,
                 updated_at_ms,
                 last_error,
+                watcher_backoff_until_ms: watcher_row.as_ref().and_then(|v| v.0),
+                watcher_consecutive_failures: watcher_row.as_ref().map(|v| v.1).unwrap_or(0),
+                watcher_last_error: watcher_row.as_ref().and_then(|v| v.2.clone()),
+                watcher_updated_at_ms: watcher_row.as_ref().map(|v| v.3),
             });
         } else {
             output.push(EmailConnectionRecord {
@@ -276,6 +294,10 @@ pub fn list_connections(connection: &Connection) -> Result<Vec<EmailConnectionRe
                 connected_at_ms: None,
                 updated_at_ms: now_ms(),
                 last_error: None,
+                watcher_backoff_until_ms: watcher_row.as_ref().and_then(|v| v.0),
+                watcher_consecutive_failures: watcher_row.as_ref().map(|v| v.1).unwrap_or(0),
+                watcher_last_error: watcher_row.as_ref().and_then(|v| v.2.clone()),
+                watcher_updated_at_ms: watcher_row.as_ref().map(|v| v.3),
             });
         }
     }
@@ -484,6 +506,10 @@ pub fn complete_oauth(
         connected_at_ms: Some(now),
         updated_at_ms: now,
         last_error: None,
+        watcher_backoff_until_ms: None,
+        watcher_consecutive_failures: 0,
+        watcher_last_error: None,
+        watcher_updated_at_ms: None,
     })
 }
 

@@ -1,9 +1,9 @@
 # Mission Control — Terminus
-Last updated: 2026-02-22
+Last updated: 2026-02-24
 
 ## Current State
 - Mode: Day
-- Branch: `codex/pr25-ci-quality-gates`
+- Branch: `codex/pr26-watcher-health-ux`
 - Product shape: local-first, object-first Personal AI OS
 
 ## Strategic Guardrails
@@ -37,26 +37,25 @@ Last updated: 2026-02-22
 - Safe send policy gates + typed approval payload columns
 
 ## Now
-### PR25 — CI + baseline quality gates
-Owner: Friday + Fury
+### PR26 — Watcher health UX (provider backoff/error visibility)
+Owner: Friday + Loki
 Status: In progress
 Scope:
-- add GitHub Actions CI workflow for PRs/main (macOS runner)
-- enforce baseline checks: `cargo fmt --check`, `cargo test`, `npm run lint`, `npm run build`
-- add lightweight ESLint config + `npm run lint` script (minimal friction)
+- surface provider watcher health in Connections UI from `inbox_watcher_state`
+- show per-provider backoff timing, recent failure count, and last watcher error (sanitized)
+- keep calm copy (no stack traces / harness jargon)
 Acceptance:
-- local and CI checks are aligned and passing
-- lint runs without requiring broad frontend refactors
+- user can see why Gmail/Microsoft watcher is delayed or failing without opening logs
+- rate-limit/backoff state is legible in the UI
 Verification:
-- `cd src-tauri && cargo fmt --check`
 - `cd src-tauri && cargo test`
-- `npm run lint`
 - `npm run build`
+- Connect provider, trigger watcher failure/backoff path, refresh Home -> Connections card shows retry timing/failure count
 
 ## Next
-1. Watcher health UX: surface provider backoff/error state in UI
-2. Frontend test foundation (Vitest + RTL) for polling/debounce/normalization/run-start guards
-3. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
+1. Frontend test foundation (Vitest + RTL) for polling/debounce/normalization/run-start guards
+2. Structural hardening pass: split `App.tsx`, extract runner/provider/web modules, remove dead state variants
+3. Voice object + rule extraction approval flow (P0.11/P0.12)
 
 ## Non-goals (MVP)
 - arbitrary end-user code execution

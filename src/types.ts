@@ -50,6 +50,10 @@ export interface EmailConnectionRecord {
   connectedAtMs: number | null;
   updatedAtMs: number;
   lastError: string | null;
+  watcherBackoffUntilMs?: number | null;
+  watcherConsecutiveFailures?: number;
+  watcherLastError?: string | null;
+  watcherUpdatedAtMs?: number | null;
 }
 
 export interface OAuthStartResponse {

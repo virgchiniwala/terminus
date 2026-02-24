@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-22
+Last updated: 2026-02-24
 
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
@@ -106,6 +106,14 @@ Last updated: 2026-02-22
   - GitHub Actions CI workflow added for PRs and `main` pushes (macOS runner)
   - CI checks: `cargo fmt --check`, `cargo test`, `npm run lint`, `npm run build`
   - lightweight ESLint flat config added with `npm run lint`
+- Watcher health UX (PR26):
+  - `list_email_connections` now includes watcher state fields from `inbox_watcher_state`
+    (`watcher_backoff_until_ms`, `watcher_consecutive_failures`, `watcher_last_error`, `watcher_updated_at_ms`)
+  - Connections cards surface provider watcher health:
+    - watcher ready
+    - recovering (recent failures)
+    - backoff/retry time for rate limits / temporary provider failures
+  - Connection cards also surface provider connection issues (for reconnect-required cases)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -142,6 +150,9 @@ Last updated: 2026-02-22
    - `compact_learning_data({ autopilotId, dryRun: true })`
 4. Manual compaction apply:
    - `compact_learning_data({ autopilotId, dryRun: false })`
+5. Watcher health payload check:
+   - `list_email_connections()`
+   - confirm each provider row includes watcher fields and non-zero `watcher_consecutive_failures` / future `watcher_backoff_until_ms` after simulated rate-limit failures
 
 ## Operational Truths
 - Local-first runtime

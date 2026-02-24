@@ -147,6 +147,21 @@ function formatShortLocalTime(ms: number): string {
   }
 }
 
+function watcherStatusLine(record: EmailConnectionRecord): string {
+  if (record.status !== "connected") {
+    return "Watcher inactive until connected.";
+  }
+  const backoffUntil = record.watcherBackoffUntilMs ?? null;
+  if (backoffUntil && backoffUntil > Date.now()) {
+    return `Rate-limited or temporarily unavailable. Retrying at ${formatShortLocalTime(backoffUntil)}.`;
+  }
+  const failures = record.watcherConsecutiveFailures ?? 0;
+  if (failures > 0) {
+    return `Watcher recovering (${failures} recent failure${failures === 1 ? "" : "s"}).`;
+  }
+  return "Watcher ready.";
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<HomeSnapshot>(fallbackSnapshot);
   const [loading, setLoading] = useState(true);
@@ -290,6 +305,12 @@ export function App() {
           connectedAtMs: row.connectedAtMs ?? row.connected_at_ms ?? null,
           updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? Date.now(),
           lastError: row.lastError ?? row.last_error ?? null,
+          watcherBackoffUntilMs:
+            row.watcherBackoffUntilMs ?? row.watcher_backoff_until_ms ?? null,
+          watcherConsecutiveFailures:
+            row.watcherConsecutiveFailures ?? row.watcher_consecutive_failures ?? 0,
+          watcherLastError: row.watcherLastError ?? row.watcher_last_error ?? null,
+          watcherUpdatedAtMs: row.watcherUpdatedAtMs ?? row.watcher_updated_at_ms ?? null,
         })) as EmailConnectionRecord[];
         setConnections(normalized);
       })
@@ -1103,6 +1124,19 @@ export function App() {
                 <h3>{record.provider === "gmail" ? "Gmail" : "Microsoft 365"}</h3>
                 <p>Status: {record.status === "connected" ? "Connected" : "Disconnected"}</p>
                 {record.accountEmail && <p>Account: {record.accountEmail}</p>}
+                {record.lastError && <p>Connection issue: {record.lastError}</p>}
+                <p>{watcherStatusLine(record)}</p>
+                {(record.watcherConsecutiveFailures ?? 0) > 0 && (
+                  <p>Recent failures: {record.watcherConsecutiveFailures}</p>
+                )}
+                {record.watcherLastError && (
+                  <p>
+                    Last watcher issue: {record.watcherLastError}
+                    {record.watcherUpdatedAtMs
+                      ? ` (${formatShortLocalTime(record.watcherUpdatedAtMs)})`
+                      : ""}
+                  </p>
+                )}
                 <div className="connection-actions">
                   <button type="button" onClick={() => startOauth(record.provider)}>
                     {record.status === "connected" ? "Reconnect" : "Connect"}
