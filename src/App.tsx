@@ -7,6 +7,10 @@ import type {
   HomeSnapshot,
   InterventionSuggestion,
   IntentDraftResponse,
+  MissionDetail,
+  MissionDraft,
+  MissionRecord,
+  MissionTickResult,
   OAuthStartResponse,
   RecipeKind,
   RunDiagnosticRecord,
@@ -113,6 +117,11 @@ export function App() {
   const [clarificationsMessage, setClarificationsMessage] = useState<string | null>(null);
   const [runDiagnostics, setRunDiagnostics] = useState<RunDiagnosticRecord[]>([]);
   const [diagnosticsMessage, setDiagnosticsMessage] = useState<string | null>(null);
+  const [missions, setMissions] = useState<MissionRecord[]>([]);
+  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
+  const [selectedMission, setSelectedMission] = useState<MissionDetail | null>(null);
+  const [missionsMessage, setMissionsMessage] = useState<string | null>(null);
+  const [missionActionLoading, setMissionActionLoading] = useState(false);
   const runnerControlSaveTimerRef = useRef<number | null>(null);
   const sendPolicySaveTimerRef = useRef<number | null>(null);
   const intentOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -199,6 +208,73 @@ export function App() {
         setDiagnosticsMessage("Could not load run diagnostics.");
       });
   }, [normalizeRunDiagnostic]);
+
+  const normalizeMissionRecord = useCallback((row: any): MissionRecord => ({
+    id: row.id,
+    templateKind: row.templateKind ?? row.template_kind,
+    status: row.status,
+    provider: row.provider,
+    failureReason: row.failureReason ?? row.failure_reason ?? null,
+    childRunsCount: row.childRunsCount ?? row.child_runs_count ?? 0,
+    terminalChildrenCount: row.terminalChildrenCount ?? row.terminal_children_count ?? 0,
+    summaryJson: row.summaryJson ?? row.summary_json ?? null,
+    createdAtMs: row.createdAtMs ?? row.created_at_ms ?? Date.now(),
+    updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? Date.now(),
+  }), []);
+
+  const normalizeMissionDetail = useCallback((row: any): MissionDetail => ({
+    mission: normalizeMissionRecord(row.mission ?? {}),
+    childRuns: (row.childRuns ?? row.child_runs ?? []).map((c: any) => ({
+      childKey: c.childKey ?? c.child_key,
+      sourceLabel: c.sourceLabel ?? c.source_label ?? null,
+      runId: c.runId ?? c.run_id,
+      runRole: c.runRole ?? c.run_role ?? "child",
+      status: c.status,
+      runState: c.runState ?? c.run_state ?? null,
+      runFailureReason: c.runFailureReason ?? c.run_failure_reason ?? null,
+      updatedAtMs: c.updatedAtMs ?? c.updated_at_ms ?? Date.now(),
+    })),
+    events: (row.events ?? []).map((e: any) => ({
+      id: e.id,
+      eventType: e.eventType ?? e.event_type,
+      summary: e.summary ?? "",
+      detailsJson: e.detailsJson ?? e.details_json ?? "{}",
+      createdAtMs: e.createdAtMs ?? e.created_at_ms ?? Date.now(),
+    })),
+    contract: {
+      allChildrenTerminal:
+        row.contract?.allChildrenTerminal ?? row.contract?.all_children_terminal ?? false,
+      hasBlockedOrPendingChild:
+        row.contract?.hasBlockedOrPendingChild ??
+        row.contract?.has_blocked_or_pending_child ??
+        false,
+      aggregationSummaryExists:
+        row.contract?.aggregationSummaryExists ?? row.contract?.aggregation_summary_exists ?? false,
+      readyToComplete: row.contract?.readyToComplete ?? row.contract?.ready_to_complete ?? false,
+    },
+  }), [normalizeMissionRecord]);
+
+  const loadMissions = useCallback(() => {
+    invoke<MissionRecord[]>("list_missions", { limit: 10 })
+      .then((rows: any[]) => {
+        const normalized = (rows ?? []).map(normalizeMissionRecord);
+        setMissions(normalized);
+        setSelectedMissionId((prev) => prev ?? normalized[0]?.id ?? null);
+      })
+      .catch((err) => {
+        console.error("Failed to load missions:", err);
+        setMissionsMessage("Could not load missions.");
+      });
+  }, [normalizeMissionRecord]);
+
+  const loadMissionDetail = useCallback((missionId: string) => {
+    invoke<MissionDetail>("get_mission", { missionId })
+      .then((payload: any) => setSelectedMission(normalizeMissionDetail(payload)))
+      .catch((err) => {
+        console.error("Failed to load mission detail:", err);
+        setMissionsMessage(typeof err === "string" ? err : "Could not load mission details.");
+      });
+  }, [normalizeMissionDetail]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -382,7 +458,16 @@ export function App() {
     loadRunnerControl();
     loadClarifications();
     loadRunDiagnostics();
-  }, [loadSnapshot, loadConnections, loadRunnerControl, loadClarifications, loadRunDiagnostics]);
+    loadMissions();
+  }, [loadSnapshot, loadConnections, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+
+  useEffect(() => {
+    if (!selectedMissionId) {
+      setSelectedMission(null);
+      return;
+    }
+    loadMissionDetail(selectedMissionId);
+  }, [selectedMissionId, loadMissionDetail]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -391,13 +476,17 @@ export function App() {
           loadSnapshot();
           loadClarifications();
           loadRunDiagnostics();
+          loadMissions();
+          if (selectedMissionId) {
+            loadMissionDetail(selectedMissionId);
+          }
         })
         .catch(() => {
           // keep silent; runner status remains visible on Home
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, selectedMissionId]);
 
   useEffect(() => {
     return () => {
@@ -674,6 +763,57 @@ export function App() {
       });
   };
 
+  const createDemoMission = () => {
+    if (missionActionLoading) return;
+    setMissionActionLoading(true);
+    setMissionsMessage(null);
+    invoke<MissionDraft>("create_mission_draft", {
+      input: {
+        templateKind: "daily_brief_multi_source",
+        intent: "Create a mission brief from these updates",
+        provider: "openai",
+        sources: [
+          "Inline note: Product - onboarding milestone moved to next week.",
+          "Inline note: Ops - billing ticket volume increased today.",
+          "Inline note: GTM - customer requested security follow-up.",
+        ],
+      },
+    })
+      .then((draft) => invoke<MissionDetail>("start_mission", { input: { draft } }))
+      .then((payload: any) => {
+        const detail = normalizeMissionDetail(payload);
+        setSelectedMissionId(detail.mission.id);
+        setSelectedMission(detail);
+        setMissionsMessage("Mission created. Run a mission tick to advance child runs.");
+        loadMissions();
+      })
+      .catch((err) => {
+        console.error("Failed to create mission:", err);
+        setMissionsMessage(typeof err === "string" ? err : "Could not create mission.");
+      })
+      .finally(() => setMissionActionLoading(false));
+  };
+
+  const tickMission = (missionId: string) => {
+    if (missionActionLoading) return;
+    setMissionActionLoading(true);
+    setMissionsMessage(null);
+    invoke<MissionTickResult>("run_mission_tick", { missionId })
+      .then((payload: any) => {
+        const detail = normalizeMissionDetail(payload.mission ?? payload);
+        const advanced = payload.childRunsTicked ?? payload.child_runs_ticked ?? 0;
+        setSelectedMission(detail);
+        setSelectedMissionId(detail.mission.id);
+        setMissionsMessage(`Mission tick complete (${advanced} child runs advanced).`);
+        loadMissions();
+      })
+      .catch((err) => {
+        console.error("Failed to tick mission:", err);
+        setMissionsMessage(typeof err === "string" ? err : "Could not run mission tick.");
+      })
+      .finally(() => setMissionActionLoading(false));
+  };
+
   if (loading) {
     return (
       <main className="app-shell loading-state" aria-label="Loading Terminus" aria-busy="true">
@@ -757,6 +897,109 @@ export function App() {
               </ul>
             </div>
           )}
+        </section>
+
+        <section className="diagnostics-panel" aria-label="Missions">
+          <div className="connection-panel-header">
+            <h2>Missions (MVP)</h2>
+            <p>Mission orchestration fans out child runs, then completes an aggregate summary when the contract passes.</p>
+          </div>
+          <div className="connection-actions">
+            <button type="button" onClick={createDemoMission} disabled={missionActionLoading}>
+              {missionActionLoading ? "Working..." : "Create Demo Mission"}
+            </button>
+            {selectedMissionId && (
+              <button
+                type="button"
+                className="intent-primary"
+                onClick={() => tickMission(selectedMissionId)}
+                disabled={missionActionLoading}
+              >
+                Run Mission Tick
+              </button>
+            )}
+          </div>
+          {missionsMessage && <p className="connection-message">{missionsMessage}</p>}
+          <div className="connection-cards">
+            <article className="connection-card">
+              <h3>Mission List</h3>
+              {missions.length === 0 ? (
+                <p>No missions yet.</p>
+              ) : (
+                <div className="clarification-list">
+                  {missions.map((mission) => (
+                    <button
+                      key={mission.id}
+                      type="button"
+                      className="clarification-chip"
+                      onClick={() => setSelectedMissionId(mission.id)}
+                      aria-pressed={selectedMissionId === mission.id}
+                      title={`${mission.status} · ${mission.terminalChildrenCount}/${mission.childRunsCount} child runs terminal`}
+                    >
+                      {mission.templateKind} · {mission.status}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </article>
+
+            <article className="connection-card">
+              <h3>Mission Detail</h3>
+              {!selectedMission ? (
+                <p>Select a mission to view status.</p>
+              ) : (
+                <>
+                  <p>
+                    Status: <code>{selectedMission.mission.status}</code>
+                  </p>
+                  <p>
+                    Child runs: {selectedMission.mission.terminalChildrenCount}/
+                    {selectedMission.mission.childRunsCount} terminal
+                  </p>
+                  {selectedMission.mission.failureReason && (
+                    <p>Reason: {selectedMission.mission.failureReason}</p>
+                  )}
+                  <p>
+                    Contract: terminal={selectedMission.contract.allChildrenTerminal ? "yes" : "no"} ·
+                    blocked/pending={selectedMission.contract.hasBlockedOrPendingChild ? "yes" : "no"} ·
+                    summary={selectedMission.contract.aggregationSummaryExists ? "yes" : "no"}
+                  </p>
+                  <div className="clarification-list">
+                    {selectedMission.childRuns.map((child) => (
+                      <div key={child.runId} className="clarification-card">
+                        <p className="clarification-meta">
+                          {child.childKey} · <code>{child.runState ?? child.status}</code>
+                        </p>
+                        {child.sourceLabel && <p>{child.sourceLabel}</p>}
+                        {child.runFailureReason && <p>Reason: {child.runFailureReason}</p>}
+                      </div>
+                    ))}
+                  </div>
+                  {selectedMission.mission.summaryJson && (() => {
+                    try {
+                      const parsed = JSON.parse(selectedMission.mission.summaryJson);
+                      const title = parsed?.title as string | undefined;
+                      const lines = Array.isArray(parsed?.summaryLines) ? parsed.summaryLines.slice(0, 6) : [];
+                      return (
+                        <div className="runner-suppressed-list">
+                          <p><strong>{title ?? "Mission Summary"}</strong></p>
+                          {lines.length > 0 && (
+                            <ul>
+                              {lines.map((line: string, idx: number) => (
+                                <li key={`${idx}_${line}`}>{line}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      );
+                    } catch {
+                      return null;
+                    }
+                  })()}
+                </>
+              )}
+            </article>
+          </div>
         </section>
 
         <section className="diagnostics-panel" aria-label="Needs attention">

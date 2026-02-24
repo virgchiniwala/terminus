@@ -4,6 +4,7 @@ mod email_connections;
 mod guidance_utils;
 mod inbox_watcher;
 mod learning;
+mod missions;
 mod primitives;
 mod providers;
 mod runner;
@@ -224,6 +225,49 @@ fn resume_due_runs(
 ) -> Result<Vec<RunRecord>, String> {
     let mut connection = open_connection(&state)?;
     RunnerEngine::resume_due_runs(&mut connection, limit.unwrap_or(20)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_mission_draft(
+    input: missions::CreateMissionDraftInput,
+) -> Result<missions::MissionDraft, String> {
+    missions::create_mission_draft(input)
+}
+
+#[tauri::command]
+fn start_mission(
+    state: tauri::State<AppState>,
+    input: missions::StartMissionInput,
+) -> Result<missions::MissionDetail, String> {
+    let mut connection = open_connection(&state)?;
+    missions::start_mission(&mut connection, input)
+}
+
+#[tauri::command]
+fn get_mission(
+    state: tauri::State<AppState>,
+    mission_id: String,
+) -> Result<missions::MissionDetail, String> {
+    let connection = open_connection(&state)?;
+    missions::get_mission(&connection, &mission_id)
+}
+
+#[tauri::command]
+fn list_missions(
+    state: tauri::State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<missions::MissionRecord>, String> {
+    let connection = open_connection(&state)?;
+    missions::list_missions(&connection, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn run_mission_tick(
+    state: tauri::State<AppState>,
+    mission_id: String,
+) -> Result<missions::MissionTickResult, String> {
+    let mut connection = open_connection(&state)?;
+    missions::run_mission_tick(&mut connection, &mission_id)
 }
 
 #[tauri::command]
@@ -1025,6 +1069,11 @@ fn main() {
             start_recipe_run,
             run_tick,
             resume_due_runs,
+            create_mission_draft,
+            start_mission,
+            get_mission,
+            list_missions,
+            run_mission_tick,
             approve_run_approval,
             reject_run_approval,
             list_pending_approvals,

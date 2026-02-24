@@ -135,6 +135,21 @@ Last updated: 2026-02-24
   - reduced primary file sizes to improve next-step refactors:
     - `src/App.tsx`: 1166 -> 911 lines
     - `src-tauri/src/main.rs`: 1175 -> 1033 lines
+- Mission Orchestration MVP (Iteration 2):
+  - new SQLite tables: `missions`, `mission_runs`, `mission_events`
+  - new backend module: `src-tauri/src/missions.rs`
+  - mission template MVP: `daily_brief_multi_source` (fan-out child daily-brief runs + deterministic aggregate summary)
+  - mission commands:
+    - `create_mission_draft`
+    - `start_mission`
+    - `get_mission`
+    - `list_missions`
+    - `run_mission_tick`
+  - completion contract enforced in mission detail/tick:
+    - all child runs terminal
+    - no child in `needs_approval` / `needs_clarification` / `blocked`
+    - aggregation summary present before `succeeded`
+  - minimal Home Missions panel added (list + detail + tick + demo mission create button)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -142,6 +157,17 @@ Last updated: 2026-02-24
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
+
+## Mission MVP DevTools / Manual Validation
+1. Create a mission draft:
+   - `create_mission_draft({ templateKind: "daily_brief_multi_source", intent: "Create a mission brief", provider: "openai", sources: ["Inline note: A", "Inline note: B"] })`
+2. Start mission:
+   - `start_mission({ draft })`
+3. Tick mission until terminal:
+   - `run_mission_tick({ missionId })`
+4. Inspect mission:
+   - `get_mission({ missionId })`
+   - verify contract flags and `summaryJson` after child success
 
 ## Current Priority Track
 - Canonical priority docs:

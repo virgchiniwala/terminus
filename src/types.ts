@@ -144,6 +144,86 @@ export interface ApplyInterventionResult {
   updatedRunState?: string | null;
 }
 
+export type MissionTemplateKind = "daily_brief_multi_source";
+
+export type MissionStatus =
+  | "draft"
+  | "running"
+  | "waiting_children"
+  | "aggregating"
+  | "succeeded"
+  | "failed"
+  | "blocked";
+
+export interface MissionSourceGroup {
+  childKey: string;
+  label: string;
+  sources: string[];
+}
+
+export interface MissionDraft {
+  templateKind: MissionTemplateKind;
+  provider: "openai" | "anthropic" | "gemini" | string;
+  intent: string;
+  sourceGroups: MissionSourceGroup[];
+  preview: {
+    childRuns: number;
+    contract: string;
+    note: string;
+  };
+}
+
+export interface MissionRecord {
+  id: string;
+  templateKind: MissionTemplateKind | string;
+  status: MissionStatus | string;
+  provider: string;
+  failureReason?: string | null;
+  childRunsCount: number;
+  terminalChildrenCount: number;
+  summaryJson?: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface MissionRunLink {
+  childKey: string;
+  sourceLabel?: string | null;
+  runId: string;
+  runRole: string;
+  status: string;
+  runState?: string | null;
+  runFailureReason?: string | null;
+  updatedAtMs: number;
+}
+
+export interface MissionEventRecord {
+  id: string;
+  eventType: string;
+  summary: string;
+  detailsJson: string;
+  createdAtMs: number;
+}
+
+export interface MissionContractStatus {
+  allChildrenTerminal: boolean;
+  hasBlockedOrPendingChild: boolean;
+  aggregationSummaryExists: boolean;
+  readyToComplete: boolean;
+}
+
+export interface MissionDetail {
+  mission: MissionRecord;
+  childRuns: MissionRunLink[];
+  events: MissionEventRecord[];
+  contract: MissionContractStatus;
+}
+
+export interface MissionTickResult {
+  mission: MissionDetail;
+  childRunsTicked: number;
+}
+
 export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
 
 export type RiskTier = "low" | "medium" | "high";

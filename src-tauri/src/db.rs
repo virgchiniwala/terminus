@@ -258,6 +258,45 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (action_id) REFERENCES actions(id)
             );
 
+            CREATE TABLE IF NOT EXISTS missions (
+              id TEXT PRIMARY KEY,
+              template_kind TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL,
+              provider_kind TEXT NOT NULL DEFAULT 'openai',
+              config_json TEXT NOT NULL DEFAULT '{}',
+              summary_json TEXT,
+              failure_reason TEXT,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mission_runs (
+              id TEXT PRIMARY KEY,
+              mission_id TEXT NOT NULL,
+              child_key TEXT NOT NULL,
+              run_id TEXT NOT NULL,
+              run_role TEXT NOT NULL DEFAULT 'child',
+              source_label TEXT,
+              status TEXT NOT NULL DEFAULT 'created',
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              UNIQUE(mission_id, child_key),
+              UNIQUE(mission_id, run_id),
+              FOREIGN KEY (mission_id) REFERENCES missions(id),
+              FOREIGN KEY (run_id) REFERENCES runs(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mission_events (
+              id TEXT PRIMARY KEY,
+              mission_id TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              details_json TEXT NOT NULL DEFAULT '{}',
+              created_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (mission_id) REFERENCES missions(id)
+            );
+
             CREATE TABLE IF NOT EXISTS clarifications (
               id TEXT PRIMARY KEY,
               run_id TEXT NOT NULL,
@@ -799,6 +838,24 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create action executions index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_missions_status_updated ON missions(status, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create missions status index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_mission_runs_mission_updated ON mission_runs(mission_id, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create mission runs index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_mission_events_mission_created ON mission_events(mission_id, created_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create mission events index: {e}"))?;
     connection
         .execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clarifications_single_pending ON clarifications(run_id, step_id, status) WHERE status = 'pending'",
