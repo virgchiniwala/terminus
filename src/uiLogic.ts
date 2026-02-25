@@ -1,4 +1,9 @@
-import type { EmailConnectionRecord, HomeSnapshot, IntentDraftResponse } from "./types";
+import type {
+  EmailConnectionRecord,
+  HomeSnapshot,
+  IntentDraftResponse,
+  OnboardingStateRecord,
+} from "./types";
 
 export const fallbackSnapshot: HomeSnapshot = {
   surfaces: [
@@ -93,6 +98,33 @@ export function normalizeEmailConnectionRecord(row: unknown): EmailConnectionRec
     watcherUpdatedAtMs:
       (value.watcherUpdatedAtMs as number | null) ??
       (value.watcher_updated_at_ms as number | null) ??
+      null,
+  };
+}
+
+export function normalizeOnboardingStateRecord(row: unknown): OnboardingStateRecord {
+  const value = row as Record<string, unknown>;
+  return {
+    onboardingComplete:
+      (value.onboardingComplete as boolean) ?? (value.onboarding_complete as boolean) ?? false,
+    dismissed: (value.dismissed as boolean) ?? false,
+    roleText: (value.roleText as string) ?? (value.role_text as string) ?? "",
+    workFocusText: (value.workFocusText as string) ?? (value.work_focus_text as string) ?? "",
+    biggestPainText:
+      (value.biggestPainText as string) ?? (value.biggest_pain_text as string) ?? "",
+    recommendedIntent:
+      (value.recommendedIntent as string | null) ??
+      (value.recommended_intent as string | null) ??
+      null,
+    startedAtMs: (value.startedAtMs as number) ?? (value.started_at_ms as number) ?? Date.now(),
+    updatedAtMs: (value.updatedAtMs as number) ?? (value.updated_at_ms as number) ?? Date.now(),
+    completedAtMs:
+      (value.completedAtMs as number | null) ?? (value.completed_at_ms as number | null) ?? null,
+    dismissedAtMs:
+      (value.dismissedAtMs as number | null) ?? (value.dismissed_at_ms as number | null) ?? null,
+    firstSuccessfulRunAtMs:
+      (value.firstSuccessfulRunAtMs as number | null) ??
+      (value.first_successful_run_at_ms as number | null) ??
       null,
   };
 }

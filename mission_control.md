@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-27
+Last updated: 2026-02-28
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/relay-push-channel-consumer`
+- Branch: `codex/interview-onboarding-mvp`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -58,21 +58,20 @@ Read these in order before starting work:
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P1d)
-### Relay Push Channel Consumer + Poll Fallback (Desktop)
+## Now (P2)
+### Interview-Driven Onboarding (First Result Flow)
 Owner: active session
 Status: In progress
 Scope:
-- Add desktop relay push-channel consumer (`tick_relay_approval_push`) using relay long-poll/stream endpoint
-- Keep poll sync as compatibility path and fallback when push endpoint is unavailable
-- Persist separate health/backoff for poll + push in SQLite (`relay_sync_state` channel rows)
-- Run push consumer in a dedicated background thread (no blocking of runner cycle thread)
-- Surface poll + push channel status in Connections panel with manual controls
+- Add DB-backed onboarding state (`onboarding_state`) and Tauri commands to read/save/dismiss progress
+- Show a guided first-run onboarding panel above Home surfaces (role, work focus, biggest pain)
+- Recommend a first Autopilot intent and open it directly in the Intent Bar
+- Auto-complete onboarding after first successful run is detected
 Acceptance:
-- Push channel applies remote decisions through canonical callback path with replay safety
-- Push channel falls back to poll safely when stream endpoint is unavailable
-- Dedicated push thread does not block runner cycle thread
-- Connections UI shows separate poll and push health/backoff/applied counts
+- First-run users see a guided onboarding panel instead of only an empty Home
+- “Recommend First Autopilot” opens Intent Bar with a runnable intent and draft preview
+- Onboarding progress is persisted locally and survives app restarts
+- Onboarding marks complete automatically after first successful run
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -85,9 +84,9 @@ npm run build
 
 ## Next
 1. **P1d: Relay Push Channel + Slack Bot**
-   - Slack bot via Vercel Chat SDK pattern (approve from Slack)
-   - Relay server callback/auth integration using the desktop callback contract
    - Server-side push channel (WebSocket/SSE) to deliver approval decisions
+   - Relay server callback/auth integration using the desktop callback contract
+   - Slack bot via Vercel Chat SDK pattern (approve from Slack)
 
 2. **P2: Interview-Driven Onboarding**
    - Blank canvas first-launch experience

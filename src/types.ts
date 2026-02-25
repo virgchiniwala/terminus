@@ -74,6 +74,20 @@ export interface RunnerControlRecord {
   missedRunsCount: number;
 }
 
+export interface OnboardingStateRecord {
+  onboardingComplete: boolean;
+  dismissed: boolean;
+  roleText: string;
+  workFocusText: string;
+  biggestPainText: string;
+  recommendedIntent: string | null;
+  startedAtMs: number;
+  updatedAtMs: number;
+  completedAtMs: number | null;
+  dismissedAtMs: number | null;
+  firstSuccessfulRunAtMs: number | null;
+}
+
 export interface TransportStatusRecord {
   mode: "hosted_relay" | "byok_local" | "mock" | string;
   relayConfigured: boolean;

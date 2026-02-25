@@ -74,6 +74,22 @@ pub struct AutopilotSendPolicyRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingStateRecord {
+    pub onboarding_complete: bool,
+    pub dismissed: bool,
+    pub role_text: String,
+    pub work_focus_text: String,
+    pub biggest_pain_text: String,
+    pub recommended_intent: Option<String>,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub completed_at_ms: Option<i64>,
+    pub dismissed_at_ms: Option<i64>,
+    pub first_successful_run_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionEventInsert {
     pub event_id: String,
     pub client_event_id: Option<String>,
@@ -582,6 +598,20 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               updated_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS onboarding_state (
+              singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+              onboarding_complete INTEGER NOT NULL DEFAULT 0,
+              dismissed INTEGER NOT NULL DEFAULT 0,
+              role_text TEXT NOT NULL DEFAULT '',
+              work_focus_text TEXT NOT NULL DEFAULT '',
+              biggest_pain_text TEXT NOT NULL DEFAULT '',
+              recommended_intent TEXT,
+              started_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              completed_at_ms INTEGER,
+              dismissed_at_ms INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS autopilot_send_policy (
               autopilot_id TEXT PRIMARY KEY,
               allow_sending INTEGER NOT NULL DEFAULT 0,
@@ -715,6 +745,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     ensure_column(connection, "approvals", "decided_by", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "channel", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "actor_label", "TEXT")?;
+    ensure_column(connection, "onboarding_state", "recommended_intent", "TEXT")?;
     ensure_column(
         connection,
         "relay_sync_state",
@@ -924,6 +955,15 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to seed runner control: {e}"))?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO onboarding_state (
+               singleton_id, onboarding_complete, dismissed, role_text, work_focus_text, biggest_pain_text,
+               recommended_intent, started_at_ms, updated_at_ms
+             ) VALUES (1, 0, 0, '', '', '', NULL, strftime('%s','now') * 1000, strftime('%s','now') * 1000)",
+            [],
+        )
+        .map_err(|e| format!("Failed to seed onboarding state: {e}"))?;
 
     Ok(())
 }
@@ -1430,6 +1470,99 @@ pub fn get_runner_control(connection: &Connection) -> Result<RunnerControlRecord
             },
         )
         .map_err(|e| format!("Failed to read runner control: {e}"))
+}
+
+pub fn get_onboarding_state(connection: &Connection) -> Result<OnboardingStateRecord, String> {
+    let first_successful_run_at_ms: Option<i64> = connection
+        .query_row(
+            "SELECT created_at * 1000 FROM runs WHERE state = 'succeeded' ORDER BY created_at ASC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to query first successful run: {e}"))?;
+
+    let mut record: OnboardingStateRecord = connection
+        .query_row(
+            "SELECT onboarding_complete, dismissed, role_text, work_focus_text, biggest_pain_text,
+                    recommended_intent, started_at_ms, updated_at_ms, completed_at_ms, dismissed_at_ms
+             FROM onboarding_state WHERE singleton_id = 1",
+            [],
+            |row| {
+                Ok(OnboardingStateRecord {
+                    onboarding_complete: row.get::<_, i64>(0)? == 1,
+                    dismissed: row.get::<_, i64>(1)? == 1,
+                    role_text: row.get(2)?,
+                    work_focus_text: row.get(3)?,
+                    biggest_pain_text: row.get(4)?,
+                    recommended_intent: row.get(5)?,
+                    started_at_ms: row.get(6)?,
+                    updated_at_ms: row.get(7)?,
+                    completed_at_ms: row.get(8)?,
+                    dismissed_at_ms: row.get(9)?,
+                    first_successful_run_at_ms,
+                })
+            },
+        )
+        .map_err(|e| format!("Failed to read onboarding state: {e}"))?;
+
+    if !record.onboarding_complete {
+        if let Some(success_ms) = first_successful_run_at_ms {
+            let completed_at_ms = record.completed_at_ms.unwrap_or(success_ms);
+            connection
+                .execute(
+                    "UPDATE onboarding_state
+                     SET onboarding_complete = 1,
+                         completed_at_ms = COALESCE(completed_at_ms, ?1),
+                         dismissed = 0,
+                         updated_at_ms = strftime('%s','now') * 1000
+                     WHERE singleton_id = 1",
+                    params![completed_at_ms],
+                )
+                .map_err(|e| format!("Failed to finalize onboarding state: {e}"))?;
+            record.onboarding_complete = true;
+            record.dismissed = false;
+            record.completed_at_ms = Some(completed_at_ms);
+        }
+    }
+    record.first_successful_run_at_ms = first_successful_run_at_ms;
+    Ok(record)
+}
+
+pub fn upsert_onboarding_state(
+    connection: &Connection,
+    payload: &OnboardingStateRecord,
+) -> Result<OnboardingStateRecord, String> {
+    connection
+        .execute(
+            "UPDATE onboarding_state
+             SET onboarding_complete = ?1,
+                 dismissed = ?2,
+                 role_text = ?3,
+                 work_focus_text = ?4,
+                 biggest_pain_text = ?5,
+                 recommended_intent = ?6,
+                 completed_at_ms = ?7,
+                 dismissed_at_ms = ?8,
+                 updated_at_ms = strftime('%s','now') * 1000
+             WHERE singleton_id = 1",
+            params![
+                if payload.onboarding_complete { 1 } else { 0 },
+                if payload.dismissed { 1 } else { 0 },
+                payload.role_text.trim(),
+                payload.work_focus_text.trim(),
+                payload.biggest_pain_text.trim(),
+                payload
+                    .recommended_intent
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty()),
+                payload.completed_at_ms,
+                payload.dismissed_at_ms
+            ],
+        )
+        .map_err(|e| format!("Failed to update onboarding state: {e}"))?;
+    get_onboarding_state(connection)
 }
 
 pub fn upsert_runner_control(
