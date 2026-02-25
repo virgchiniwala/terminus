@@ -224,7 +224,7 @@ export interface MissionTickResult {
   childRunsTicked: number;
 }
 
-export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief";
+export type RecipeKind = "website_monitor" | "inbox_triage" | "daily_brief" | "custom";
 
 export type RiskTier = "low" | "medium" | "high";
 

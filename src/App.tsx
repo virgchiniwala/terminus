@@ -532,6 +532,7 @@ export function App() {
     const pastedText = recipeNeedsPastedText(currentDraft.plan.recipe)
       ? currentDraft.plan.inboxSourceText
       : undefined;
+    const planJson = currentDraft.plan.recipe === "custom" ? JSON.stringify(currentDraft.plan) : undefined;
 
     setRunDraftLoading(true);
     invoke("start_recipe_run", {
@@ -543,6 +544,7 @@ export function App() {
       provider: currentDraft.plan.provider.id,
       idempotencyKey,
       maxRetries: 2,
+      planJson,
     })
       .then(() => {
         setRunNotice(`${currentDraft.preview.primaryCta} started. Open Activity for live progress.`);
