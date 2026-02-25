@@ -1,11 +1,31 @@
 use crate::providers::types::{ProviderError, ProviderRequest, ProviderResponse};
 use crate::transport::ExecutionTransport;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 pub struct RelayTransport {
     relay_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayApprovalDecision {
+    pub request_id: String,
+    pub approval_id: String,
+    pub decision: String,
+    pub actor_label: Option<String>,
+    pub channel: Option<String>,
+    pub reason: Option<String>,
+    pub issued_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayApprovalPollResponse {
+    #[serde(default)]
+    pub decisions: Vec<RelayApprovalDecision>,
 }
 
 impl RelayTransport {
@@ -20,6 +40,20 @@ impl RelayTransport {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "https://relay.terminus.run/dispatch".to_string())
+    }
+
+    pub fn default_approval_poll_url() -> String {
+        if let Ok(url) = std::env::var("TERMINUS_RELAY_APPROVAL_POLL_URL") {
+            if !url.trim().is_empty() {
+                return url;
+            }
+        }
+        let dispatch = Self::default_url();
+        if let Some((prefix, _)) = dispatch.rsplit_once('/') {
+            format!("{prefix}/approvals/pull")
+        } else {
+            format!("{dispatch}/approvals/pull")
+        }
     }
 
     fn require_token(keychain_token: Option<&str>) -> Result<&str, ProviderError> {
@@ -58,7 +92,12 @@ impl RelayTransport {
         }
     }
 
-    fn curl_json_request(&self, token: &str, body_json: &Value) -> Result<Value, ProviderError> {
+    fn curl_json_request_to_url(
+        &self,
+        url: &str,
+        token: &str,
+        body_json: &Value,
+    ) -> Result<Value, ProviderError> {
         let sentinel = "__TERMINUS_HTTP_STATUS__:";
         let mut config = String::new();
         config.push_str("silent\n");
@@ -66,7 +105,7 @@ impl RelayTransport {
         config.push_str("location\n");
         config.push_str("max-time = 30\n");
         config.push_str("request = \"POST\"\n");
-        config.push_str(&format!("url = \"{}\"\n", self.relay_url));
+        config.push_str(&format!("url = \"{url}\"\n"));
         config.push_str("header = \"Content-Type: application/json\"\n");
         config.push_str(&format!("header = \"Authorization: Bearer {token}\"\n"));
         let body = serde_json::to_string(body_json)
@@ -114,6 +153,37 @@ impl RelayTransport {
         serde_json::from_str(json_str.trim())
             .map_err(|_| ProviderError::retryable("Relay response could not be parsed."))
     }
+
+    fn curl_json_request(&self, token: &str, body_json: &Value) -> Result<Value, ProviderError> {
+        self.curl_json_request_to_url(&self.relay_url, token, body_json)
+    }
+
+    pub fn poll_approval_decisions(
+        &self,
+        token: &str,
+        device_id: &str,
+        limit: usize,
+    ) -> Result<RelayApprovalPollResponse, ProviderError> {
+        let payload = serde_json::json!({
+            "deviceId": device_id,
+            "limit": limit.clamp(1, 50),
+        });
+        let json =
+            self.curl_json_request_to_url(&Self::default_approval_poll_url(), token, &payload)?;
+        serde_json::from_value::<RelayApprovalPollResponse>(json.clone())
+            .or_else(|_| {
+                json.get("decisions")
+                    .cloned()
+                    .ok_or(())
+                    .and_then(|arr| {
+                        serde_json::from_value::<Vec<RelayApprovalDecision>>(arr).map_err(|_| ())
+                    })
+                    .map(|decisions| RelayApprovalPollResponse { decisions })
+            })
+            .map_err(|_| {
+                ProviderError::retryable("Relay approval sync response could not be parsed.")
+            })
+    }
 }
 
 impl ExecutionTransport for RelayTransport {
@@ -150,5 +220,12 @@ mod tests {
     fn default_url_uses_hosted_default_when_env_missing() {
         let url = RelayTransport::default_url();
         assert!(url.starts_with("http"));
+    }
+
+    #[test]
+    fn default_approval_poll_url_uses_expected_path() {
+        let url = RelayTransport::default_approval_poll_url();
+        assert!(url.starts_with("http"));
+        assert!(url.contains("/approvals/pull"));
     }
 }

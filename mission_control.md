@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/relay-transport-doc-sync`
+- Branch: `codex/relay-sync-polling`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -52,26 +52,27 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 77/77 passing |
+| Backend Rust (`cargo test`) | 78/78 passing |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P1c)
-### Relay Callback Auth + Push Readiness (Desktop)
+## Now (P1d)
+### Relay Approval Sync Loop + Push Routing Readiness (Desktop)
 Owner: active session
 Status: In progress
 Scope:
-- Add callback-authenticated relay approval resolver command (`resolve_relay_approval_callback`)
-- Keychain callback secret + stable relay device id (desktop identity/readiness)
-- Replay/idempotency protection for relay callback requests (`relay_callback_events`)
-- Minimal readiness UI (callback ready/device id/pending approvals) in Connections panel
+- Add desktop relay approval sync tick (`tick_relay_approval_sync`) + status read API (`get_relay_sync_status`)
+- Poll relay for pending remote approval decisions using hosted subscriber token + stable device id
+- Apply decisions through canonical callback/approval codepath (no parallel approval execution path)
+- Persist relay sync health/backoff in SQLite (`relay_sync_state`)
+- Integrate bounded sync into existing runner cycle + Connections panel status
 Acceptance:
-- Relay callback requests require callback secret auth and expire after a bounded window
-- Duplicate callback `request_id` does not duplicate side effects (returns existing run)
-- Callback-approved actions still route through canonical approval execution path
-- Readiness UI shows callback status + device id + pending approval count
+- Relay sync never duplicates side effects (reuses callback request-id replay protection)
+- Transient relay errors back off and surface human-readable sync status
+- Background/manual cycle can apply remote decisions without blocking runner execution model
+- Connections UI shows relay sync status, backoff, and last applied count
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -84,7 +85,7 @@ npm run build
 
 ## Next
 1. **P1d: Relay Push Channel + Slack Bot**
-   - WebSocket/SSE push for approval routing
+   - WebSocket/SSE push for approval routing (server-side + desktop consumer after polling MVP)
    - Slack bot via Vercel Chat SDK pattern (approve from Slack)
    - Relay server callback/auth integration using the desktop callback contract
 

@@ -173,11 +173,16 @@ Last updated: 2026-02-26
   - Keychain stores relay callback secret + stable relay device id (for relay registration/readiness)
   - Connections panel shows remote approval readiness, device id, callback secret status, and pending approval count
   - callback secret can be issued/cleared from UI via Tauri commands (`issue_relay_callback_secret`, `clear_relay_callback_secret`)
+- Relay approval sync loop (desktop-side polling MVP):
+  - `tick_relay_approval_sync` polls relay for remote approval decisions using subscriber token + device id
+  - `get_relay_sync_status` surfaces sync health/backoff (`relay_sync_state`) for the Connections panel
+  - sync applies decisions through the same callback/approval codepath (reuses replay/idempotency protections)
+  - `tick_runner_cycle` now runs bounded relay sync after due-run resume and records sync status in summary
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
-- `cd src-tauri && cargo test` passes (77 tests)
+- `cd src-tauri && cargo test` passes (78 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
