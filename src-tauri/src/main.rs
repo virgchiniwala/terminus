@@ -196,6 +196,19 @@ struct ApiKeyRefStatus {
     configured: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexOauthStatusResponse {
+    configured: bool,
+    local_auth_found: bool,
+    local_auth_path: String,
+    local_auth_mode: Option<String>,
+    imported_auth_mode: Option<String>,
+    imported_at_ms: Option<i64>,
+    last_refresh: Option<String>,
+    has_refresh_token: bool,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApprovalResolutionContextInput {
@@ -773,6 +786,49 @@ fn get_api_key_ref_status(ref_name: String) -> Result<ApiKeyRefStatus, String> {
         ref_name,
         configured,
     })
+}
+
+fn codex_oauth_status_response() -> Result<CodexOauthStatusResponse, String> {
+    let local_path = providers::keychain::codex_cli_auth_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.codex/auth.json".to_string());
+    let local_snapshot =
+        providers::keychain::read_codex_cli_auth_snapshot().map_err(|e| e.to_string())?;
+    let imported = providers::keychain::get_codex_oauth_bundle().map_err(|e| e.to_string())?;
+    Ok(CodexOauthStatusResponse {
+        configured: imported.is_some(),
+        local_auth_found: local_snapshot.is_some(),
+        local_auth_path: local_path,
+        local_auth_mode: local_snapshot.as_ref().map(|s| s.auth_mode.clone()),
+        imported_auth_mode: imported.as_ref().map(|b| b.auth_mode.clone()),
+        imported_at_ms: imported.as_ref().map(|b| b.imported_at_ms),
+        last_refresh: imported
+            .as_ref()
+            .and_then(|b| b.last_refresh.clone())
+            .or_else(|| local_snapshot.as_ref().and_then(|s| s.last_refresh.clone())),
+        has_refresh_token: imported
+            .as_ref()
+            .and_then(|b| b.refresh_token.as_ref())
+            .is_some_and(|v| !v.trim().is_empty()),
+    })
+}
+
+#[tauri::command]
+fn get_codex_oauth_status() -> Result<CodexOauthStatusResponse, String> {
+    codex_oauth_status_response()
+}
+
+#[tauri::command]
+fn import_codex_oauth_from_local_auth() -> Result<CodexOauthStatusResponse, String> {
+    let _bundle = providers::keychain::import_codex_oauth_from_local_auth(now_ms())
+        .map_err(|e| e.to_string())?;
+    codex_oauth_status_response()
+}
+
+#[tauri::command]
+fn remove_codex_oauth() -> Result<CodexOauthStatusResponse, String> {
+    providers::keychain::delete_codex_oauth_bundle().map_err(|e| e.to_string())?;
+    codex_oauth_status_response()
 }
 
 #[tauri::command]
@@ -3587,6 +3643,9 @@ fn main() {
             set_api_key_ref,
             remove_api_key_ref,
             get_api_key_ref_status,
+            get_codex_oauth_status,
+            import_codex_oauth_from_local_auth,
+            remove_codex_oauth,
             list_webhook_triggers,
             create_webhook_trigger,
             rotate_webhook_trigger_secret,

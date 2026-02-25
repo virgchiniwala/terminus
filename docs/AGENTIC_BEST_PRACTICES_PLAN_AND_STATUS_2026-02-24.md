@@ -151,7 +151,7 @@ Source inspected:
 ### `mission_control.md` (current snapshot)
 - Tracks current/next work on live `main`, not a PR worktree snapshot
 - Current baseline includes dynamic plans, relay transport/approvals, onboarding, voice, webhook triggers, and `CallApi` MVP
-- Next priorities now center on Codex OAuth BYOK + Rule Cards ("Teach Once")
+- Next priorities now center on Rule Cards ("Teach Once") + API/action-layer expansion after `CallApi`
   - extract `main.rs` helper logic into `guidance_utils.rs`
   - reduce file size / improve seams
 - Next priorities in that snapshot:
@@ -185,13 +185,12 @@ Current documented priorities have moved beyond Workstreams A/B/C into:
 - hosted relay packaging + onboarding polish
 
 ## Recommended Next-Step Focus (Current)
-1. **Codex OAuth BYOK support (advanced mode)**
-   - ChatGPT sign-in path for OpenAI/Codex with Keychain-only token storage
-   - preserve relay-primary packaging while reducing BYOK friction
-2. **Rule extraction / "Teach Once"**
+1. **Rule extraction / "Teach Once"**
    - explicit, approval-gated reusable behavior changes
-3. **Outbound API expansion after `CallApi` MVP**
+2. **Outbound API expansion after `CallApi` MVP**
    - broader HTTP/API policy model, templates, and safer reusable API actions
+3. **BYOK auth UX follow-up**
+   - optional in-app Codex OAuth browser flow + clearer expiry/reconnect handling
 
 ## If Continuing the Agentic Plan, Start Here (Implementation Order)
 1. **Mission Orchestration MVP (smallest vertical slice)**
