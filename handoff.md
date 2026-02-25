@@ -184,10 +184,17 @@ Last updated: 2026-02-26
   - push path falls back to poll endpoint if stream endpoint is unavailable/rejected (compatibility during relay rollout)
   - dedicated background relay push thread runs when background mode is enabled (separate from runner cycle thread)
   - Connections panel now shows both poll sync status and push channel status, each with manual trigger controls
+- Interview-driven onboarding MVP (first-result flow):
+  - `onboarding_state` SQLite singleton tracks onboarding completion, dismissal, answers, and recommended intent
+  - Tauri commands: `get_onboarding_state`, `save_onboarding_state`, `dismiss_onboarding`
+  - Home renders a guided onboarding panel (role / work focus / biggest repetitive pain) for first-run users
+  - “Recommend First Autopilot” saves onboarding answers, generates a suggested intent, opens the Intent Bar, and drafts a runnable plan
+  - onboarding auto-completes when the first successful run is detected (`runs.state = 'succeeded'`)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
+- `cd src-tauri && cargo test` passes (79 tests)
 - `cd src-tauri && cargo test` passes (79 tests)
 - `npm test` passes
 - `npm run lint` passes
@@ -210,8 +217,8 @@ Last updated: 2026-02-26
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
   1. P1 Slack/mobile approval routing on relay server (consume desktop callback contract + push delivery)
-  2. P2 interview-driven onboarding (agent-guided first result before configuration)
-  3. P0.11/P0.12 Voice object + rule extraction approval flow
+  2. P0.11/P0.12 Voice object + rule extraction approval flow
+  3. Onboarding follow-up polish/tests (Intent Bar + onboarding panel coverage)
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).

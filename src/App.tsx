@@ -11,6 +11,7 @@ import type {
   MissionDraft,
   MissionRecord,
   MissionTickResult,
+  OnboardingStateRecord,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
   RelayApprovalSyncStatusRecord,
@@ -30,6 +31,7 @@ import {
   formatShortLocalTime,
   homeLoadErrorMessage,
   normalizeEmailConnectionRecord,
+  normalizeOnboardingStateRecord,
   normalizeSnapshot,
   replaceDebouncedTimer,
 } from "./uiLogic";
@@ -86,6 +88,37 @@ function recipeNeedsPastedText(recipe: RecipeKind): boolean {
   return recipe === "inbox_triage";
 }
 
+function buildOnboardingRecommendedIntent(
+  role: string,
+  focus: string,
+  pain: string
+): string {
+  const roleText = role.trim().toLowerCase();
+  const focusText = focus.trim().toLowerCase();
+  const painText = pain.trim().toLowerCase();
+  const context = [focus.trim(), pain.trim()].filter(Boolean).join(". ");
+
+  if (painText.includes("inbox") || painText.includes("email") || focusText.includes("email")) {
+    return `Handle my inbox each weekday morning. Classify important messages, draft replies when useful, and put anything risky into approvals. ${context}`.trim();
+  }
+  if (
+    painText.includes("website") ||
+    painText.includes("monitor") ||
+    painText.includes("changes") ||
+    focusText.includes("competitor") ||
+    focusText.includes("pricing")
+  ) {
+    return `Monitor the pages I care about for meaningful changes, ignore minor noise, summarize what changed, and queue approvals before any outbound message. ${context}`.trim();
+  }
+  if (painText.includes("brief") || focusText.includes("brief") || focusText.includes("research")) {
+    return `Create a weekday morning brief from my key sources, keep it concise, and deliver one outcome I can read quickly. ${context}`.trim();
+  }
+  if (roleText.includes("founder") || roleText.includes("ops") || roleText.includes("ea") || roleText.includes("pm")) {
+    return `Every weekday morning, prepare a concise brief from my key sources and inbox priorities, then queue any risky follow-through in approvals. ${context}`.trim();
+  }
+  return `Help me automate the most repetitive part of my day. Start with a daily brief or inbox triage and queue any risky actions in approvals. ${context}`.trim();
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<HomeSnapshot>(fallbackSnapshot);
   const [loading, setLoading] = useState(true);
@@ -102,6 +135,12 @@ export function App() {
   const [runDraftLoading, setRunDraftLoading] = useState(false);
   const [connections, setConnections] = useState<EmailConnectionRecord[]>([]);
   const [connectionsMessage, setConnectionsMessage] = useState<string | null>(null);
+  const [onboardingState, setOnboardingState] = useState<OnboardingStateRecord | null>(null);
+  const [onboardingRole, setOnboardingRole] = useState("");
+  const [onboardingFocus, setOnboardingFocus] = useState("");
+  const [onboardingPain, setOnboardingPain] = useState("");
+  const [onboardingMessage, setOnboardingMessage] = useState<string | null>(null);
+  const [onboardingLoading, setOnboardingLoading] = useState(false);
   const [transportStatus, setTransportStatus] = useState<TransportStatusRecord | null>(null);
   const [remoteApprovalReadiness, setRemoteApprovalReadiness] = useState<RemoteApprovalReadinessRecord | null>(null);
   const [relaySyncStatus, setRelaySyncStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
@@ -333,6 +372,20 @@ export function App() {
       });
   }, []);
 
+  const loadOnboardingState = useCallback(() => {
+    invoke<OnboardingStateRecord>("get_onboarding_state")
+      .then((payload) => {
+        const normalized = normalizeOnboardingStateRecord(payload);
+        setOnboardingState(normalized);
+        setOnboardingRole((prev) => prev || normalized.roleText);
+        setOnboardingFocus((prev) => prev || normalized.workFocusText);
+        setOnboardingPain((prev) => prev || normalized.biggestPainText);
+      })
+      .catch((err) => {
+        console.error("Failed to load onboarding state:", err);
+      });
+  }, []);
+
   const loadTransportStatus = useCallback(() => {
     invoke<TransportStatusRecord>("get_transport_status")
       .then((payload) => {
@@ -504,6 +557,7 @@ export function App() {
   useEffect(() => {
     loadSnapshot();
     loadConnections();
+    loadOnboardingState();
     loadTransportStatus();
     loadRemoteApprovalReadiness();
     loadRelaySyncStatus();
@@ -512,7 +566,7 @@ export function App() {
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
-  }, [loadSnapshot, loadConnections, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+  }, [loadSnapshot, loadConnections, loadOnboardingState, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -532,6 +586,7 @@ export function App() {
           loadMissions();
           loadRelaySyncStatus();
           loadRelayPushStatus();
+          loadOnboardingState();
           if (selectedMissionId) {
             loadMissionDetail(selectedMissionId);
           }
@@ -541,7 +596,7 @@ export function App() {
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, selectedMissionId]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, loadOnboardingState, selectedMissionId]);
 
   useEffect(() => {
     return () => {
@@ -554,8 +609,8 @@ export function App() {
     };
   }, []);
 
-  const generateDraft = (forcedKind?: IntentDraftKind) => {
-    const intent = intentInput.trim();
+  const generateDraft = (forcedKind?: IntentDraftKind, intentOverride?: string) => {
+    const intent = (intentOverride ?? intentInput).trim();
     if (!intent) {
       setIntentError("Add a one-line intent to continue.");
       return;
@@ -607,6 +662,7 @@ export function App() {
         setIntentInput("");
         setDraft(null);
         loadSnapshot();
+        loadOnboardingState();
       })
       .catch((err) => {
         console.error("Failed to start run:", err);
@@ -784,6 +840,76 @@ export function App() {
       .catch((err) => {
         console.error("Failed to listen for remote approvals:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not listen for remote approvals.");
+      });
+  };
+
+  const persistOnboardingState = useCallback(
+    (overrides?: Partial<OnboardingStateRecord>) => {
+      setOnboardingLoading(true);
+      const current = onboardingState;
+      const recommendedIntent =
+        overrides?.recommendedIntent ??
+        current?.recommendedIntent ??
+        buildOnboardingRecommendedIntent(onboardingRole, onboardingFocus, onboardingPain);
+      invoke<OnboardingStateRecord>("save_onboarding_state", {
+        input: {
+          roleText: overrides?.roleText ?? onboardingRole,
+          workFocusText: overrides?.workFocusText ?? onboardingFocus,
+          biggestPainText: overrides?.biggestPainText ?? onboardingPain,
+          recommendedIntent,
+          onboardingComplete: overrides?.onboardingComplete,
+          dismissed: overrides?.dismissed,
+        },
+      })
+        .then((payload) => {
+          setOnboardingState(normalizeOnboardingStateRecord(payload));
+          setOnboardingMessage("Onboarding preferences saved.");
+        })
+        .catch((err) => {
+          console.error("Failed to save onboarding state:", err);
+          setOnboardingMessage(typeof err === "string" ? err : "Could not save onboarding progress.");
+        })
+        .finally(() => setOnboardingLoading(false));
+    },
+    [onboardingState, onboardingRole, onboardingFocus, onboardingPain]
+  );
+
+  const dismissOnboarding = () => {
+    setOnboardingLoading(true);
+    setOnboardingMessage(null);
+    invoke<OnboardingStateRecord>("dismiss_onboarding")
+      .then((payload) => {
+        setOnboardingState(normalizeOnboardingStateRecord(payload));
+        setOnboardingMessage("Onboarding dismissed. You can still use the Intent Bar anytime.");
+      })
+      .catch((err) => {
+        console.error("Failed to dismiss onboarding:", err);
+        setOnboardingMessage(typeof err === "string" ? err : "Could not dismiss onboarding.");
+      })
+      .finally(() => setOnboardingLoading(false));
+  };
+
+  const generateOnboardingDraft = () => {
+    const recommended = buildOnboardingRecommendedIntent(onboardingRole, onboardingFocus, onboardingPain);
+    setOnboardingMessage(null);
+    setIntentInput(recommended);
+    setIntentOpen(true);
+    invoke<OnboardingStateRecord>("save_onboarding_state", {
+      input: {
+        roleText: onboardingRole,
+        workFocusText: onboardingFocus,
+        biggestPainText: onboardingPain,
+        recommendedIntent: recommended,
+      },
+    })
+      .then((payload) => {
+        setOnboardingState(normalizeOnboardingStateRecord(payload));
+        setOnboardingMessage("Recommended first Autopilot ready. Review and run a test.");
+        generateDraft("draft_autopilot", recommended);
+      })
+      .catch((err) => {
+        console.error("Failed to save onboarding recommendation:", err);
+        setOnboardingMessage(typeof err === "string" ? err : "Could not prepare onboarding recommendation.");
       });
   };
 
@@ -1027,6 +1153,75 @@ export function App() {
           <aside className="run-notice" role="status">
             <p>{runNotice}</p>
           </aside>
+        )}
+
+        {onboardingState && !onboardingState.onboardingComplete && !onboardingState.dismissed && (
+          <section className="connection-panel" aria-label="Getting started">
+            <div className="connection-panel-header">
+              <h2>Get your first Autopilot running</h2>
+              <p>
+                Tell Terminus what you do and where time gets lost. Terminus will recommend a first
+                setup and open it in the Intent Bar so you can test it.
+              </p>
+            </div>
+            <div className="connection-setup-grid">
+              <label>
+                Your role
+                <input
+                  value={onboardingRole}
+                  onChange={(event) => setOnboardingRole(event.target.value)}
+                  placeholder="Founder, EA, PM, Ops..."
+                />
+              </label>
+              <label>
+                What you spend time on
+                <input
+                  value={onboardingFocus}
+                  onChange={(event) => setOnboardingFocus(event.target.value)}
+                  placeholder="Customer updates, hiring, project ops..."
+                />
+              </label>
+              <label>
+                Biggest repetitive pain
+                <input
+                  value={onboardingPain}
+                  onChange={(event) => setOnboardingPain(event.target.value)}
+                  placeholder="Inbox triage, daily briefs, website monitoring..."
+                />
+              </label>
+              <div className="transport-token-actions">
+                <button
+                  type="button"
+                  className="intent-primary"
+                  onClick={generateOnboardingDraft}
+                  disabled={onboardingLoading}
+                >
+                  {onboardingLoading ? "Preparing..." : "Recommend First Autopilot"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => persistOnboardingState()}
+                  disabled={onboardingLoading}
+                >
+                  Save Progress
+                </button>
+                <button type="button" onClick={dismissOnboarding} disabled={onboardingLoading}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            {(onboardingState.recommendedIntent || onboardingMessage) && (
+              <p className="transport-status-note">
+                {onboardingMessage ?? "Saved."}
+                {onboardingState.recommendedIntent
+                  ? ` Recommended intent: ${onboardingState.recommendedIntent}`
+                  : ""}
+              </p>
+            )}
+            <p className="transport-status-note">
+              Onboarding completes automatically after your first successful run.
+            </p>
+          </section>
         )}
 
         <header className="hero">

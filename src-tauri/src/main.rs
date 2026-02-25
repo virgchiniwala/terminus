@@ -81,6 +81,17 @@ struct RunnerControlInput {
     microsoft_autopilot_id: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OnboardingStateInput {
+    role_text: String,
+    work_focus_text: String,
+    biggest_pain_text: String,
+    recommended_intent: Option<String>,
+    onboarding_complete: Option<bool>,
+    dismissed: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunnerCycleSummary {
@@ -1019,6 +1030,67 @@ fn update_runner_control(
     current.microsoft_autopilot_id = input.microsoft_autopilot_id.trim().to_string();
     db::upsert_runner_control(&connection, &current)?;
     db::get_runner_control(&connection)
+}
+
+#[tauri::command]
+fn get_onboarding_state(
+    state: tauri::State<AppState>,
+) -> Result<db::OnboardingStateRecord, String> {
+    let connection = open_connection(&state)?;
+    db::get_onboarding_state(&connection)
+}
+
+#[tauri::command]
+fn save_onboarding_state(
+    state: tauri::State<AppState>,
+    input: OnboardingStateInput,
+) -> Result<db::OnboardingStateRecord, String> {
+    let connection = open_connection(&state)?;
+    let current = db::get_onboarding_state(&connection)?;
+    let now = now_ms();
+    let mark_complete = input
+        .onboarding_complete
+        .unwrap_or(current.onboarding_complete);
+    let dismissed = input.dismissed.unwrap_or(current.dismissed);
+    let payload = db::OnboardingStateRecord {
+        onboarding_complete: mark_complete,
+        dismissed,
+        role_text: input.role_text,
+        work_focus_text: input.work_focus_text,
+        biggest_pain_text: input.biggest_pain_text,
+        recommended_intent: input.recommended_intent,
+        started_at_ms: current.started_at_ms,
+        updated_at_ms: current.updated_at_ms,
+        completed_at_ms: if mark_complete {
+            current.completed_at_ms.or(Some(now))
+        } else {
+            None
+        },
+        dismissed_at_ms: if dismissed { Some(now) } else { None },
+        first_successful_run_at_ms: current.first_successful_run_at_ms,
+    };
+    db::upsert_onboarding_state(&connection, &payload)
+}
+
+#[tauri::command]
+fn dismiss_onboarding(state: tauri::State<AppState>) -> Result<db::OnboardingStateRecord, String> {
+    let connection = open_connection(&state)?;
+    let current = db::get_onboarding_state(&connection)?;
+    let now = now_ms();
+    let payload = db::OnboardingStateRecord {
+        onboarding_complete: current.onboarding_complete,
+        dismissed: true,
+        role_text: current.role_text,
+        work_focus_text: current.work_focus_text,
+        biggest_pain_text: current.biggest_pain_text,
+        recommended_intent: current.recommended_intent,
+        started_at_ms: current.started_at_ms,
+        updated_at_ms: current.updated_at_ms,
+        completed_at_ms: current.completed_at_ms,
+        dismissed_at_ms: Some(now),
+        first_successful_run_at_ms: current.first_successful_run_at_ms,
+    };
+    db::upsert_onboarding_state(&connection, &payload)
 }
 
 #[tauri::command]
@@ -2382,6 +2454,9 @@ fn main() {
             run_inbox_watcher_tick,
             get_runner_control,
             update_runner_control,
+            get_onboarding_state,
+            save_onboarding_state,
+            dismiss_onboarding,
             tick_runner_cycle,
             get_autopilot_send_policy,
             update_autopilot_send_policy,
