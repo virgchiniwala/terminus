@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/callapi-primitive-mvp`
+- Branch: `codex/relay-multi-device-routing`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -58,27 +58,26 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 91/91 passing |
+| Backend Rust (`cargo test`) | 93/93 passing |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now
-### Gmail PubSub Trigger Path (Gmail-only, polling fallback preserved)
+### Relay Multi-Device Routing + Device Targeting Foundations
 Owner: active session
 Status: In progress
 Scope:
-- Add Gmail PubSub trigger state + event log tables (Gmail-only) and relay callback ingestion path
-- Reuse existing inbox watcher Gmail fetch/queue path (PubSub triggers fetch; no direct message processing)
-- Add trigger mode (`polling|gmail_pubsub|auto`) with polling fallback when PubSub is inactive/expired
-- Add minimal Connections UI for watch health, mode, config, and recent PubSub events
-- Update docs/handoff so trigger model and next phases stay aligned
+- Add relay device registry + routing policy tables (preferred target / standby / queue-until-online)
+- Add device and policy CRUD/status commands with migration-safe bootstrap
+- Register local desktop device automatically and surface relay device routing in Connections UI
+- Gate relay approval sync/push pulls when this device is not the active target (human-readable status)
+- Update docs/handoff so relay operations and next phases stay aligned
 Acceptance:
-- Valid PubSub callback enqueues Gmail fetch path (through existing inbox watcher path), not a parallel runner path
-- Duplicate PubSub callbacks do not create duplicate runs
-- Invalid/malformed callback payloads fail with human-readable event status
-- `auto` mode falls back to polling when PubSub is expired/error/disabled
+- Relay devices/policy persist and can be updated from UI
+- Preferred-device vs standby/manual-target routing blocks local relay sync/push pulls with clear messages
+- Existing relay callback/sync/push flows remain idempotent and safe
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -90,12 +89,12 @@ npm run build
 ```
 
 ## Next
-1. **Rule extraction / "Make This a Rule" (P0.12)**
-   - rule object + rule applications + approval-gated creation
-2. **Relay multi-device routing + device targeting foundations**
-   - explicit preferred target / queue-until-online semantics
-3. **Ownership leases + doctor surfaces**
+1. **Ownership leases + doctor surfaces**
    - runner/push consumer ownership locks and operator-readable health/runbooks
+2. **Rule extraction / "Make This a Rule" (P0.12)**
+   - rule object + rule applications + approval-gated creation
+3. **Webhook preset mappings + Slack/Teams channel strategy**
+   - safe event adapters and focused professional channel surfaces
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution

@@ -379,6 +379,24 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               created_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS relay_devices (
+              device_id TEXT PRIMARY KEY,
+              device_label TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active',
+              last_seen_at_ms INTEGER,
+              capabilities_json TEXT NOT NULL DEFAULT '{}',
+              is_preferred_target INTEGER NOT NULL DEFAULT 0,
+              updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS relay_routing_policy (
+              singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+              approval_target_mode TEXT NOT NULL DEFAULT 'preferred_only',
+              trigger_target_mode TEXT NOT NULL DEFAULT 'preferred_only',
+              fallback_policy TEXT NOT NULL DEFAULT 'queue_until_online',
+              updated_at_ms INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS gmail_pubsub_state (
               provider TEXT PRIMARY KEY,
               status TEXT NOT NULL DEFAULT 'disabled',
@@ -1133,6 +1151,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to create relay sync state index: {e}"))?;
     connection
         .execute(
+            "CREATE INDEX IF NOT EXISTS idx_relay_devices_status_updated ON relay_devices(status, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create relay devices index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_relay_devices_preferred ON relay_devices(is_preferred_target, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create relay preferred device index: {e}"))?;
+    connection
+        .execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clarifications_single_pending ON clarifications(run_id, step_id, status) WHERE status = 'pending'",
             [],
         )
@@ -1169,6 +1199,14 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to seed voice config: {e}"))?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO relay_routing_policy (
+               singleton_id, approval_target_mode, trigger_target_mode, fallback_policy, updated_at_ms
+             ) VALUES (1, 'preferred_only', 'preferred_only', 'queue_until_online', strftime('%s','now') * 1000)",
+            [],
+        )
+        .map_err(|e| format!("Failed to seed relay routing policy: {e}"))?;
 
     Ok(())
 }
