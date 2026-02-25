@@ -133,6 +133,15 @@ struct RelaySubscriberTokenInput {
     token: String,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalResolutionContextInput {
+    approval_id: String,
+    actor_label: Option<String>,
+    channel: Option<String>,
+    reason: Option<String>,
+}
+
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
     let db_path = state
         .db_path
@@ -333,7 +342,12 @@ fn approve_run_approval(
     approval_id: String,
 ) -> Result<RunRecord, String> {
     let mut connection = open_connection(&state)?;
-    RunnerEngine::approve(&mut connection, &approval_id).map_err(|e| e.to_string())
+    approve_run_approval_with_context(
+        &mut connection,
+        &approval_id,
+        Some("local_ui"),
+        Some("User"),
+    )
 }
 
 #[tauri::command]
@@ -343,7 +357,42 @@ fn reject_run_approval(
     reason: Option<String>,
 ) -> Result<RunRecord, String> {
     let mut connection = open_connection(&state)?;
-    RunnerEngine::reject(&mut connection, &approval_id, reason).map_err(|e| e.to_string())
+    reject_run_approval_with_context(
+        &mut connection,
+        &approval_id,
+        reason,
+        Some("local_ui"),
+        Some("User"),
+    )
+}
+
+#[tauri::command]
+fn approve_run_approval_remote(
+    state: tauri::State<AppState>,
+    input: ApprovalResolutionContextInput,
+) -> Result<RunRecord, String> {
+    let mut connection = open_connection(&state)?;
+    approve_run_approval_with_context(
+        &mut connection,
+        &input.approval_id,
+        input.channel.as_deref().or(Some("relay")),
+        input.actor_label.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn reject_run_approval_remote(
+    state: tauri::State<AppState>,
+    input: ApprovalResolutionContextInput,
+) -> Result<RunRecord, String> {
+    let mut connection = open_connection(&state)?;
+    reject_run_approval_with_context(
+        &mut connection,
+        &input.approval_id,
+        input.reason,
+        input.channel.as_deref().or(Some("relay")),
+        input.actor_label.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -913,6 +962,71 @@ fn compact_learning_data(
         dry_run.unwrap_or(false),
     )
     .map_err(|e| e.to_string())
+}
+
+fn sanitize_approval_resolution_field(value: Option<&str>, max_len: usize) -> Option<String> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let bounded = raw
+        .chars()
+        .take(max_len)
+        .filter(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | ':' | '@' | '/')
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if bounded.is_empty() {
+        None
+    } else {
+        Some(bounded)
+    }
+}
+
+fn annotate_approval_resolution(
+    connection: &rusqlite::Connection,
+    approval_id: &str,
+    channel: Option<&str>,
+    actor_label: Option<&str>,
+) -> Result<(), String> {
+    let channel = sanitize_approval_resolution_field(channel, 32);
+    let actor = sanitize_approval_resolution_field(actor_label, 80);
+    if channel.is_none() && actor.is_none() {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "UPDATE approvals
+             SET decided_channel = COALESCE(?1, decided_channel),
+                 decided_by = COALESCE(?2, decided_by)
+             WHERE id = ?3",
+            rusqlite::params![channel, actor, approval_id],
+        )
+        .map_err(|e| format!("Could not record approval source metadata: {e}"))?;
+    Ok(())
+}
+
+fn approve_run_approval_with_context(
+    connection: &mut rusqlite::Connection,
+    approval_id: &str,
+    channel: Option<&str>,
+    actor_label: Option<&str>,
+) -> Result<RunRecord, String> {
+    annotate_approval_resolution(connection, approval_id, channel, actor_label)?;
+    RunnerEngine::approve(connection, approval_id).map_err(|e| e.to_string())
+}
+
+fn reject_run_approval_with_context(
+    connection: &mut rusqlite::Connection,
+    approval_id: &str,
+    reason: Option<String>,
+    channel: Option<&str>,
+    actor_label: Option<&str>,
+) -> Result<RunRecord, String> {
+    annotate_approval_resolution(connection, approval_id, channel, actor_label)?;
+    RunnerEngine::reject(connection, approval_id, reason).map_err(|e| e.to_string())
 }
 
 fn parse_recipe(value: &str) -> Result<RecipeKind, String> {
@@ -1586,7 +1700,9 @@ fn main() {
             list_missions,
             run_mission_tick,
             approve_run_approval,
+            approve_run_approval_remote,
             reject_run_approval,
+            reject_run_approval_remote,
             list_pending_approvals,
             list_pending_clarifications,
             list_run_diagnostics,

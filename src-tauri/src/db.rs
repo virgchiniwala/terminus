@@ -224,6 +224,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               payload_type TEXT NOT NULL DEFAULT 'generic',
               payload_json TEXT NOT NULL DEFAULT '{}',
               reason TEXT,
+              decided_channel TEXT,
+              decided_by TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
               decided_at INTEGER,
@@ -686,6 +688,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "TEXT NOT NULL DEFAULT '{}'",
     )?;
     ensure_column(connection, "approvals", "action_id", "TEXT")?;
+    ensure_column(connection, "approvals", "decided_channel", "TEXT")?;
+    ensure_column(connection, "approvals", "decided_by", "TEXT")?;
     ensure_column(connection, "decision_events", "client_event_id", "TEXT")?;
     ensure_column(
         connection,

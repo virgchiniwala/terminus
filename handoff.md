@@ -162,6 +162,11 @@ Last updated: 2026-02-26
   - `get_transport_status` exposes Hosted/BYOK/Mock mode + relay endpoint for UI visibility
   - provider runtime chooses transport dynamically (Hosted Relay when token exists; BYOK local or Mock fallback)
   - Connections panel shows execution mode and hosted token controls (minimal, no billing UI)
+- Remote approval path hooks + provenance (desktop-side):
+  - new Tauri commands: `approve_run_approval_remote`, `reject_run_approval_remote`
+  - local and remote approval commands now use shared wrappers around canonical `RunnerEngine::approve/reject`
+  - approval decision provenance persisted on `approvals` (`decided_channel`, `decided_by`)
+  - terminal receipts now include `approval_resolutions[]` (approval id, step id, status, timestamp, channel, actor)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -187,7 +192,7 @@ Last updated: 2026-02-26
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P1 relay remote approval path + Slack/mobile approval routing hooks
+  1. P1 relay push channel + Slack/mobile approval routing (WebSocket/SSE + relay callback auth)
   2. P2 interview-driven onboarding (agent-guided first result before configuration)
   3. P0.11/P0.12 Voice object + rule extraction approval flow
 
