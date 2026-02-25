@@ -5,6 +5,8 @@ import type {
   OnboardingStateRecord,
   VoiceConfigRecord,
   AutopilotVoiceConfigRecord,
+  WebhookTriggerRecord,
+  WebhookTriggerEventRecord,
 } from "./types";
 
 export const fallbackSnapshot: HomeSnapshot = {
@@ -178,6 +180,68 @@ export function watcherStatusLine(record: EmailConnectionRecord, nowMs = Date.no
     return `Watcher recovering (${failures} recent failure${failures === 1 ? "" : "s"}).`;
   }
   return "Watcher ready.";
+}
+
+export function normalizeWebhookTriggerRecord(row: unknown): WebhookTriggerRecord {
+  const value = row as Record<string, unknown>;
+  return {
+    id: (value.id as string) ?? "",
+    autopilotId: (value.autopilotId as string) ?? (value.autopilot_id as string) ?? "",
+    status: ((value.status as string) ?? "active").toLowerCase(),
+    endpointPath: (value.endpointPath as string) ?? (value.endpoint_path as string) ?? "",
+    endpointUrl: (value.endpointUrl as string) ?? (value.endpoint_url as string) ?? "",
+    signatureMode: (value.signatureMode as string) ?? (value.signature_mode as string) ?? "terminus_hmac_sha256",
+    description: (value.description as string) ?? "",
+    maxPayloadBytes:
+      (value.maxPayloadBytes as number) ?? (value.max_payload_bytes as number) ?? 32768,
+    allowedContentTypes:
+      (value.allowedContentTypes as string[]) ??
+      (value.allowed_content_types as string[]) ??
+      ["application/json"],
+    providerKind: (value.providerKind as string) ?? (value.provider_kind as string) ?? "openai",
+    lastEventAtMs:
+      (value.lastEventAtMs as number | null) ?? (value.last_event_at_ms as number | null) ?? null,
+    lastError: (value.lastError as string | null) ?? (value.last_error as string | null) ?? null,
+    createdAtMs: (value.createdAtMs as number) ?? (value.created_at_ms as number) ?? Date.now(),
+    updatedAtMs: (value.updatedAtMs as number) ?? (value.updated_at_ms as number) ?? Date.now(),
+    secretConfigured:
+      (value.secretConfigured as boolean) ?? (value.secret_configured as boolean) ?? false,
+  };
+}
+
+export function normalizeWebhookTriggerEventRecord(row: unknown): WebhookTriggerEventRecord {
+  const value = row as Record<string, unknown>;
+  return {
+    id: (value.id as string) ?? "",
+    triggerId: (value.triggerId as string) ?? (value.trigger_id as string) ?? "",
+    deliveryId: (value.deliveryId as string) ?? (value.delivery_id as string) ?? "",
+    eventIdempotencyKey:
+      (value.eventIdempotencyKey as string) ?? (value.event_idempotency_key as string) ?? "",
+    receivedAtMs:
+      (value.receivedAtMs as number) ?? (value.received_at_ms as number) ?? Date.now(),
+    status: ((value.status as string) ?? "accepted").toLowerCase(),
+    httpStatus: (value.httpStatus as number | null) ?? (value.http_status as number | null) ?? null,
+    headersRedactedJson:
+      (value.headersRedactedJson as string) ?? (value.headers_redacted_json as string) ?? "{}",
+    payloadExcerpt: (value.payloadExcerpt as string) ?? (value.payload_excerpt as string) ?? "",
+    payloadHash: (value.payloadHash as string) ?? (value.payload_hash as string) ?? "",
+    failureReason:
+      (value.failureReason as string | null) ?? (value.failure_reason as string | null) ?? null,
+    runId: (value.runId as string | null) ?? (value.run_id as string | null) ?? null,
+  };
+}
+
+export function webhookEventStatusLine(record: WebhookTriggerEventRecord): string {
+  if (record.status === "queued" && record.runId) {
+    return `Queued run ${record.runId}.`;
+  }
+  if (record.status === "duplicate") {
+    return "Duplicate delivery ignored.";
+  }
+  if (record.failureReason) {
+    return record.failureReason;
+  }
+  return record.status.replace(/_/g, " ");
 }
 
 export function homeLoadErrorMessage(retryCount: number): string {

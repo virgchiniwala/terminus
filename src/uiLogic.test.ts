@@ -5,7 +5,10 @@ import {
   homeLoadErrorMessage,
   normalizeEmailConnectionRecord,
   normalizeSnapshot,
+  normalizeWebhookTriggerEventRecord,
+  normalizeWebhookTriggerRecord,
   replaceDebouncedTimer,
+  webhookEventStatusLine,
   watcherStatusLine,
 } from "./uiLogic";
 
@@ -123,5 +126,44 @@ describe("uiLogic", () => {
         now
       )
     ).toContain("recovering");
+  });
+
+  it("normalizes webhook trigger and delivery records", () => {
+    const trigger = normalizeWebhookTriggerRecord({
+      id: "wh_1",
+      autopilot_id: "auto_ops",
+      status: "ACTIVE",
+      endpoint_url: "https://relay/hooks/abc",
+      endpoint_path: "hooks/abc",
+      signature_mode: "terminus_hmac_sha256",
+      description: "CRM updates",
+      max_payload_bytes: 32768,
+      allowed_content_types: ["application/json"],
+      provider_kind: "openai",
+      last_event_at_ms: 10,
+      last_error: null,
+      created_at_ms: 1,
+      updated_at_ms: 2,
+      secret_configured: true,
+    });
+    expect(trigger.autopilotId).toBe("auto_ops");
+    expect(trigger.status).toBe("active");
+    expect(trigger.secretConfigured).toBe(true);
+
+    const event = normalizeWebhookTriggerEventRecord({
+      id: "evt_1",
+      trigger_id: "wh_1",
+      delivery_id: "d1",
+      event_idempotency_key: "dedupe",
+      received_at_ms: 12,
+      status: "QUEUED",
+      http_status: 202,
+      headers_redacted_json: "{}",
+      payload_excerpt: "{\"ok\":true}",
+      payload_hash: "abc",
+      run_id: "run_1",
+    });
+    expect(event.status).toBe("queued");
+    expect(webhookEventStatusLine(event)).toContain("Queued run run_1");
   });
 });

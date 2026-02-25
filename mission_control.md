@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-03-01
+Last updated: 2026-03-02
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/voice-object-mvp`
+- Branch: `codex/webhook-trigger-mvp`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -58,20 +58,21 @@ Read these in order before starting work:
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P3 / P0.11)
-### Voice Object MVP (Global + Per-Autopilot Override)
+## Now
+### Relay-Backed Webhook Trigger MVP + Positioning Sync
 Owner: active session
 Status: In progress
 Scope:
-- Add persisted Voice config (global singleton + per-Autopilot override) in SQLite
-- Add Tauri commands to read/update global Voice and read/update/clear Autopilot Voice override
-- Add a Voice settings panel (tone, length, humor, notes) with calm defaults
-- Inject effective Voice config into provider prompts via centralized runner provider dispatch
+- Add relay-backed inbound webhook triggers (desktop-side endpoint registration + secrets + bounded event log)
+- Reuse relay callback auth/replay primitives for webhook delivery callbacks
+- Queue webhook-originated runs through the existing runner + approvals + receipts
+- Add minimal Webhook Trigger panel (create, rotate, pause/resume, recent deliveries)
+- Update differentiation/product copy: “adaptive but predictable” vs brittle automation
 Acceptance:
-- Voice settings persist locally and survive app restarts
-- Per-Autopilot Voice override can be enabled/disabled and cleared
-- Voice changes wording only; it cannot change capabilities, approvals, or recipients
-- Existing recipes receive Voice automatically through shared provider dispatch
+- Webhook trigger secrets are Keychain-only (never SQLite/logs)
+- Valid webhook deliveries enqueue one run; duplicate deliveries do not enqueue another run
+- Invalid signature/content-type/payload size fail with human-readable event status
+- Webhook-triggered runs still use existing approvals/spend rails/receipts
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -83,18 +84,13 @@ npm run build
 ```
 
 ## Next
-1. **P1d: Relay Push Channel + Slack Bot**
-   - Server-side push channel (WebSocket/SSE) to deliver approval decisions
-   - Relay server callback/auth integration using the desktop callback contract
-   - Slack bot via Vercel Chat SDK pattern (approve from Slack)
-
-2. **P4: Rule Extraction / "Make This a Rule" (P0.12)**
-   - Rule object + rule_applications table
-   - "Make this a rule" CTA on Outcome + Approval cards
-
-3. **Onboarding follow-up polish + tests**
-   - Intent Bar + onboarding panel UI tests
-   - clearer first-run path to relay connection or BYOK fallback
+1. **HTTP API primitive (`CallApi`) phase**
+   - domain/method allowlists, timeouts, redaction, Keychain key refs
+   - approval-gated by default
+2. **Rule extraction / "Make This a Rule" (P0.12)**
+   - rule object + rule applications + approval-gated creation
+3. **Interview onboarding polish + voice/rules UX**
+   - first-result path polish, stronger tests, clearer defaults
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution

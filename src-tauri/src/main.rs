@@ -11,12 +11,14 @@ mod runner;
 mod schema;
 mod transport;
 mod web;
+mod webhook_triggers;
 
 use base64::Engine as _;
 use guidance_utils::{
     classify_guidance, compute_missed_cycles, normalize_guidance_instruction, sanitize_log_message,
     GuidanceMode,
 };
+use hmac::{Hmac, Mac};
 use providers::runtime::{ProviderRuntime, TransportStatus};
 use providers::types::{
     ProviderErrorKind, ProviderKind as ApiProviderKind, ProviderRequest,
@@ -26,6 +28,7 @@ use runner::{ApprovalRecord, ClarificationRecord, RunReceipt, RunRecord, RunnerE
 use rusqlite::OptionalExtension;
 use schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +39,7 @@ use tauri::menu::{MenuBuilder, MenuEvent, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 use transport::{RelayApprovalDecision, RelayTransport};
+use webhook_triggers::{CreateWebhookTriggerInput, WebhookTriggerCreateResponse};
 
 #[derive(Default)]
 struct AppState {
@@ -190,6 +194,58 @@ struct RelayApprovalCallbackInput {
     channel: Option<String>,
     reason: Option<String>,
     issued_at_ms: i64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayWebhookCallbackInput {
+    request_id: String,
+    callback_secret: String,
+    issued_at_ms: i64,
+    trigger_id: String,
+    delivery_id: String,
+    content_type: String,
+    body_json: String,
+    signature: String,
+    signature_ts_ms: i64,
+    headers_redacted_json: Option<String>,
+    channel: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebhookEventLocalDebugInput {
+    trigger_id: String,
+    delivery_id: String,
+    body_json: String,
+    content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebhookIngestResult {
+    status: String,
+    trigger_id: String,
+    delivery_id: String,
+    run_id: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct WebhookIngestInput {
+    relay_request_id: Option<String>,
+    relay_callback_secret: Option<String>,
+    relay_issued_at_ms: Option<i64>,
+    trigger_id: String,
+    delivery_id: String,
+    content_type: String,
+    body_json: String,
+    signature: Option<String>,
+    signature_ts_ms: Option<i64>,
+    headers_redacted_json: Option<String>,
+    relay_channel: Option<String>,
+    require_relay_callback_auth: bool,
+    require_webhook_signature: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -662,6 +718,196 @@ fn set_subscriber_token(
 fn remove_subscriber_token() -> Result<TransportStatusResponse, String> {
     providers::keychain::delete_relay_subscriber_token().map_err(|e| e.to_string())?;
     get_transport_status()
+}
+
+#[tauri::command]
+fn list_webhook_triggers(
+    state: tauri::State<AppState>,
+    autopilot_id: Option<String>,
+) -> Result<Vec<webhook_triggers::WebhookTriggerRecord>, String> {
+    let connection = open_connection(&state)?;
+    let relay_base = relay_webhook_base_url();
+    webhook_triggers::list_webhook_triggers(
+        &connection,
+        autopilot_id
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty()),
+        &relay_base,
+        &|trigger_id| {
+            providers::keychain::get_webhook_trigger_secret(trigger_id)
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.trim().is_empty())
+        },
+    )
+}
+
+#[tauri::command]
+fn create_webhook_trigger(
+    state: tauri::State<AppState>,
+    input: CreateWebhookTriggerInput,
+) -> Result<WebhookTriggerCreateResponse, String> {
+    let connection = open_connection(&state)?;
+    let autopilot_id = input.autopilot_id.trim();
+    if autopilot_id.is_empty() {
+        return Err("Autopilot ID is required to create a webhook trigger.".to_string());
+    }
+    let (plan_json, provider_kind) = latest_run_plan_snapshot(&connection, autopilot_id)?;
+    let trigger_id = make_main_id("whtrig");
+    let endpoint_path = format!("hooks/{}", make_hashed_token("wh", &trigger_id));
+    let now = now_ms();
+    let max_payload_bytes = input
+        .max_payload_bytes
+        .unwrap_or(32_768)
+        .clamp(1_024, 65_536);
+    let description = input
+        .description
+        .unwrap_or_else(|| format!("Webhook trigger for {autopilot_id}"));
+    let payload = webhook_triggers::WebhookTriggerCreateInternal {
+        id: trigger_id.clone(),
+        autopilot_id: autopilot_id.to_string(),
+        status: "active".to_string(),
+        endpoint_path,
+        signature_mode: "terminus_hmac_sha256".to_string(),
+        description: description.chars().take(120).collect(),
+        max_payload_bytes,
+        allowed_content_types_json: "[\"application/json\"]".to_string(),
+        plan_json,
+        provider_kind,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    let signing_secret = generate_secret_token("whsec");
+    providers::keychain::set_webhook_trigger_secret(&trigger_id, &signing_secret)
+        .map_err(|e| e.to_string())?;
+    let relay_base = relay_webhook_base_url();
+    let trigger =
+        webhook_triggers::create_webhook_trigger(&connection, &payload, &relay_base, &|id| {
+            providers::keychain::get_webhook_trigger_secret(id)
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.trim().is_empty())
+        })?;
+    Ok(WebhookTriggerCreateResponse {
+        trigger,
+        signing_secret_preview: signing_secret,
+    })
+}
+
+#[tauri::command]
+fn rotate_webhook_trigger_secret(
+    state: tauri::State<AppState>,
+    trigger_id: String,
+) -> Result<WebhookTriggerCreateResponse, String> {
+    let connection = open_connection(&state)?;
+    let trigger_id = trigger_id.trim();
+    if trigger_id.is_empty() {
+        return Err("Trigger ID is required.".to_string());
+    }
+    let new_secret = generate_secret_token("whsec");
+    providers::keychain::set_webhook_trigger_secret(trigger_id, &new_secret)
+        .map_err(|e| e.to_string())?;
+    let relay_base = relay_webhook_base_url();
+    let trigger =
+        webhook_triggers::get_webhook_trigger(&connection, trigger_id, &relay_base, &|id| {
+            providers::keychain::get_webhook_trigger_secret(id)
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.trim().is_empty())
+        })?
+        .ok_or_else(|| "Webhook trigger not found.".to_string())?;
+    Ok(WebhookTriggerCreateResponse {
+        trigger,
+        signing_secret_preview: new_secret,
+    })
+}
+
+#[tauri::command]
+fn disable_webhook_trigger(
+    state: tauri::State<AppState>,
+    trigger_id: String,
+) -> Result<webhook_triggers::WebhookTriggerRecord, String> {
+    update_webhook_trigger_enabled(state, trigger_id, false)
+}
+
+#[tauri::command]
+fn enable_webhook_trigger(
+    state: tauri::State<AppState>,
+    trigger_id: String,
+) -> Result<webhook_triggers::WebhookTriggerRecord, String> {
+    update_webhook_trigger_enabled(state, trigger_id, true)
+}
+
+#[tauri::command]
+fn get_webhook_trigger_events(
+    state: tauri::State<AppState>,
+    trigger_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<webhook_triggers::WebhookTriggerEventRecord>, String> {
+    let connection = open_connection(&state)?;
+    let trigger_id = trigger_id.trim();
+    if trigger_id.is_empty() {
+        return Err("Trigger ID is required.".to_string());
+    }
+    webhook_triggers::list_webhook_trigger_events(&connection, trigger_id, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn ingest_webhook_event_local_debug(
+    state: tauri::State<AppState>,
+    input: WebhookEventLocalDebugInput,
+) -> Result<WebhookIngestResult, String> {
+    if !cfg!(debug_assertions) {
+        return Err("Webhook debug ingestion is only available in development builds.".to_string());
+    }
+    let mut connection = open_connection(&state)?;
+    ingest_webhook_event_internal(
+        &mut connection,
+        WebhookIngestInput {
+            relay_request_id: Some(make_main_id("relay_wh_dbg")),
+            relay_callback_secret: None,
+            relay_issued_at_ms: Some(now_ms()),
+            trigger_id: input.trigger_id,
+            delivery_id: input.delivery_id,
+            content_type: input
+                .content_type
+                .unwrap_or_else(|| "application/json".to_string()),
+            body_json: input.body_json,
+            signature: None,
+            signature_ts_ms: None,
+            headers_redacted_json: None,
+            relay_channel: Some("local_debug".to_string()),
+            require_relay_callback_auth: false,
+            require_webhook_signature: false,
+        },
+    )
+}
+
+#[tauri::command]
+fn resolve_relay_webhook_callback(
+    state: tauri::State<AppState>,
+    input: RelayWebhookCallbackInput,
+) -> Result<WebhookIngestResult, String> {
+    let mut connection = open_connection(&state)?;
+    ingest_webhook_event_internal(
+        &mut connection,
+        WebhookIngestInput {
+            relay_request_id: Some(input.request_id),
+            relay_callback_secret: Some(input.callback_secret),
+            relay_issued_at_ms: Some(input.issued_at_ms),
+            trigger_id: input.trigger_id,
+            delivery_id: input.delivery_id,
+            content_type: input.content_type,
+            body_json: input.body_json,
+            signature: Some(input.signature),
+            signature_ts_ms: Some(input.signature_ts_ms),
+            headers_redacted_json: input.headers_redacted_json,
+            relay_channel: input.channel.or(Some("relay_webhook_callback".to_string())),
+            require_relay_callback_auth: true,
+            require_webhook_signature: true,
+        },
+    )
 }
 
 #[tauri::command]
@@ -1690,20 +1936,32 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 fn validate_relay_callback_auth(input: &RelayApprovalCallbackInput) -> Result<(), String> {
-    let request_id = input.request_id.trim();
+    validate_relay_callback_auth_fields(
+        &input.request_id,
+        &input.callback_secret,
+        input.issued_at_ms,
+        "Remote approvals are not ready yet. Generate a callback secret first.",
+    )
+}
+
+fn validate_relay_callback_auth_fields(
+    request_id: &str,
+    callback_secret: &str,
+    issued_at_ms: i64,
+    missing_secret_message: &str,
+) -> Result<(), String> {
+    let request_id = request_id.trim();
     if request_id.is_empty() || request_id.len() > 120 {
         return Err("Relay callback request id is invalid.".to_string());
     }
     let expected = providers::keychain::get_relay_callback_secret()
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            "Remote approvals are not ready yet. Generate a callback secret first.".to_string()
-        })?;
-    if !constant_time_eq(expected.trim(), input.callback_secret.trim()) {
+        .ok_or_else(|| missing_secret_message.to_string())?;
+    if !constant_time_eq(expected.trim(), callback_secret.trim()) {
         return Err("Relay callback authentication failed.".to_string());
     }
     let now = now_ms();
-    if input.issued_at_ms <= 0 || (now - input.issued_at_ms).abs() > 15 * 60 * 1000 {
+    if issued_at_ms <= 0 || (now - issued_at_ms).abs() > 15 * 60 * 1000 {
         return Err("Relay callback request expired. Retry from Terminus relay.".to_string());
     }
     Ok(())
@@ -1796,6 +2054,491 @@ fn sanitize_approval_resolution_field(value: Option<&str>, max_len: usize) -> Op
     } else {
         Some(bounded)
     }
+}
+
+fn relay_webhook_base_url() -> String {
+    if let Ok(url) = std::env::var("TERMINUS_RELAY_WEBHOOK_URL") {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    let dispatch = transport::RelayTransport::default_url();
+    if let Some((prefix, _)) = dispatch.rsplit_once('/') {
+        format!("{prefix}/webhooks")
+    } else {
+        format!("{dispatch}/webhooks")
+    }
+}
+
+fn make_hashed_token(prefix: &str, seed: &str) -> String {
+    let digest = Sha256::digest(format!("{prefix}:{seed}:{}", now_ms()).as_bytes());
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    format!(
+        "{}_{}",
+        prefix,
+        encoded.chars().take(24).collect::<String>()
+    )
+}
+
+fn latest_run_plan_snapshot(
+    connection: &rusqlite::Connection,
+    autopilot_id: &str,
+) -> Result<(String, String), String> {
+    connection
+        .query_row(
+            "SELECT plan_json, provider_kind
+             FROM runs
+             WHERE autopilot_id = ?1
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1",
+            rusqlite::params![autopilot_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("Could not load latest run plan for this Autopilot: {e}"))?
+        .ok_or_else(|| {
+            "Run a test once before adding a webhook trigger so Terminus can snapshot the plan."
+                .to_string()
+        })
+}
+
+fn update_webhook_trigger_enabled(
+    state: tauri::State<AppState>,
+    trigger_id: String,
+    enabled: bool,
+) -> Result<webhook_triggers::WebhookTriggerRecord, String> {
+    let connection = open_connection(&state)?;
+    let trigger_id = trigger_id.trim();
+    if trigger_id.is_empty() {
+        return Err("Trigger ID is required.".to_string());
+    }
+    let status = if enabled { "active" } else { "paused" };
+    webhook_triggers::update_webhook_trigger_status(&connection, trigger_id, status, None)?;
+    let relay_base = relay_webhook_base_url();
+    webhook_triggers::get_webhook_trigger(&connection, trigger_id, &relay_base, &|id| {
+        providers::keychain::get_webhook_trigger_secret(id)
+            .ok()
+            .flatten()
+            .is_some_and(|v| !v.trim().is_empty())
+    })?
+    .ok_or_else(|| "Webhook trigger not found.".to_string())
+}
+
+fn reserve_relay_webhook_callback_event(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    trigger_id: &str,
+    delivery_id: &str,
+    channel: Option<&str>,
+) -> Result<(), String> {
+    let inserted = connection
+        .execute(
+            "INSERT OR IGNORE INTO relay_webhook_callback_events
+             (id, request_id, trigger_id, delivery_id, status, channel, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'received', ?5, ?6)",
+            rusqlite::params![
+                make_main_id("relay_wh"),
+                request_id.trim(),
+                trigger_id,
+                delivery_id,
+                sanitize_approval_resolution_field(channel, 32),
+                now_ms(),
+            ],
+        )
+        .map_err(|e| format!("Could not record relay webhook callback event: {e}"))?;
+    if inserted == 0 {
+        return Err("Relay webhook callback request was already processed.".to_string());
+    }
+    Ok(())
+}
+
+fn update_relay_webhook_callback_event_status(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE relay_webhook_callback_events SET status = ?1 WHERE request_id = ?2",
+            rusqlite::params![status, request_id.trim()],
+        )
+        .map_err(|e| format!("Could not update relay webhook callback status: {e}"))?;
+    Ok(())
+}
+
+fn redact_webhook_headers_json(input: Option<&str>) -> String {
+    let Some(raw) = input.map(str::trim).filter(|v| !v.is_empty()) else {
+        return "{}".to_string();
+    };
+    let parsed = serde_json::from_str::<serde_json::Map<String, Value>>(raw);
+    let Ok(map) = parsed else {
+        return "{}".to_string();
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map.into_iter().take(24) {
+        let lower = key.to_ascii_lowercase();
+        let redacted = if lower.contains("authorization")
+            || lower.contains("cookie")
+            || lower.contains("secret")
+            || lower.contains("signature")
+            || lower.contains("token")
+        {
+            Value::String("[REDACTED]".to_string())
+        } else {
+            let text = match value {
+                Value::String(s) => s.chars().take(120).collect::<String>(),
+                other => other.to_string().chars().take(120).collect::<String>(),
+            };
+            Value::String(sanitize_log_message(&text))
+        };
+        out.insert(key.chars().take(48).collect(), redacted);
+    }
+    serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn normalize_content_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn payload_excerpt_from_json(body_json: &str) -> String {
+    let compact = serde_json::from_str::<Value>(body_json)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| body_json.to_string());
+    sanitize_log_message(&compact.chars().take(280).collect::<String>())
+}
+
+fn payload_hash(body_json: &str) -> String {
+    format!("{:x}", Sha256::digest(body_json.as_bytes()))
+}
+
+fn validate_webhook_signature(
+    secret: &str,
+    body_json: &str,
+    signature: &str,
+    signature_ts_ms: i64,
+) -> Result<(), String> {
+    if signature_ts_ms <= 0 || (now_ms() - signature_ts_ms).abs() > 15 * 60 * 1000 {
+        return Err(
+            "Webhook signature timestamp is expired. Retry from the source system.".to_string(),
+        );
+    }
+    let provided = signature
+        .trim()
+        .strip_prefix("sha256=")
+        .unwrap_or(signature.trim())
+        .to_ascii_lowercase();
+    if provided.is_empty() || provided.len() > 256 {
+        return Err("Webhook signature is invalid.".to_string());
+    }
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| "Webhook signature key is invalid.".to_string())?;
+    let signed = format!("{}.{}", signature_ts_ms, body_json);
+    mac.update(signed.as_bytes());
+    let expected = format!("{:x}", mac.finalize().into_bytes());
+    if !constant_time_eq(&expected, &provided) {
+        return Err("Webhook signature check failed.".to_string());
+    }
+    Ok(())
+}
+
+fn build_webhook_run_plan(
+    route: &webhook_triggers::WebhookTriggerRouteConfig,
+    body_json: &str,
+    payload_hash_hex: &str,
+    received_at_ms: i64,
+) -> Result<AutopilotPlan, String> {
+    let mut plan: AutopilotPlan = serde_json::from_str(&route.plan_json)
+        .map_err(|e| format!("Webhook trigger plan snapshot is invalid: {e}"))?;
+    if plan.recipe == RecipeKind::Custom {
+        let provider_id = parse_provider(&route.provider_kind)?;
+        plan = validate_custom_execution_plan(plan, provider_id)?;
+    }
+    let excerpt = payload_excerpt_from_json(body_json);
+    let event_summary = format!(
+        "Webhook event from trigger {} at {} (hash {}). Payload excerpt: {}",
+        route.trigger_id,
+        received_at_ms,
+        &payload_hash_hex[..payload_hash_hex.len().min(12)],
+        excerpt
+    );
+    if plan
+        .inbox_source_text
+        .as_ref()
+        .is_none_or(|v| v.trim().is_empty())
+    {
+        plan.inbox_source_text = Some(event_summary.clone());
+    } else if let Some(existing) = plan.inbox_source_text.clone() {
+        let mut merged = existing;
+        merged.push_str("\n\n");
+        merged.push_str(&event_summary);
+        plan.inbox_source_text = Some(merged.chars().take(4_000).collect());
+    }
+    plan.intent = format!(
+        "{} [Webhook trigger {}]",
+        plan.intent.trim(),
+        route.trigger_id
+    )
+    .chars()
+    .take(240)
+    .collect();
+    Ok(plan)
+}
+
+fn insert_webhook_run_activity(
+    connection: &rusqlite::Connection,
+    run_id: &str,
+    trigger_id: &str,
+    delivery_id: &str,
+    channel: Option<&str>,
+) {
+    let message = format!(
+        "Webhook event queued from {} (delivery {}).",
+        trigger_id,
+        delivery_id.chars().take(48).collect::<String>()
+    );
+    let _ = connection.execute(
+        "INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
+         VALUES (?1, ?2, 'webhook_event_queued', NULL, NULL, ?3, ?4)",
+        rusqlite::params![
+            make_main_id("activity"),
+            run_id,
+            truncate_for_activity(&message),
+            now_ms(),
+        ],
+    );
+    let _ = connection.execute(
+        "INSERT INTO activities (id, run_id, activity_type, from_state, to_state, user_message, created_at)
+         VALUES (?1, ?2, 'webhook_origin', NULL, NULL, ?3, ?4)",
+        rusqlite::params![
+            make_main_id("activity"),
+            run_id,
+            truncate_for_activity(&format!(
+                "Origin: webhook via {}",
+                channel.unwrap_or("relay_webhook")
+            )),
+            now_ms(),
+        ],
+    );
+}
+
+fn ingest_webhook_event_internal(
+    connection: &mut rusqlite::Connection,
+    input: WebhookIngestInput,
+) -> Result<WebhookIngestResult, String> {
+    let trigger_id = input.trigger_id.trim().to_string();
+    if trigger_id.is_empty() {
+        return Err("Trigger ID is required.".to_string());
+    }
+    let delivery_id = input.delivery_id.trim().to_string();
+    if delivery_id.is_empty() || delivery_id.len() > 200 {
+        return Err("Webhook delivery ID is invalid.".to_string());
+    }
+    if input.require_relay_callback_auth {
+        validate_relay_callback_auth_fields(
+            input.relay_request_id.as_deref().unwrap_or(""),
+            input.relay_callback_secret.as_deref().unwrap_or(""),
+            input.relay_issued_at_ms.unwrap_or_default(),
+            "Remote webhook delivery is not ready yet. Generate a callback secret first.",
+        )?;
+        if let Err(err) = reserve_relay_webhook_callback_event(
+            connection,
+            input.relay_request_id.as_deref().unwrap_or(""),
+            &trigger_id,
+            &delivery_id,
+            input.relay_channel.as_deref(),
+        ) {
+            if err.contains("already processed") {
+                return Ok(WebhookIngestResult {
+                    status: "duplicate".to_string(),
+                    trigger_id,
+                    delivery_id,
+                    run_id: None,
+                    message: "Relay webhook callback request was already processed.".to_string(),
+                });
+            }
+            return Err(err);
+        }
+    }
+
+    let route = webhook_triggers::get_webhook_trigger_route_config(connection, &trigger_id)?
+        .ok_or_else(|| "Webhook trigger not found.".to_string())?;
+    let now = now_ms();
+    let content_type = normalize_content_type(&input.content_type);
+    let body_json = input.body_json.trim().to_string();
+    let body_len = body_json.as_bytes().len() as i64;
+    let hash = payload_hash(&body_json);
+    let event_key = format!("{}:{}", delivery_id, &hash[..hash.len().min(16)]);
+    let headers_redacted_json = redact_webhook_headers_json(input.headers_redacted_json.as_deref());
+    let payload_excerpt = payload_excerpt_from_json(&body_json);
+
+    let base_event = webhook_triggers::WebhookTriggerEventInsert {
+        id: make_main_id("wh_event"),
+        trigger_id: trigger_id.clone(),
+        delivery_id: delivery_id.clone(),
+        event_idempotency_key: event_key.clone(),
+        received_at_ms: now,
+        status: "accepted".to_string(),
+        http_status: Some(202),
+        headers_redacted_json,
+        payload_excerpt,
+        payload_hash: hash.clone(),
+        failure_reason: None,
+        run_id: None,
+    };
+    let inserted = webhook_triggers::insert_webhook_trigger_event(connection, &base_event)?;
+    if !inserted {
+        if input.require_relay_callback_auth {
+            let _ = update_relay_webhook_callback_event_status(
+                connection,
+                input.relay_request_id.as_deref().unwrap_or(""),
+                "duplicate",
+            );
+        }
+        return Ok(WebhookIngestResult {
+            status: "duplicate".to_string(),
+            trigger_id,
+            delivery_id,
+            run_id: None,
+            message: "Duplicate webhook delivery ignored.".to_string(),
+        });
+    }
+
+    let fail = |status: &str,
+                reason: &str,
+                http_status: Option<i64>|
+     -> Result<WebhookIngestResult, String> {
+        let _ = webhook_triggers::update_webhook_trigger_event_status(
+            connection,
+            &trigger_id,
+            &event_key,
+            status,
+            Some(reason),
+            None,
+        );
+        let _ = webhook_triggers::touch_webhook_trigger_delivery(
+            connection,
+            &trigger_id,
+            now,
+            Some(reason),
+        );
+        if input.require_relay_callback_auth {
+            let _ = update_relay_webhook_callback_event_status(
+                connection,
+                input.relay_request_id.as_deref().unwrap_or(""),
+                status,
+            );
+        }
+        if let Some(code) = http_status {
+            let _ = connection.execute(
+                "UPDATE webhook_trigger_events SET http_status = ?1 WHERE trigger_id = ?2 AND event_idempotency_key = ?3",
+                rusqlite::params![code, &trigger_id, &event_key],
+            );
+        }
+        Ok(WebhookIngestResult {
+            status: status.to_string(),
+            trigger_id: trigger_id.clone(),
+            delivery_id: delivery_id.clone(),
+            run_id: None,
+            message: reason.to_string(),
+        })
+    };
+
+    if route.status != "active" {
+        return fail(
+            "rejected",
+            "Webhook trigger is paused. Enable it to accept events.",
+            Some(409),
+        );
+    }
+    if content_type != "application/json"
+        || !route
+            .allowed_content_types
+            .iter()
+            .any(|v| normalize_content_type(v) == content_type)
+    {
+        return fail(
+            "failed_validation",
+            "Unsupported webhook content type. Terminus currently accepts JSON only.",
+            Some(415),
+        );
+    }
+    if body_len <= 0 || body_len > route.max_payload_bytes {
+        return fail(
+            "failed_validation",
+            "Webhook payload is too large for this trigger. Reduce payload size or raise the trigger limit.",
+            Some(413),
+        );
+    }
+    if serde_json::from_str::<Value>(&body_json).is_err() {
+        return fail(
+            "failed_validation",
+            "Webhook payload must be valid JSON.",
+            Some(400),
+        );
+    }
+    if input.require_webhook_signature {
+        let secret = providers::keychain::get_webhook_trigger_secret(&trigger_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "Webhook trigger signing secret is missing. Rotate the secret and retry."
+                    .to_string()
+            })?;
+        if let Err(err) = validate_webhook_signature(
+            &secret,
+            &body_json,
+            input.signature.as_deref().unwrap_or(""),
+            input.signature_ts_ms.unwrap_or_default(),
+        ) {
+            return fail("rejected", &err, Some(401));
+        }
+    }
+
+    let plan = build_webhook_run_plan(&route, &body_json, &hash, now)?;
+    let run_idempotency_key = format!("webhook:{}:{}", trigger_id, event_key);
+    let run = RunnerEngine::start_run(
+        connection,
+        &route.autopilot_id,
+        plan,
+        &run_idempotency_key,
+        2,
+    )
+    .map_err(|e| e.to_string())?;
+    insert_webhook_run_activity(
+        connection,
+        &run.id,
+        &trigger_id,
+        &delivery_id,
+        input.relay_channel.as_deref(),
+    );
+    webhook_triggers::update_webhook_trigger_event_status(
+        connection,
+        &trigger_id,
+        &event_key,
+        "queued",
+        None,
+        Some(&run.id),
+    )?;
+    webhook_triggers::touch_webhook_trigger_delivery(connection, &trigger_id, now, None)?;
+    if input.require_relay_callback_auth {
+        update_relay_webhook_callback_event_status(
+            connection,
+            input.relay_request_id.as_deref().unwrap_or(""),
+            "applied",
+        )?;
+    }
+    Ok(WebhookIngestResult {
+        status: "queued".to_string(),
+        trigger_id,
+        delivery_id,
+        run_id: Some(run.id),
+        message: "Webhook accepted and run queued.".to_string(),
+    })
 }
 
 fn validate_voice_tone(input: &str) -> Result<String, String> {
@@ -2499,6 +3242,33 @@ mod tests {
         let ok = validate_custom_execution_plan(plan, ProviderId::OpenAi).expect("valid");
         assert_eq!(ok.provider.id, ProviderId::OpenAi);
     }
+
+    #[test]
+    fn webhook_signature_validation_accepts_valid_and_rejects_invalid_signature() {
+        let secret = "whsec_test";
+        let body = "{\"event\":\"ok\"}";
+        let ts = now_ms();
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac");
+        mac.update(format!("{}.{}", ts, body).as_bytes());
+        let sig = format!("sha256={:x}", mac.finalize().into_bytes());
+        validate_webhook_signature(secret, body, &sig, ts).expect("valid signature");
+        let err =
+            validate_webhook_signature(secret, body, "sha256=deadbeef", ts).expect_err("invalid");
+        assert!(err.to_ascii_lowercase().contains("signature"));
+    }
+
+    #[test]
+    fn webhook_content_type_normalization_strips_charset() {
+        assert_eq!(
+            normalize_content_type("application/json; charset=utf-8"),
+            "application/json"
+        );
+        assert_eq!(
+            normalize_content_type(" APPLICATION/JSON "),
+            "application/json"
+        );
+    }
 }
 
 fn main() {
@@ -2548,6 +3318,14 @@ fn main() {
             clear_relay_callback_secret,
             set_subscriber_token,
             remove_subscriber_token,
+            list_webhook_triggers,
+            create_webhook_trigger,
+            rotate_webhook_trigger_secret,
+            disable_webhook_trigger,
+            enable_webhook_trigger,
+            get_webhook_trigger_events,
+            ingest_webhook_event_local_debug,
+            resolve_relay_webhook_callback,
             draft_intent,
             start_recipe_run,
             run_tick,

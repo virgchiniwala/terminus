@@ -26,6 +26,9 @@ import type {
   IntentDraftKind,
   VoiceConfigRecord,
   AutopilotVoiceConfigRecord,
+  WebhookTriggerCreateResponse,
+  WebhookTriggerEventRecord,
+  WebhookTriggerRecord,
 } from "./types";
 import {
   canStartDraftRun,
@@ -36,8 +39,11 @@ import {
   normalizeOnboardingStateRecord,
   normalizeVoiceConfigRecord,
   normalizeAutopilotVoiceConfigRecord,
+  normalizeWebhookTriggerEventRecord,
+  normalizeWebhookTriggerRecord,
   normalizeSnapshot,
   replaceDebouncedTimer,
+  webhookEventStatusLine,
 } from "./uiLogic";
 
 function nowId(prefix: string): string {
@@ -181,6 +187,15 @@ export function App() {
   const [selectedMission, setSelectedMission] = useState<MissionDetail | null>(null);
   const [missionsMessage, setMissionsMessage] = useState<string | null>(null);
   const [missionActionLoading, setMissionActionLoading] = useState(false);
+  const [webhookAutopilotId, setWebhookAutopilotId] = useState("auto_inbox_watch_gmail");
+  const [webhookDescription, setWebhookDescription] = useState("");
+  const [webhookTriggers, setWebhookTriggers] = useState<WebhookTriggerRecord[]>([]);
+  const [selectedWebhookTriggerId, setSelectedWebhookTriggerId] = useState<string | null>(null);
+  const [webhookEvents, setWebhookEvents] = useState<WebhookTriggerEventRecord[]>([]);
+  const [webhookMessage, setWebhookMessage] = useState<string | null>(null);
+  const [webhookSecretPreview, setWebhookSecretPreview] = useState<string | null>(null);
+  const [webhookActionLoading, setWebhookActionLoading] = useState(false);
+  const [webhookDebugPayload, setWebhookDebugPayload] = useState('{"event":"ping","status":"ok"}');
   const runnerControlSaveTimerRef = useRef<number | null>(null);
   const sendPolicySaveTimerRef = useRef<number | null>(null);
   const intentOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -334,6 +349,128 @@ export function App() {
         setMissionsMessage(typeof err === "string" ? err : "Could not load mission details.");
       });
   }, [normalizeMissionDetail]);
+
+  const loadWebhookTriggers = useCallback((autopilotId?: string) => {
+    const trimmed = (autopilotId ?? webhookAutopilotId).trim();
+    invoke<WebhookTriggerRecord[]>("list_webhook_triggers", {
+      autopilotId: trimmed ? trimmed : null,
+    })
+      .then((rows: any[]) => {
+        const normalized = (rows ?? []).map(normalizeWebhookTriggerRecord);
+        setWebhookTriggers(normalized);
+        setSelectedWebhookTriggerId((prev) => prev ?? normalized[0]?.id ?? null);
+      })
+      .catch((err) => {
+        console.error("Failed to load webhook triggers:", err);
+        setWebhookMessage(typeof err === "string" ? err : "Could not load webhook triggers.");
+      });
+  }, [webhookAutopilotId]);
+
+  const loadWebhookEvents = useCallback((triggerId: string) => {
+    if (!triggerId.trim()) {
+      setWebhookEvents([]);
+      return;
+    }
+    invoke<WebhookTriggerEventRecord[]>("get_webhook_trigger_events", {
+      triggerId,
+      limit: 12,
+    })
+      .then((rows: any[]) => setWebhookEvents((rows ?? []).map(normalizeWebhookTriggerEventRecord)))
+      .catch((err) => {
+        console.error("Failed to load webhook trigger events:", err);
+        setWebhookMessage((prev) => prev ?? "Could not load webhook deliveries.");
+      });
+  }, []);
+
+  const createWebhookTrigger = useCallback(() => {
+    const autopilotId = webhookAutopilotId.trim();
+    if (!autopilotId) {
+      setWebhookMessage("Autopilot ID is required.");
+      return;
+    }
+    setWebhookActionLoading(true);
+    setWebhookMessage(null);
+    setWebhookSecretPreview(null);
+    invoke<WebhookTriggerCreateResponse>("create_webhook_trigger", {
+      input: {
+        autopilotId,
+        description: webhookDescription.trim() || undefined,
+      },
+    })
+      .then((resp: any) => {
+        setWebhookSecretPreview(resp.signingSecretPreview ?? resp.signing_secret_preview ?? null);
+        setWebhookMessage("Webhook trigger created. Store the signing secret now.");
+        loadWebhookTriggers(autopilotId);
+      })
+      .catch((err) => {
+        console.error("Failed to create webhook trigger:", err);
+        setWebhookMessage(typeof err === "string" ? err : "Could not create webhook trigger.");
+      })
+      .finally(() => setWebhookActionLoading(false));
+  }, [loadWebhookTriggers, webhookAutopilotId, webhookDescription]);
+
+  const setWebhookTriggerEnabled = useCallback((triggerId: string, enabled: boolean) => {
+    setWebhookActionLoading(true);
+    setWebhookMessage(null);
+    const command = enabled ? "enable_webhook_trigger" : "disable_webhook_trigger";
+    invoke<WebhookTriggerRecord>(command, { triggerId })
+      .then(() => {
+        setWebhookMessage(enabled ? "Webhook trigger enabled." : "Webhook trigger paused.");
+        loadWebhookTriggers();
+        if (selectedWebhookTriggerId === triggerId) {
+          loadWebhookEvents(triggerId);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to update webhook trigger status:", err);
+        setWebhookMessage(typeof err === "string" ? err : "Could not update webhook trigger.");
+      })
+      .finally(() => setWebhookActionLoading(false));
+  }, [loadWebhookEvents, loadWebhookTriggers, selectedWebhookTriggerId]);
+
+  const rotateWebhookSecret = useCallback((triggerId: string) => {
+    setWebhookActionLoading(true);
+    setWebhookMessage(null);
+    invoke<WebhookTriggerCreateResponse>("rotate_webhook_trigger_secret", { triggerId })
+      .then((resp: any) => {
+        setWebhookSecretPreview(resp.signingSecretPreview ?? resp.signing_secret_preview ?? null);
+        setWebhookMessage("Webhook secret rotated. Update the source system now.");
+        loadWebhookTriggers();
+      })
+      .catch((err) => {
+        console.error("Failed to rotate webhook secret:", err);
+        setWebhookMessage(typeof err === "string" ? err : "Could not rotate webhook secret.");
+      })
+      .finally(() => setWebhookActionLoading(false));
+  }, [loadWebhookTriggers]);
+
+  const simulateWebhookDelivery = useCallback(() => {
+    if (!selectedWebhookTriggerId) {
+      setWebhookMessage("Select a webhook trigger first.");
+      return;
+    }
+    setWebhookActionLoading(true);
+    setWebhookMessage(null);
+    invoke("ingest_webhook_event_local_debug", {
+      input: {
+        triggerId: selectedWebhookTriggerId,
+        deliveryId: nowId("whdbg"),
+        bodyJson: webhookDebugPayload,
+        contentType: "application/json",
+      },
+    })
+      .then((result: any) => {
+        setWebhookMessage(result?.message ?? "Webhook delivery simulated.");
+        loadWebhookEvents(selectedWebhookTriggerId);
+      })
+      .catch((err) => {
+        console.error("Failed to simulate webhook delivery:", err);
+        setWebhookMessage(
+          typeof err === "string" ? err : "Could not simulate webhook delivery."
+        );
+      })
+      .finally(() => setWebhookActionLoading(false));
+  }, [loadWebhookEvents, selectedWebhookTriggerId, webhookDebugPayload]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -598,7 +735,8 @@ export function App() {
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
-  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+    loadWebhookTriggers();
+  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -616,6 +754,7 @@ export function App() {
           loadClarifications();
           loadRunDiagnostics();
           loadMissions();
+          loadWebhookTriggers();
           loadRelaySyncStatus();
           loadRelayPushStatus();
           loadOnboardingState();
@@ -628,7 +767,15 @@ export function App() {
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, loadOnboardingState, selectedMissionId]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, loadOnboardingState, loadWebhookTriggers, selectedMissionId]);
+
+  useEffect(() => {
+    if (!selectedWebhookTriggerId) {
+      setWebhookEvents([]);
+      return;
+    }
+    loadWebhookEvents(selectedWebhookTriggerId);
+  }, [loadWebhookEvents, selectedWebhookTriggerId]);
 
   useEffect(() => {
     return () => {
@@ -1614,6 +1761,188 @@ export function App() {
                   })()}
                 </>
               )}
+            </article>
+          </div>
+        </section>
+
+        <section className="diagnostics-panel" aria-label="Webhook Triggers">
+          <div className="connection-panel-header">
+            <h2>Webhook Triggers (MVP)</h2>
+            <p>
+              Relay-backed inbound events start bounded runs with the same approvals, spend rails,
+              and receipts.
+            </p>
+          </div>
+          <div className="connection-cards">
+            <article className="connection-card">
+              <h3>Create Trigger</h3>
+              <label>
+                Autopilot ID
+                <input
+                  value={webhookAutopilotId}
+                  onChange={(event) => setWebhookAutopilotId(event.target.value)}
+                  placeholder="autopilot id"
+                />
+              </label>
+              <label>
+                Description (optional)
+                <input
+                  value={webhookDescription}
+                  onChange={(event) => setWebhookDescription(event.target.value)}
+                  placeholder="CRM inbound updates"
+                />
+              </label>
+              <div className="connection-actions">
+                <button type="button" onClick={createWebhookTrigger} disabled={webhookActionLoading}>
+                  {webhookActionLoading ? "Working..." : "Create Webhook Trigger"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => loadWebhookTriggers()}
+                  disabled={webhookActionLoading}
+                >
+                  Refresh
+                </button>
+              </div>
+              {webhookSecretPreview && (
+                <div className="runner-suppressed-list">
+                  <p><strong>Signing secret (shown once)</strong></p>
+                  <code>{webhookSecretPreview}</code>
+                </div>
+              )}
+              {webhookMessage && <p className="connection-message">{webhookMessage}</p>}
+            </article>
+
+            <article className="connection-card">
+              <h3>Trigger List</h3>
+              {webhookTriggers.length === 0 ? (
+                <p>No webhook triggers yet.</p>
+              ) : (
+                <div className="clarification-list">
+                  {webhookTriggers.map((trigger) => (
+                    <button
+                      key={trigger.id}
+                      type="button"
+                      className="clarification-chip"
+                      aria-pressed={selectedWebhookTriggerId === trigger.id}
+                      onClick={() => setSelectedWebhookTriggerId(trigger.id)}
+                      title={`${trigger.status} · ${trigger.endpointUrl}`}
+                    >
+                      {trigger.status === "active" ? "●" : "○"} {trigger.description || trigger.id}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {selectedWebhookTriggerId && (
+                <div className="connection-actions">
+                  <button
+                    type="button"
+                    onClick={() => rotateWebhookSecret(selectedWebhookTriggerId)}
+                    disabled={webhookActionLoading}
+                  >
+                    Rotate Secret
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const selected = webhookTriggers.find((t) => t.id === selectedWebhookTriggerId);
+                      if (selected) {
+                        setWebhookTriggerEnabled(selected.id, selected.status !== "active");
+                      }
+                    }}
+                    disabled={webhookActionLoading}
+                  >
+                    {webhookTriggers.find((t) => t.id === selectedWebhookTriggerId)?.status === "active"
+                      ? "Pause"
+                      : "Enable"}
+                  </button>
+                </div>
+              )}
+            </article>
+
+            <article className="connection-card">
+              <h3>Selected Trigger</h3>
+              {!selectedWebhookTriggerId ? (
+                <p>Select a trigger to view endpoint and recent deliveries.</p>
+              ) : (() => {
+                const selected = webhookTriggers.find((t) => t.id === selectedWebhookTriggerId);
+                if (!selected) {
+                  return <p>Selected trigger not found.</p>;
+                }
+                return (
+                  <>
+                    <p>Status: <code>{selected.status}</code></p>
+                    <p>Autopilot: <code>{selected.autopilotId}</code></p>
+                    <p>Endpoint URL</p>
+                    <input readOnly value={selected.endpointUrl} />
+                    <p>
+                      Signature: <code>{selected.signatureMode}</code> · Secret configured:{" "}
+                      {selected.secretConfigured ? "Yes" : "No"}
+                    </p>
+                    <p>
+                      Last event:{" "}
+                      {selected.lastEventAtMs ? formatShortLocalTime(selected.lastEventAtMs) : "None"}
+                    </p>
+                    {selected.lastError && <p>Last error: {selected.lastError}</p>}
+                    <label>
+                      Dev: simulate JSON webhook (local debug helper)
+                      <textarea
+                        className="intent-input"
+                        value={webhookDebugPayload}
+                        onChange={(event) => setWebhookDebugPayload(event.target.value)}
+                        rows={4}
+                      />
+                    </label>
+                    <div className="connection-actions">
+                      <button
+                        type="button"
+                        onClick={simulateWebhookDelivery}
+                        disabled={webhookActionLoading}
+                      >
+                        Simulate Delivery
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => loadWebhookEvents(selected.id)}
+                        disabled={webhookActionLoading}
+                      >
+                        Refresh Deliveries
+                      </button>
+                    </div>
+                    <div className="diagnostic-list">
+                      {webhookEvents.length === 0 ? (
+                        <p>No deliveries yet.</p>
+                      ) : (
+                        webhookEvents.map((event) => (
+                          <article key={event.id} className="diagnostic-card">
+                            <div className="diagnostic-header-row">
+                              <p className="clarification-kicker">
+                                Delivery <code>{event.deliveryId}</code>
+                              </p>
+                              <span className={`diagnostic-status status-${event.status}`}>
+                                {event.status}
+                              </span>
+                            </div>
+                            <p className="diagnostic-summary">{webhookEventStatusLine(event)}</p>
+                            <p className="clarification-meta">
+                              {formatShortLocalTime(event.receivedAtMs)}
+                              {event.httpStatus ? ` · HTTP ${event.httpStatus}` : ""}
+                              {event.runId ? (
+                                <>
+                                  {" "}· Run <code>{event.runId}</code>
+                                </>
+                              ) : null}
+                            </p>
+                            {event.payloadExcerpt && (
+                              <p className="clarification-meta">Excerpt: {event.payloadExcerpt}</p>
+                            )}
+                          </article>
+                        ))
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </article>
           </div>
         </section>

@@ -1,4 +1,4 @@
-Last updated: 2026-02-25
+Last updated: 2026-03-02
 
 # Terminus Product Strategy (v3 — Updated)
 
@@ -18,6 +18,10 @@ Last updated: 2026-02-25
 - Planning before execution → classify → preview → approve → run
 
 Positioning: "Terminus is your AI's operating environment — not an assistant that suggests, but a structured harness that makes AI act safely on your behalf."
+
+Positioning shorthand: **adaptive but predictable**.
+- Adaptive: dynamic plans, learning, rules, and webhook triggers help with messy real-world workflows.
+- Predictable: bounded primitives, approvals, spend rails, and receipts preserve trust and control.
 
 **Not building:**
 - A chat app (chat is an input method, not the home screen)
@@ -275,7 +279,7 @@ All built on the **same** runner, approval, receipt, and primitive catalog.
 
 ---
 
-## 16) Near-term roadmap (revised 2026-02-25)
+## 16) Near-term roadmap (revised 2026-03-02)
 
 ### Phase 0 — Dynamic Plan Generation (CURRENT)
 - `RecipeKind::Custom` in schema
@@ -288,6 +292,7 @@ All built on the **same** runner, approval, receipt, and primitive catalog.
 - `RelayTransport` in transport/relay.rs
 - Subscriber token in Keychain
 - Push channel for approval routing
+- Relay-backed webhook triggers (inbound events -> bounded run enqueue)
 - Slack bot via Chat SDK pattern
 - Onboarding: "Sign in to Terminus" flow
 

@@ -1,10 +1,16 @@
 # PRIMITIVES.md
-Last updated: 2026-02-25
+Last updated: 2026-03-02
 
 ## Purpose
 Primitives are Terminus runtime actions. They are constrained by design and deny-by-default.
 
 A plan can only execute primitives explicitly allowlisted in that plan (`allowed_primitives` field). This is enforced by `PrimitiveGuard` in `src-tauri/src/primitives.rs` — an unknown or non-allowlisted primitive fails with a human-readable error before any side effect executes.
+
+## Triggers vs Primitives (Important)
+- **Triggers** decide *when* an Autopilot run starts (manual, schedule, inbox watcher, webhook).
+- **Primitives** decide *what* the run is allowed to do after it starts.
+
+Webhook Trigger MVP is a relay-backed trigger surface, not a new primitive. Webhook payloads can start runs, but they do not expand runtime capabilities. All existing primitive allowlists, approval gates, spend rails, and receipts still apply.
 
 ## Primitive Catalog (Complete)
 
@@ -61,6 +67,11 @@ Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `A
 - Change allowlists autonomously
 - Create new executable capabilities
 - Access system resources not in the bounded catalog
+- Accept arbitrary inbound webhook payloads as code/transforms
+
+## Integration Boundary (Current)
+- **Shipped:** relay-backed inbound webhook triggers (bounded JSON event ingress -> run enqueue)
+- **Planned next:** `CallApi` primitive (approval-gated, allowlisted outbound HTTP) after webhook demand is validated
 
 ## PrimitiveGuard Enforcement
 `PrimitiveGuard` in `src-tauri/src/primitives.rs` is the deny-by-default enforcement layer:

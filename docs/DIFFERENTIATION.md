@@ -1,5 +1,5 @@
 # DIFFERENTIATION.md
-Last updated: 2026-02-25
+Last updated: 2026-03-02
 
 ## Why Terminus Exists
 
@@ -8,6 +8,23 @@ Non-technical professionals are surrounded by AI that suggests. Terminus provide
 This is what the best engineering teams (Stripe Minions, OpenAI internal platform, Anthropic harness research) are building internally for coding agents. Terminus brings it to professional knowledge work for non-technical users — comms coordination, ops-lite, finance/legal-adjacent workflows.
 
 **The target:** professional back-office quadrant, where automation demand is high and supply is nearly zero for non-technical users.
+
+---
+
+## Adaptive but Predictable (Positioning)
+
+Traditional automation is often brittle. It assumes stable inputs and exact mappings, then breaks when the real world drifts.
+
+Opaque agents have the opposite problem: they may adapt, but they are hard to predict and hard to trust.
+
+Terminus is intentionally in the middle:
+- **Adaptive:** dynamic plans, learning, rules, webhook triggers, and relay approvals help it handle messy professional workflows
+- **Predictable:** bounded primitives, approvals, spend rails, idempotency, and receipts constrain behavior and make it legible
+
+This is the core framing:
+- not brittle automation
+- not opaque autonomy
+- **adaptive but predictable execution**
 
 ---
 
@@ -67,7 +84,7 @@ Relay is a transport (API proxying + remote approval), not a cloud runner. The c
 
 ## Terminus vs "More Templates" Tools
 
-Generic automation tools (Zapier, Make, n8n) require technical setup and produce rigid pre-defined workflows. Terminus's Dynamic Plan Generation lets users describe any professional workflow in natural language — the LLM generates the execution plan using 11 audited primitives, validated server-side for safety. No template required, no technical setup.
+Generic automation tools (Zapier, Make, n8n) require technical setup and often produce brittle, form-defined flows. Terminus's Dynamic Plan Generation lets users describe professional workflows in natural language, then validates the generated plan server-side against a bounded primitive catalog. No workflow builder, no hidden capability growth.
 
 ---
 
@@ -100,3 +117,5 @@ Do not ship changes that move Terminus toward:
 7. **Interview-driven onboarding** — blank canvas → agent interviews you → recommends first autopilot → guides setup inline; no empty tabs on day 1
 
 8. **Calm, premium UX** — object-first, minimal cognitive load, clear always-on truth, no technical jargon
+
+9. **Relay-backed webhook triggers (bounded integration path)** — real inbound integrations now, without jumping to unrestricted external API execution

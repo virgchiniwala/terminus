@@ -1,5 +1,5 @@
 # Agentic Best-Practices Plan + Status (Fresh Session Handoff)
-Last updated: 2026-02-24
+Last updated: 2026-03-02
 
 ## Why This File Exists
 This file captures:
@@ -10,15 +10,17 @@ This file captures:
 Use this as the fast-start context for a fresh Codex session before proposing new work.
 
 ## Executive Summary
-Terminus already implements many strong agentic/runtime best practices (bounded state machine, approvals, receipts, retries, learning/memory, local-first safety). The main gap vs. orchestrator-style systems is not core execution safety, but:
-- supervisor-grade diagnostics/interventions
-- mission-level orchestration (parent/child runs, completion contracts)
-- context/memory provenance UX
+Terminus already implements many strong agentic/runtime best practices (bounded state machine, approvals, receipts, retries, learning/memory, local-first safety).
 
-We implemented the first major slice:
-- **Supervisor Loop MVP** (run diagnostics + allowlisted interventions + Home "Needs Attention" panel)
+The original gap areas in this plan have now been implemented in MVP form:
+- supervisor-grade diagnostics/interventions (Workstream A)
+- mission-level orchestration (Workstream B MVP)
+- context/memory provenance UX (Workstream C MVP)
 
-Mission orchestration and context/memory provenance remain planned, not implemented.
+Current gap has shifted to the next orchestration layer:
+- webhook/relay-triggered orchestration inputs (inbound external events)
+- richer rule extraction and operator teaching loops
+- hosted relay packaging and remote execution ergonomics
 
 ## Sources That Informed the Plan (Conceptually)
 - OpenClaw/Krause-style orchestration patterns (context partitioning, deterministic monitoring, completion contracts, resource-aware concurrency)
@@ -123,17 +125,23 @@ User reported the PR from branch `codex/supervisor-diagnostics-panel` was create
 Note:
 - Full `cargo test` in the sandbox environment still hit existing local bind permission failures in some runner web/server tests (`Operation not permitted`). This was environmental, not introduced by the diagnostics slice.
 
-## What Is NOT Implemented Yet (from the plan)
-### Mission Orchestration (Workstream B)
-- No `missions` / `mission_runs` / `mission_events` tables yet
-- No mission commands (`create_mission_draft`, `start_mission`, etc.)
-- No mission templates or completion contracts yet
-- No mission UI surface yet
+## What Was Implemented After This Plan (Workstreams B + C)
+### Mission Orchestration (Workstream B MVP) — Implemented
+- `missions`, `mission_runs`, `mission_events` tables shipped
+- Mission commands (`create_mission_draft`, `start_mission`, `get_mission`, `list_missions`, `run_mission_tick`) shipped
+- Mission UI surface shipped (Missions panel with list/detail/tick)
+- Completion contract shipped (child runs terminal + no blocked/pending child + summary present)
 
-### Context + Memory Provenance (Workstream C)
-- No `Context Receipt` read API/UI yet
-- No memory provenance/suppression UI yet
-- No notification readiness gate config surfaced yet
+### Context + Memory Provenance (Workstream C MVP) — Implemented
+- Context Receipt read API/UI shipped (run/mission legibility)
+- memory provenance read APIs shipped
+- memory suppress/unsuppress controls shipped (autopilot-scoped, bounded)
+
+## Current Workstream Status (as of 2026-03-02)
+- Workstream A (Supervisor Loop): **Implemented**
+- Workstream B (Mission Orchestration MVP): **Implemented**
+- Workstream C (Context + Memory Provenance MVP): **Implemented**
+- New active follow-on: **Relay-backed Webhook Trigger MVP** (bounded external event ingress)
 
 ## Current Project State (from latest PR28 worktree docs)
 Source inspected:
@@ -166,33 +174,27 @@ Source inspected:
   - `npm run lint` passes
   - `npm run build` passes
 
-## Important Sequencing Note
-The agentic-orchestration plan is strategically valid, but it is **not yet the active top priority** in the latest PR28 mission-control snapshot.
+## Important Sequencing Note (Updated)
+This file started as a proposal; the repo has since advanced beyond the original scope.
 
-Current documented priorities emphasize:
-- Voice object + rule extraction flow
-- structural hardening/refactor follow-up
-- watcher health UI deepening
+Use it now as:
+- a record of the orchestration concepts Terminus adopted, and
+- a status bridge for what is already implemented vs. what comes next
 
-This means future sessions should explicitly decide whether to:
-- continue current roadmap, or
-- pivot to Workstream B (Mission Orchestration), or
-- hybridize (e.g., watcher health UX refinement + mission groundwork)
+Current documented priorities have moved beyond Workstreams A/B/C into:
+- relay-backed triggers/integration ingress
+- rule extraction and operator teaching loops
+- hosted relay packaging + onboarding polish
 
-## Recommended Next-Step Options (for a fresh session)
-### Option A — Stay on current roadmap (recommended if following PR28 docs)
-- Continue Voice object + rule extraction approval flow
-- Keep the new diagnostics panel in mind as a future destination for voice/rule failures
-
-### Option B — Hybrid bridge (recommended if introducing agentic plan incrementally)
-- Extend diagnostics/supervisor surfaces with watcher-provider backoff/reconnect detail
-- Then start Mission Orchestration MVP (`daily_brief_multi_source` only)
-
-### Option C — Full pivot to agentic plan
-- Start Workstream B immediately:
-  - add `missions`, `mission_runs`, `mission_events`
-  - implement one mission template + contract
-  - add mission list/detail UI
+## Recommended Next-Step Focus (Current)
+1. **Relay-backed Webhook Trigger MVP**
+   - bounded inbound external events -> run enqueue
+   - reuse relay callback auth/replay protections
+   - preserve approvals/receipts/spend rails
+2. **Rule extraction / "Teach Once"**
+   - explicit, approval-gated reusable behavior changes
+3. **Outbound HTTP API primitive (`CallApi`)**
+   - only after webhook ingress proves demand and policy model is ready
 
 ## If Continuing the Agentic Plan, Start Here (Implementation Order)
 1. **Mission Orchestration MVP (smallest vertical slice)**

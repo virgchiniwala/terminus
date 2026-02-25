@@ -360,6 +360,16 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               updated_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS relay_webhook_callback_events (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              trigger_id TEXT NOT NULL,
+              delivery_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              channel TEXT,
+              created_at_ms INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS clarifications (
               id TEXT PRIMARY KEY,
               run_id TEXT NOT NULL,
@@ -607,6 +617,40 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               updated_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS webhook_triggers (
+              id TEXT PRIMARY KEY,
+              autopilot_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              endpoint_path TEXT NOT NULL UNIQUE,
+              signature_mode TEXT NOT NULL DEFAULT 'terminus_hmac_sha256',
+              description TEXT NOT NULL DEFAULT '',
+              max_payload_bytes INTEGER NOT NULL DEFAULT 32768,
+              allowed_content_types_json TEXT NOT NULL DEFAULT '[\"application/json\"]',
+              plan_json TEXT NOT NULL DEFAULT '{}',
+              provider_kind TEXT NOT NULL DEFAULT 'openai',
+              last_event_at_ms INTEGER,
+              last_error TEXT,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS webhook_trigger_events (
+              id TEXT PRIMARY KEY,
+              trigger_id TEXT NOT NULL,
+              delivery_id TEXT NOT NULL,
+              event_idempotency_key TEXT NOT NULL,
+              received_at_ms INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              http_status INTEGER,
+              headers_redacted_json TEXT NOT NULL DEFAULT '{}',
+              payload_excerpt TEXT NOT NULL DEFAULT '',
+              payload_hash TEXT NOT NULL,
+              failure_reason TEXT,
+              run_id TEXT,
+              FOREIGN KEY (trigger_id) REFERENCES webhook_triggers(id)
+            );
+
             CREATE TABLE IF NOT EXISTS runner_control (
               singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
               background_enabled INTEGER NOT NULL DEFAULT 0,
@@ -787,6 +831,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     ensure_column(connection, "approvals", "decided_by", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "channel", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "actor_label", "TEXT")?;
+    ensure_column(
+        connection,
+        "relay_webhook_callback_events",
+        "channel",
+        "TEXT",
+    )?;
     ensure_column(connection, "onboarding_state", "recommended_intent", "TEXT")?;
     ensure_column(
         connection,
@@ -805,6 +855,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "relay_sync_state",
         "last_processed_count",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "webhook_triggers",
+        "plan_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    ensure_column(
+        connection,
+        "webhook_triggers",
+        "provider_kind",
+        "TEXT NOT NULL DEFAULT 'openai'",
     )?;
     ensure_column(
         connection,
@@ -916,6 +978,30 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create inbox watcher state index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_triggers_autopilot_updated ON webhook_triggers(autopilot_id, updated_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create webhook triggers index: {e}"))?;
+    connection
+        .execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_trigger_events_dedupe ON webhook_trigger_events(trigger_id, event_idempotency_key)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create webhook event dedupe index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_trigger_events_trigger_received ON webhook_trigger_events(trigger_id, received_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create webhook event trigger index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_webhook_trigger_events_status_received ON webhook_trigger_events(status, received_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create webhook event status index: {e}"))?;
     connection
         .execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_state_updated ON runs(state, updated_at DESC)",

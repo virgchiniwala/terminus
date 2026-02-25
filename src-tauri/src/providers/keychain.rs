@@ -8,6 +8,7 @@ pub const RELAY_CALLBACK_SECRET_SERVICE: &str = "terminus.relay.callback_secret"
 pub const RELAY_CALLBACK_SECRET_ACCOUNT: &str = "TerminusRelayCallback";
 pub const RELAY_DEVICE_ID_SERVICE: &str = "terminus.relay.device_id";
 pub const RELAY_DEVICE_ID_ACCOUNT: &str = "TerminusRelayDevice";
+pub const WEBHOOK_TRIGGER_SECRET_SERVICE_PREFIX: &str = "terminus.webhook_trigger_secret";
 
 pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, ProviderError> {
     let service = provider_kind.keychain_service_name();
@@ -198,4 +199,30 @@ pub fn get_relay_device_id() -> Result<Option<String>, ProviderError> {
 
 pub fn set_relay_device_id(device_id: &str) -> Result<(), ProviderError> {
     set_secret(RELAY_DEVICE_ID_SERVICE, RELAY_DEVICE_ID_ACCOUNT, device_id)
+}
+
+fn webhook_trigger_secret_service(trigger_id: &str) -> String {
+    format!("{WEBHOOK_TRIGGER_SECRET_SERVICE_PREFIX}.{trigger_id}")
+}
+
+pub fn get_webhook_trigger_secret(trigger_id: &str) -> Result<Option<String>, ProviderError> {
+    get_secret(
+        &webhook_trigger_secret_service(trigger_id),
+        "TerminusWebhookTrigger",
+    )
+}
+
+pub fn set_webhook_trigger_secret(trigger_id: &str, secret: &str) -> Result<(), ProviderError> {
+    set_secret(
+        &webhook_trigger_secret_service(trigger_id),
+        "TerminusWebhookTrigger",
+        secret,
+    )
+}
+
+pub fn delete_webhook_trigger_secret(trigger_id: &str) -> Result<(), ProviderError> {
+    delete_secret(
+        &webhook_trigger_secret_service(trigger_id),
+        "TerminusWebhookTrigger",
+    )
 }
