@@ -58,19 +58,20 @@ Read these in order before starting work:
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P1b)
-### Remote Approval Path + Provenance Hooks
+## Now (P1c)
+### Relay Callback Auth + Push Readiness (Desktop)
 Owner: active session
 Status: In progress
 Scope:
-- Add relay-aware approval resolution commands (`approve_run_approval_remote`, `reject_run_approval_remote`)
-- Route local + remote approvals through shared command helpers using canonical `RunnerEngine::approve/reject`
-- Persist approval decision provenance on `approvals` (`decided_channel`, `decided_by`)
-- Surface approval resolution provenance in terminal receipts (`approval_resolutions`)
+- Add callback-authenticated relay approval resolver command (`resolve_relay_approval_callback`)
+- Keychain callback secret + stable relay device id (desktop identity/readiness)
+- Replay/idempotency protection for relay callback requests (`relay_callback_events`)
+- Minimal readiness UI (callback ready/device id/pending approvals) in Connections panel
 Acceptance:
-- Remote approval hooks resolve pending approvals without bypassing existing idempotent approval logic
-- Local approvals still work and now record local decision provenance
-- Terminal receipts can include approval resolution source metadata (channel / actor)
+- Relay callback requests require callback secret auth and expire after a bounded window
+- Duplicate callback `request_id` does not duplicate side effects (returns existing run)
+- Callback-approved actions still route through canonical approval execution path
+- Readiness UI shows callback status + device id + pending approval count
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -82,10 +83,10 @@ npm run build
 ```
 
 ## Next
-1. **P1c: Relay Push Channel + Slack Bot**
+1. **P1d: Relay Push Channel + Slack Bot**
    - WebSocket/SSE push for approval routing
    - Slack bot via Vercel Chat SDK pattern (approve from Slack)
-   - Remote callback auth and decision routing
+   - Relay server callback/auth integration using the desktop callback contract
 
 2. **P2: Interview-Driven Onboarding**
    - Blank canvas first-launch experience

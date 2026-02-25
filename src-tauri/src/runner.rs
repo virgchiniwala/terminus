@@ -812,6 +812,20 @@ impl RunnerEngine {
         Ok(approvals)
     }
 
+    pub fn get_approval_for_external(
+        connection: &Connection,
+        approval_id: &str,
+    ) -> Result<ApprovalRecord, RunnerError> {
+        Self::get_approval(connection, approval_id)
+    }
+
+    pub fn get_run_for_external(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<RunRecord, RunnerError> {
+        Self::get_run(connection, run_id)
+    }
+
     pub fn list_pending_clarifications(
         connection: &Connection,
     ) -> Result<Vec<ClarificationRecord>, RunnerError> {

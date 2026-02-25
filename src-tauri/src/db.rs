@@ -299,6 +299,17 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               FOREIGN KEY (mission_id) REFERENCES missions(id)
             );
 
+            CREATE TABLE IF NOT EXISTS relay_callback_events (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              approval_id TEXT NOT NULL,
+              decision TEXT NOT NULL,
+              status TEXT NOT NULL,
+              channel TEXT,
+              actor_label TEXT,
+              created_at_ms INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS clarifications (
               id TEXT PRIMARY KEY,
               run_id TEXT NOT NULL,
@@ -690,6 +701,8 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     ensure_column(connection, "approvals", "action_id", "TEXT")?;
     ensure_column(connection, "approvals", "decided_channel", "TEXT")?;
     ensure_column(connection, "approvals", "decided_by", "TEXT")?;
+    ensure_column(connection, "relay_callback_events", "channel", "TEXT")?;
+    ensure_column(connection, "relay_callback_events", "actor_label", "TEXT")?;
     ensure_column(connection, "decision_events", "client_event_id", "TEXT")?;
     ensure_column(
         connection,

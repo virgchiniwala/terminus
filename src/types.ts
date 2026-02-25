@@ -80,6 +80,20 @@ export interface TransportStatusRecord {
   relayUrl: string;
 }
 
+export interface RemoteApprovalReadinessRecord {
+  transportMode: string;
+  relayConfigured: boolean;
+  relayUrl: string;
+  callbackReady: boolean;
+  deviceId: string;
+  pendingApprovals: number;
+}
+
+export interface RelayCallbackSecretIssuedRecord {
+  readiness: RemoteApprovalReadinessRecord;
+  callbackSecret: string;
+}
+
 export interface AutopilotSendPolicyRecord {
   autopilotId: string;
   allowSending: boolean;
