@@ -92,6 +92,26 @@ struct OnboardingStateInput {
     dismissed: Option<bool>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceConfigInput {
+    tone: String,
+    length: String,
+    humor: String,
+    notes: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutopilotVoiceConfigInput {
+    autopilot_id: String,
+    enabled: bool,
+    tone: String,
+    length: String,
+    humor: String,
+    notes: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunnerCycleSummary {
@@ -1094,6 +1114,76 @@ fn dismiss_onboarding(state: tauri::State<AppState>) -> Result<db::OnboardingSta
 }
 
 #[tauri::command]
+fn get_global_voice_config(state: tauri::State<AppState>) -> Result<db::VoiceConfigRecord, String> {
+    let connection = open_connection(&state)?;
+    db::get_global_voice_config(&connection)
+}
+
+#[tauri::command]
+fn update_global_voice_config(
+    state: tauri::State<AppState>,
+    input: VoiceConfigInput,
+) -> Result<db::VoiceConfigRecord, String> {
+    let connection = open_connection(&state)?;
+    let payload = db::VoiceConfigRecord {
+        tone: validate_voice_tone(&input.tone)?,
+        length: validate_voice_length(&input.length)?,
+        humor: validate_voice_humor(&input.humor)?,
+        notes: sanitize_voice_notes(&input.notes),
+        updated_at_ms: now_ms(),
+    };
+    db::upsert_global_voice_config(&connection, &payload)
+}
+
+#[tauri::command]
+fn get_autopilot_voice_config(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+) -> Result<db::AutopilotVoiceConfigRecord, String> {
+    let connection = open_connection(&state)?;
+    if autopilot_id.trim().is_empty() {
+        return Err("Autopilot ID is required.".to_string());
+    }
+    db::get_autopilot_voice_config(&connection, autopilot_id.trim())
+}
+
+#[tauri::command]
+fn update_autopilot_voice_config(
+    state: tauri::State<AppState>,
+    input: AutopilotVoiceConfigInput,
+) -> Result<db::AutopilotVoiceConfigRecord, String> {
+    let connection = open_connection(&state)?;
+    let autopilot_id = input.autopilot_id.trim();
+    if autopilot_id.is_empty() {
+        return Err("Autopilot ID is required.".to_string());
+    }
+    let payload = db::AutopilotVoiceConfigRecord {
+        autopilot_id: autopilot_id.to_string(),
+        enabled: input.enabled,
+        tone: validate_voice_tone(&input.tone)?,
+        length: validate_voice_length(&input.length)?,
+        humor: validate_voice_humor(&input.humor)?,
+        notes: sanitize_voice_notes(&input.notes),
+        updated_at_ms: now_ms(),
+    };
+    db::upsert_autopilot_voice_config(&connection, &payload)
+}
+
+#[tauri::command]
+fn clear_autopilot_voice_config(
+    state: tauri::State<AppState>,
+    autopilot_id: String,
+) -> Result<db::AutopilotVoiceConfigRecord, String> {
+    let connection = open_connection(&state)?;
+    let trimmed = autopilot_id.trim();
+    if trimmed.is_empty() {
+        return Err("Autopilot ID is required.".to_string());
+    }
+    db::clear_autopilot_voice_config(&connection, trimmed)?;
+    db::get_autopilot_voice_config(&connection, trimmed)
+}
+
+#[tauri::command]
 fn tick_runner_cycle(state: tauri::State<AppState>) -> Result<RunnerCycleSummary, String> {
     let mut connection = open_connection(&state)?;
     tick_runner_cycle_internal(&mut connection, false)
@@ -1706,6 +1796,39 @@ fn sanitize_approval_resolution_field(value: Option<&str>, max_len: usize) -> Op
     } else {
         Some(bounded)
     }
+}
+
+fn validate_voice_tone(input: &str) -> Result<String, String> {
+    let value = input.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "professional" | "neutral" | "warm" => Ok(value),
+        _ => Err("Voice tone must be Professional, Neutral, or Warm.".to_string()),
+    }
+}
+
+fn validate_voice_length(input: &str) -> Result<String, String> {
+    let value = input.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "concise" | "normal" | "detailed" => Ok(value),
+        _ => Err("Voice length must be Concise, Normal, or Detailed.".to_string()),
+    }
+}
+
+fn validate_voice_humor(input: &str) -> Result<String, String> {
+    let value = input.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "off" | "light" => Ok(value),
+        _ => Err("Voice humor must be Off or Light.".to_string()),
+    }
+}
+
+fn sanitize_voice_notes(input: &str) -> String {
+    input
+        .trim()
+        .chars()
+        .take(800)
+        .collect::<String>()
+        .replace('\u{0000}', "")
 }
 
 fn annotate_approval_resolution(
@@ -2457,6 +2580,11 @@ fn main() {
             get_onboarding_state,
             save_onboarding_state,
             dismiss_onboarding,
+            get_global_voice_config,
+            update_global_voice_config,
+            get_autopilot_voice_config,
+            update_autopilot_voice_config,
+            clear_autopilot_voice_config,
             tick_runner_cycle,
             get_autopilot_send_policy,
             update_autopilot_send_policy,

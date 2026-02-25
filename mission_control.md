@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-28
+Last updated: 2026-03-01
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/interview-onboarding-mvp`
+- Branch: `codex/voice-object-mvp`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -58,20 +58,20 @@ Read these in order before starting work:
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P2)
-### Interview-Driven Onboarding (First Result Flow)
+## Now (P3 / P0.11)
+### Voice Object MVP (Global + Per-Autopilot Override)
 Owner: active session
 Status: In progress
 Scope:
-- Add DB-backed onboarding state (`onboarding_state`) and Tauri commands to read/save/dismiss progress
-- Show a guided first-run onboarding panel above Home surfaces (role, work focus, biggest pain)
-- Recommend a first Autopilot intent and open it directly in the Intent Bar
-- Auto-complete onboarding after first successful run is detected
+- Add persisted Voice config (global singleton + per-Autopilot override) in SQLite
+- Add Tauri commands to read/update global Voice and read/update/clear Autopilot Voice override
+- Add a Voice settings panel (tone, length, humor, notes) with calm defaults
+- Inject effective Voice config into provider prompts via centralized runner provider dispatch
 Acceptance:
-- First-run users see a guided onboarding panel instead of only an empty Home
-- “Recommend First Autopilot” opens Intent Bar with a runnable intent and draft preview
-- Onboarding progress is persisted locally and survives app restarts
-- Onboarding marks complete automatically after first successful run
+- Voice settings persist locally and survive app restarts
+- Per-Autopilot Voice override can be enabled/disabled and cleared
+- Voice changes wording only; it cannot change capabilities, approvals, or recipients
+- Existing recipes receive Voice automatically through shared provider dispatch
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -88,19 +88,13 @@ npm run build
    - Relay server callback/auth integration using the desktop callback contract
    - Slack bot via Vercel Chat SDK pattern (approve from Slack)
 
-2. **P2: Interview-Driven Onboarding**
-   - Blank canvas first-launch experience
-   - Agent interview flow using Intent Bar
-   - `onboarding_state` flag + first-run detection
-
-3. **P3: Voice / Soul.md Object (P0.11)**
-   - Voice object (tone/length/humor presets + Voice Notes freeform)
-   - Global default + per-autopilot override
-   - Injection into emails/summaries/approvals/system messages
-
-4. **P4: Rule Extraction / "Make This a Rule" (P0.12)**
+2. **P4: Rule Extraction / "Make This a Rule" (P0.12)**
    - Rule object + rule_applications table
    - "Make this a rule" CTA on Outcome + Approval cards
+
+3. **Onboarding follow-up polish + tests**
+   - Intent Bar + onboarding panel UI tests
+   - clearer first-run path to relay connection or BYOK fallback
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution

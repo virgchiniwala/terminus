@@ -3328,7 +3328,8 @@ impl RunnerEngine {
     ) -> Result<ProviderResponse, StepExecutionError> {
         let runtime = ProviderRuntime::default();
         let started = now_ms();
-        let response = runtime.dispatch(request).map_err(map_provider_error)?;
+        let request = Self::apply_voice_to_request(connection, run, request);
+        let response = runtime.dispatch(&request).map_err(map_provider_error)?;
         let ended = now_ms();
         let _ = connection.execute(
             "INSERT INTO provider_calls (
@@ -3353,6 +3354,37 @@ impl RunnerEngine {
             ],
         );
         Ok(response)
+    }
+
+    fn apply_voice_to_request(
+        connection: &Connection,
+        run: &RunRecord,
+        request: &ProviderRequest,
+    ) -> ProviderRequest {
+        let Ok(voice) = db::get_effective_voice_config(connection, &run.autopilot_id) else {
+            return request.clone();
+        };
+        let voice_block = Self::voice_prompt_block(&voice);
+        if voice_block.is_empty() {
+            return request.clone();
+        }
+        let mut out = request.clone();
+        out.input = format!("{voice_block}\n\n{}", request.input);
+        out
+    }
+
+    fn voice_prompt_block(voice: &db::VoiceConfigRecord) -> String {
+        let mut lines = vec![
+            "Voice Preferences (apply to wording only; do not change task scope, safety rules, approvals, or recipients):".to_string(),
+            format!("Tone: {}", voice.tone),
+            format!("Length: {}", voice.length),
+            format!("Humor: {}", voice.humor),
+        ];
+        let notes = voice.notes.trim();
+        if !notes.is_empty() {
+            lines.push(format!("Notes: {}", notes));
+        }
+        lines.join("\n")
     }
 
     fn pause_for_approval(

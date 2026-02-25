@@ -190,10 +190,17 @@ Last updated: 2026-02-26
   - Home renders a guided onboarding panel (role / work focus / biggest repetitive pain) for first-run users
   - “Recommend First Autopilot” saves onboarding answers, generates a suggested intent, opens the Intent Bar, and drafts a runnable plan
   - onboarding auto-completes when the first successful run is detected (`runs.state = 'succeeded'`)
+- Voice object MVP (global + per-Autopilot override):
+  - SQLite tables: `voice_config` (singleton) and `autopilot_voice_config`
+  - Tauri commands: `get_global_voice_config`, `update_global_voice_config`, `get_autopilot_voice_config`, `update_autopilot_voice_config`, `clear_autopilot_voice_config`
+  - Home Voice panel supports global defaults and per-Autopilot override (tone/length/humor/notes)
+  - Runner injects effective Voice config at the shared provider dispatch gateway (wording-only guidance)
+  - Voice validation is allowlisted and bounded; notes are capped/sanitized
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
+- `cd src-tauri && cargo test` passes (79 tests)
 - `cd src-tauri && cargo test` passes (79 tests)
 - `cd src-tauri && cargo test` passes (79 tests)
 - `npm test` passes
@@ -217,8 +224,8 @@ Last updated: 2026-02-26
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
   1. P1 Slack/mobile approval routing on relay server (consume desktop callback contract + push delivery)
-  2. P0.11/P0.12 Voice object + rule extraction approval flow
-  3. Onboarding follow-up polish/tests (Intent Bar + onboarding panel coverage)
+  2. P0.12 Rule extraction approval flow ("Make this a rule")
+  3. Onboarding + Voice UI test coverage (Intent Bar, onboarding panel, voice panel)
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).
@@ -265,6 +272,6 @@ Last updated: 2026-02-26
 - Legacy money/timestamp schema cleanup (float spend columns + timestamp normalization)
 
 ## Next Suggested Work
-1. Wire learning outcomes into object surfaces with calm, non-technical language.
-2. Complete schedule suggestion UX gate (only after first successful run).
-3. Add policy tests around outbound quiet hours and recipient/domain allowlists.
+1. Implement Rule object + approval-gated "Make this a rule" flow (bounded overlays only).
+2. Add UI tests for onboarding and Voice panels (save/load/dismiss/override flows).
+3. Surface applied Voice config in receipts/context provenance (titles/summary only, no raw notes if sensitive).
