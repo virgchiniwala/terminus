@@ -58,21 +58,19 @@ Read these in order before starting work:
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P1)
-### Relay Transport (Desktop Client) + Docs Sync
+## Now (P1b)
+### Remote Approval Path + Provenance Hooks
 Owner: active session
 Status: In progress
 Scope:
-- Add `RelayTransport` in `src-tauri/src/transport/relay.rs` (ExecutionTransport seam)
-- Add Keychain subscriber token helpers + Tauri commands (`get/set/remove`)
-- Dynamic runtime transport selection (Hosted Relay > BYOK local > Mock)
-- Minimal transport-mode visibility in Connections panel (Hosted/BYOK/Mock)
-- Commit all current Terminus doc updates to prevent drift
+- Add relay-aware approval resolution commands (`approve_run_approval_remote`, `reject_run_approval_remote`)
+- Route local + remote approvals through shared command helpers using canonical `RunnerEngine::approve/reject`
+- Persist approval decision provenance on `approvals` (`decided_channel`, `decided_by`)
+- Surface approval resolution provenance in terminal receipts (`approval_resolutions`)
 Acceptance:
-- Hosted plan token can be saved/removed in Keychain (no SQLite storage)
-- Transport mode is visible in UI and switches to Hosted when token is present
-- Existing provider call paths remain compatible (runner unchanged)
-- Docs on strategy/provider packaging/current priorities are committed and aligned
+- Remote approval hooks resolve pending approvals without bypassing existing idempotent approval logic
+- Local approvals still work and now record local decision provenance
+- Terminal receipts can include approval resolution source metadata (channel / actor)
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -84,12 +82,10 @@ npm run build
 ```
 
 ## Next
-1. **P1b: Remote Approval + Slack Bot**
-   - `RelayTransport` in `src-tauri/src/transport/relay.rs`
-   - Subscriber token in Keychain
-   - Push channel (WebSocket/SSE) for approval routing
-   - Onboarding: "Sign in to Terminus" flow
+1. **P1c: Relay Push Channel + Slack Bot**
+   - WebSocket/SSE push for approval routing
    - Slack bot via Vercel Chat SDK pattern (approve from Slack)
+   - Remote callback auth and decision routing
 
 2. **P2: Interview-Driven Onboarding**
    - Blank canvas first-launch experience

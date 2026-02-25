@@ -123,6 +123,8 @@ pub struct ApprovalRecord {
     pub payload_type: String,
     pub payload_json: String,
     pub reason: Option<String>,
+    pub decided_channel: Option<String>,
+    pub decided_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +224,8 @@ pub struct RunReceipt {
     pub adaptation: Option<AdaptationSummary>,
     #[serde(default)]
     pub memory_titles_used: Vec<String>,
+    #[serde(default)]
+    pub approval_resolutions: Vec<ReceiptApprovalResolution>,
     pub redacted: bool,
     pub created_at_ms: i64,
 }
@@ -231,6 +235,16 @@ pub struct ReceiptCostLineItem {
     pub step_id: String,
     pub entry_kind: String,
     pub amount_usd_cents: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptApprovalResolution {
+    pub approval_id: String,
+    pub step_id: String,
+    pub status: String,
+    pub decided_at_ms: i64,
+    pub channel: Option<String>,
+    pub decided_by: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -765,7 +779,7 @@ impl RunnerEngine {
         let mut stmt = connection
             .prepare(
                 "
-                SELECT id, run_id, step_id, action_id, status, preview, payload_type, payload_json, reason
+                SELECT id, run_id, step_id, action_id, status, preview, payload_type, payload_json, reason, decided_channel, decided_by
                 FROM approvals
                 WHERE status = 'pending'
                 ORDER BY created_at ASC
@@ -785,6 +799,8 @@ impl RunnerEngine {
                     payload_type: row.get(6)?,
                     payload_json: row.get(7)?,
                     reason: row.get(8)?,
+                    decided_channel: row.get(9)?,
+                    decided_by: row.get(10)?,
                 })
             })
             .map_err(|e| RunnerError::Db(e.to_string()))?;
@@ -3033,7 +3049,7 @@ impl RunnerEngine {
     ) -> Result<ApprovalRecord, RunnerError> {
         connection
             .query_row(
-                "SELECT id, run_id, step_id, action_id, status, preview, payload_type, payload_json, reason FROM approvals WHERE id = ?1",
+                "SELECT id, run_id, step_id, action_id, status, preview, payload_type, payload_json, reason, decided_channel, decided_by FROM approvals WHERE id = ?1",
                 params![approval_id],
                 |row| {
                     Ok(ApprovalRecord {
@@ -3046,6 +3062,8 @@ impl RunnerEngine {
                         payload_type: row.get(6)?,
                         payload_json: row.get(7)?,
                         reason: row.get(8)?,
+                        decided_channel: row.get(9)?,
+                        decided_by: row.get(10)?,
                     })
                 },
             )
@@ -3877,6 +3895,7 @@ impl RunnerEngine {
         receipt.evaluation = Some(evaluation);
         receipt.adaptation = Some(adaptation);
         receipt.memory_titles_used = memory_titles;
+        receipt.approval_resolutions = Self::list_approval_resolutions_for_run(connection, run_id)?;
         let updated =
             serde_json::to_string(&receipt).map_err(|e| RunnerError::Serde(e.to_string()))?;
         connection
@@ -3890,6 +3909,37 @@ impl RunnerEngine {
             )
             .map_err(|e| RunnerError::Db(e.to_string()))?;
         Ok(())
+    }
+
+    fn list_approval_resolutions_for_run(
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Vec<ReceiptApprovalResolution>, RunnerError> {
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, step_id, status, COALESCE(decided_at, updated_at), decided_channel, decided_by
+                 FROM approvals
+                 WHERE run_id = ?1 AND status IN ('approved','rejected')
+                 ORDER BY COALESCE(decided_at, updated_at) ASC",
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok(ReceiptApprovalResolution {
+                    approval_id: row.get(0)?,
+                    step_id: row.get(1)?,
+                    status: row.get(2)?,
+                    decided_at_ms: row.get(3)?,
+                    channel: row.get(4)?,
+                    decided_by: row.get(5)?,
+                })
+            })
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| RunnerError::Db(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     #[cfg(test)]
@@ -4043,6 +4093,7 @@ fn build_receipt(
         evaluation: None,
         adaptation: None,
         memory_titles_used: Vec::new(),
+        approval_resolutions: Vec::new(),
         redacted: true,
         created_at_ms: now_ms(),
     }
