@@ -7,7 +7,7 @@ Primitives are Terminus runtime actions. They are constrained by design and deny
 A plan can only execute primitives explicitly allowlisted in that plan (`allowed_primitives` field). This is enforced by `PrimitiveGuard` in `src-tauri/src/primitives.rs` — an unknown or non-allowlisted primitive fails with a human-readable error before any side effect executes.
 
 ## Triggers vs Primitives (Important)
-- **Triggers** decide *when* an Autopilot run starts (manual, schedule, inbox watcher, webhook).
+- **Triggers** decide *when* an Autopilot run starts (manual, schedule, inbox watcher, webhook, Gmail PubSub trigger path).
 - **Primitives** decide *what* the run is allowed to do after it starts.
 
 Webhook Trigger MVP is a relay-backed trigger surface, not a new primitive. Webhook payloads can start runs, but they do not expand runtime capabilities. All existing primitive allowlists, approval gates, spend rails, and receipts still apply.
@@ -72,6 +72,7 @@ Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `A
 
 ## Integration Boundary (Current)
 - **Shipped:** relay-backed inbound webhook triggers (bounded JSON event ingress -> run enqueue)
+- **Shipped:** Gmail PubSub trigger path (Gmail-only; relay callback -> bounded event dedupe -> existing inbox watcher fetch path, with polling fallback)
 - **Shipped:** `CallApi` primitive MVP (approval-gated, allowlisted outbound HTTP using Keychain key refs)
 - **Planned next:** Codex OAuth BYOK auth mode (OpenAI/Codex sign-in path) and broader rule-driven operator teaching loops
 

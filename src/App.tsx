@@ -14,6 +14,8 @@ import type {
   OnboardingStateRecord,
   OAuthStartResponse,
   ApiKeyRefStatusRecord,
+  GmailPubSubEventRecord,
+  GmailPubSubStatusRecord,
   CodexOauthStatusRecord,
   RemoteApprovalReadinessRecord,
   RelayApprovalSyncStatusRecord,
@@ -174,6 +176,10 @@ export function App() {
   const [oauthRedirectUri, setOauthRedirectUri] = useState("");
   const [oauthSession, setOauthSession] = useState<OAuthStartResponse | null>(null);
   const [oauthCode, setOauthCode] = useState("");
+  const [gmailPubSubStatus, setGmailPubSubStatus] = useState<GmailPubSubStatusRecord | null>(null);
+  const [gmailPubSubEvents, setGmailPubSubEvents] = useState<GmailPubSubEventRecord[]>([]);
+  const [gmailPubSubTopicName, setGmailPubSubTopicName] = useState("");
+  const [gmailPubSubSubscriptionName, setGmailPubSubSubscriptionName] = useState("");
   const [watcherAutopilotId, setWatcherAutopilotId] = useState("auto_inbox_watch");
   const [watcherMaxItems, setWatcherMaxItems] = useState(10);
   const [runnerControl, setRunnerControl] = useState<RunnerControlRecord | null>(null);
@@ -614,6 +620,7 @@ export function App() {
         setRunnerControl({
           backgroundEnabled: payload.backgroundEnabled ?? payload.background_enabled ?? false,
           watcherEnabled: payload.watcherEnabled ?? payload.watcher_enabled ?? true,
+          gmailTriggerMode: payload.gmailTriggerMode ?? payload.gmail_trigger_mode ?? "polling",
           watcherPollSeconds: payload.watcherPollSeconds ?? payload.watcher_poll_seconds ?? 60,
           watcherMaxItems: payload.watcherMaxItems ?? payload.watcher_max_items ?? 10,
           gmailAutopilotId:
@@ -631,11 +638,63 @@ export function App() {
       });
   }, []);
 
+  const loadGmailPubSubStatus = useCallback(() => {
+    invoke<GmailPubSubStatusRecord>("get_gmail_pubsub_status")
+      .then((payload: any) => {
+        const normalized: GmailPubSubStatusRecord = {
+          provider: payload.provider ?? "gmail",
+          status: payload.status ?? "disabled",
+          triggerMode: payload.triggerMode ?? payload.trigger_mode ?? "polling",
+          watchExpirationMs: payload.watchExpirationMs ?? payload.watch_expiration_ms ?? null,
+          historyId: payload.historyId ?? payload.history_id ?? null,
+          topicName: payload.topicName ?? payload.topic_name ?? null,
+          subscriptionName: payload.subscriptionName ?? payload.subscription_name ?? null,
+          callbackMode: payload.callbackMode ?? payload.callback_mode ?? "relay",
+          lastEventAtMs: payload.lastEventAtMs ?? payload.last_event_at_ms ?? null,
+          lastError: payload.lastError ?? payload.last_error ?? null,
+          consecutiveFailures: payload.consecutiveFailures ?? payload.consecutive_failures ?? 0,
+          updatedAtMs: payload.updatedAtMs ?? payload.updated_at_ms ?? 0,
+        };
+        setGmailPubSubStatus(normalized);
+        setGmailPubSubTopicName((prev) => prev || normalized.topicName || "");
+        setGmailPubSubSubscriptionName((prev) => prev || normalized.subscriptionName || "");
+      })
+      .catch((err) => {
+        console.error("Failed to load Gmail PubSub status:", err);
+        setConnectionsMessage((prev) => prev ?? "Could not load Gmail PubSub status.");
+      });
+  }, []);
+
+  const loadGmailPubSubEvents = useCallback(() => {
+    invoke<GmailPubSubEventRecord[]>("list_gmail_pubsub_events", { limit: 10 })
+      .then((rows: any[]) => {
+        setGmailPubSubEvents(
+          rows.map((row) => ({
+            id: row.id,
+            provider: row.provider,
+            messageId: row.messageId ?? row.message_id ?? null,
+            eventDedupeKey: row.eventDedupeKey ?? row.event_dedupe_key,
+            historyId: row.historyId ?? row.history_id ?? null,
+            publishedAtMs: row.publishedAtMs ?? row.published_at_ms ?? null,
+            receivedAtMs: row.receivedAtMs ?? row.received_at_ms ?? 0,
+            status: row.status,
+            failureReason: row.failureReason ?? row.failure_reason ?? null,
+            createdRunCount: row.createdRunCount ?? row.created_run_count ?? 0,
+            createdAtMs: row.createdAtMs ?? row.created_at_ms ?? 0,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error("Failed to load Gmail PubSub events:", err);
+      });
+  }, []);
+
   const persistRunnerControl = useCallback((next: RunnerControlRecord) => {
     invoke<RunnerControlRecord>("update_runner_control", {
       input: {
         backgroundEnabled: next.backgroundEnabled,
         watcherEnabled: next.watcherEnabled,
+        gmailTriggerMode: next.gmailTriggerMode,
         watcherPollSeconds: next.watcherPollSeconds,
         watcherMaxItems: next.watcherMaxItems,
         gmailAutopilotId: next.gmailAutopilotId,
@@ -748,12 +807,14 @@ export function App() {
     loadRemoteApprovalReadiness();
     loadRelaySyncStatus();
     loadRelayPushStatus();
+    loadGmailPubSubStatus();
+    loadGmailPubSubEvents();
     loadRunnerControl();
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
     loadWebhookTriggers();
-  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadCodexOauthStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
+  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadCodexOauthStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadGmailPubSubStatus, loadGmailPubSubEvents, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -774,6 +835,8 @@ export function App() {
           loadWebhookTriggers();
           loadRelaySyncStatus();
           loadRelayPushStatus();
+          loadGmailPubSubStatus();
+          loadGmailPubSubEvents();
           loadOnboardingState();
           if (selectedMissionId) {
             loadMissionDetail(selectedMissionId);
@@ -784,7 +847,7 @@ export function App() {
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, loadOnboardingState, loadWebhookTriggers, selectedMissionId]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, loadGmailPubSubStatus, loadGmailPubSubEvents, loadOnboardingState, loadWebhookTriggers, selectedMissionId]);
 
   useEffect(() => {
     if (!selectedWebhookTriggerId) {
@@ -1052,6 +1115,71 @@ export function App() {
       .catch((err) => {
         console.error("Failed to remove Codex OAuth:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not remove Codex OAuth.");
+      });
+  };
+
+  const enableGmailPubSub = () => {
+    const topicName = gmailPubSubTopicName.trim();
+    const subscriptionName = gmailPubSubSubscriptionName.trim();
+    if (!topicName || !subscriptionName) {
+      setConnectionsMessage("Add Gmail PubSub topic and subscription names first.");
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<GmailPubSubStatusRecord>("enable_gmail_pubsub", {
+      input: {
+        topicName,
+        subscriptionName,
+        callbackMode: "relay",
+        triggerMode: runnerControl?.gmailTriggerMode ?? "auto",
+      },
+    })
+      .then((payload: any) => {
+        setGmailPubSubStatus({
+          provider: payload.provider ?? "gmail",
+          status: payload.status,
+          triggerMode: payload.triggerMode ?? payload.trigger_mode ?? "auto",
+          watchExpirationMs: payload.watchExpirationMs ?? payload.watch_expiration_ms ?? null,
+          historyId: payload.historyId ?? payload.history_id ?? null,
+          topicName: payload.topicName ?? payload.topic_name ?? topicName,
+          subscriptionName: payload.subscriptionName ?? payload.subscription_name ?? subscriptionName,
+          callbackMode: payload.callbackMode ?? payload.callback_mode ?? "relay",
+          lastEventAtMs: payload.lastEventAtMs ?? payload.last_event_at_ms ?? null,
+          lastError: payload.lastError ?? payload.last_error ?? null,
+          consecutiveFailures: payload.consecutiveFailures ?? payload.consecutive_failures ?? 0,
+          updatedAtMs: payload.updatedAtMs ?? payload.updated_at_ms ?? Date.now(),
+        });
+        setConnectionsMessage("Gmail PubSub trigger saved. Renew watch to activate.");
+      })
+      .catch((err) => {
+        console.error("Failed to enable Gmail PubSub:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not enable Gmail PubSub.");
+      });
+  };
+
+  const renewGmailPubSubWatch = () => {
+    setConnectionsMessage(null);
+    invoke<GmailPubSubStatusRecord>("renew_gmail_pubsub_watch")
+      .then(() => {
+        loadGmailPubSubStatus();
+        setConnectionsMessage("Gmail watch renewed.");
+      })
+      .catch((err) => {
+        console.error("Failed to renew Gmail watch:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not renew Gmail watch.");
+      });
+  };
+
+  const disableGmailPubSub = () => {
+    setConnectionsMessage(null);
+    invoke<GmailPubSubStatusRecord>("disable_gmail_pubsub")
+      .then(() => {
+        loadGmailPubSubStatus();
+        setConnectionsMessage("Gmail PubSub disabled. Polling fallback remains available.");
+      })
+      .catch((err) => {
+        console.error("Failed to disable Gmail PubSub:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not disable Gmail PubSub.");
       });
   };
 
@@ -2208,6 +2336,15 @@ export function App() {
           setWatcherAutopilotId={setWatcherAutopilotId}
           watcherMaxItems={watcherMaxItems}
           setWatcherMaxItems={setWatcherMaxItems}
+          gmailPubSubStatus={gmailPubSubStatus}
+          gmailPubSubEvents={gmailPubSubEvents}
+          gmailPubSubTopicName={gmailPubSubTopicName}
+          setGmailPubSubTopicName={setGmailPubSubTopicName}
+          gmailPubSubSubscriptionName={gmailPubSubSubscriptionName}
+          setGmailPubSubSubscriptionName={setGmailPubSubSubscriptionName}
+          enableGmailPubSub={enableGmailPubSub}
+          renewGmailPubSubWatch={renewGmailPubSubWatch}
+          disableGmailPubSub={disableGmailPubSub}
           runnerControl={runnerControl}
           saveRunnerControl={saveRunnerControl}
           sendPolicyAutopilotId={sendPolicyAutopilotId}

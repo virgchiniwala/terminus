@@ -1,6 +1,7 @@
 mod db;
 mod diagnostics;
 mod email_connections;
+mod gmail_pubsub;
 mod guidance_utils;
 mod inbox_watcher;
 mod learning;
@@ -24,6 +25,7 @@ use providers::types::{
     ProviderErrorKind, ProviderKind as ApiProviderKind, ProviderRequest,
     ProviderTier as ApiProviderTier,
 };
+use reqwest::blocking::Client as HttpClient;
 use runner::{ApprovalRecord, ClarificationRecord, RunReceipt, RunRecord, RunnerEngine};
 use rusqlite::OptionalExtension;
 use schema::{
@@ -81,6 +83,7 @@ struct IntentDraftResponse {
 struct RunnerControlInput {
     background_enabled: bool,
     watcher_enabled: bool,
+    gmail_trigger_mode: String,
     watcher_poll_seconds: i64,
     watcher_max_items: i64,
     gmail_autopilot_id: String,
@@ -254,6 +257,40 @@ struct WebhookEventLocalDebugInput {
     delivery_id: String,
     body_json: String,
     content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GmailPubSubEnableInput {
+    trigger_mode: Option<String>, // polling|gmail_pubsub|auto
+    topic_name: String,
+    subscription_name: String,
+    callback_mode: Option<String>, // relay|local_debug
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayGmailPubSubCallbackInput {
+    request_id: String,
+    callback_secret: String,
+    issued_at_ms: i64,
+    body_json: String,
+    channel: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GmailPubSubLocalDebugInput {
+    body_json: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GmailPubSubIngestResult {
+    status: String,
+    event_dedupe_key: String,
+    created_run_count: i64,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1022,6 +1059,145 @@ fn resolve_relay_webhook_callback(
 }
 
 #[tauri::command]
+fn get_gmail_pubsub_status(
+    state: tauri::State<AppState>,
+) -> Result<gmail_pubsub::GmailPubSubStatus, String> {
+    let connection = open_connection(&state)?;
+    gmail_pubsub::maybe_mark_expired(&connection, now_ms())
+}
+
+#[tauri::command]
+fn list_gmail_pubsub_events(
+    state: tauri::State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<gmail_pubsub::GmailPubSubEventRecord>, String> {
+    let connection = open_connection(&state)?;
+    gmail_pubsub::list_events(&connection, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn enable_gmail_pubsub(
+    state: tauri::State<AppState>,
+    input: GmailPubSubEnableInput,
+) -> Result<gmail_pubsub::GmailPubSubStatus, String> {
+    let connection = open_connection(&state)?;
+    let topic_name = sanitize_gmail_pubsub_resource_name(&input.topic_name, "topic")?;
+    let subscription_name =
+        sanitize_gmail_pubsub_resource_name(&input.subscription_name, "subscription")?;
+    let callback_mode = input
+        .callback_mode
+        .as_deref()
+        .map(validate_gmail_pubsub_callback_mode)
+        .transpose()?
+        .unwrap_or_else(|| "relay".to_string());
+    let trigger_mode = input
+        .trigger_mode
+        .as_deref()
+        .map(validate_gmail_trigger_mode)
+        .transpose()?
+        .unwrap_or_else(|| "auto".to_string());
+    gmail_pubsub::upsert_state(
+        &connection,
+        "pending_setup",
+        &trigger_mode,
+        Some(&topic_name),
+        Some(&subscription_name),
+        &callback_mode,
+        None,
+        None,
+        None,
+        0,
+        now_ms(),
+    )
+}
+
+#[tauri::command]
+fn disable_gmail_pubsub(
+    state: tauri::State<AppState>,
+) -> Result<gmail_pubsub::GmailPubSubStatus, String> {
+    let connection = open_connection(&state)?;
+    let current = gmail_pubsub::get_status(&connection)?;
+    gmail_pubsub::upsert_state(
+        &connection,
+        "disabled",
+        "polling",
+        current.topic_name.as_deref(),
+        current.subscription_name.as_deref(),
+        &current.callback_mode,
+        current.watch_expiration_ms,
+        current.history_id.as_deref(),
+        None,
+        0,
+        now_ms(),
+    )
+}
+
+#[tauri::command]
+fn renew_gmail_pubsub_watch(
+    state: tauri::State<AppState>,
+) -> Result<gmail_pubsub::GmailPubSubStatus, String> {
+    let connection = open_connection(&state)?;
+    let status = gmail_pubsub::get_status(&connection)?;
+    let topic = status
+        .topic_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "Set a Gmail PubSub topic name before renewing the watch.".to_string())?;
+    let token =
+        email_connections::get_access_token(&connection, email_connections::EmailProvider::Gmail)?;
+    let (expiration_ms, history_id) = gmail_watch_register(&token, topic)?;
+    gmail_pubsub::update_watch_success(
+        &connection,
+        Some(expiration_ms),
+        Some(&history_id),
+        now_ms(),
+    )
+}
+
+#[tauri::command]
+fn ingest_gmail_pubsub_local_debug(
+    state: tauri::State<AppState>,
+    input: GmailPubSubLocalDebugInput,
+) -> Result<GmailPubSubIngestResult, String> {
+    if !cfg!(debug_assertions) {
+        return Err(
+            "Gmail PubSub debug ingestion is only available in development builds.".to_string(),
+        );
+    }
+    let mut connection = open_connection(&state)?;
+    ingest_gmail_pubsub_event_internal(
+        &mut connection,
+        Some(make_main_id("relay_gpub_dbg")),
+        Some("local_debug"),
+        &input.body_json,
+        false,
+        run_gmail_watcher_from_control,
+    )
+}
+
+#[tauri::command]
+fn resolve_relay_gmail_pubsub_callback(
+    state: tauri::State<AppState>,
+    input: RelayGmailPubSubCallbackInput,
+) -> Result<GmailPubSubIngestResult, String> {
+    let mut connection = open_connection(&state)?;
+    validate_relay_callback_auth_fields(
+        &input.request_id,
+        &input.callback_secret,
+        input.issued_at_ms,
+        "Remote Gmail PubSub delivery is not ready yet. Generate a callback secret first.",
+    )?;
+    ingest_gmail_pubsub_event_internal(
+        &mut connection,
+        Some(input.request_id),
+        input.channel.as_deref(),
+        &input.body_json,
+        true,
+        run_gmail_watcher_from_control,
+    )
+}
+
+#[tauri::command]
 fn start_recipe_run(
     state: tauri::State<AppState>,
     autopilot_id: String,
@@ -1399,6 +1575,7 @@ fn update_runner_control(
 
     let connection = open_connection(&state)?;
     let mut current = db::get_runner_control(&connection)?;
+    current.gmail_trigger_mode = validate_gmail_trigger_mode(&input.gmail_trigger_mode)?;
     current.background_enabled = input.background_enabled;
     current.watcher_enabled = input.watcher_enabled;
     current.watcher_poll_seconds = input.watcher_poll_seconds;
@@ -1916,6 +2093,14 @@ fn run_watchers(
         .into_iter()
         .filter(|record| record.status == "connected")
     {
+        if provider.provider == "gmail" {
+            let mut pubsub = gmail_pubsub::maybe_mark_expired(connection, now_ms())?;
+            pubsub.trigger_mode = control.gmail_trigger_mode.clone();
+            if !gmail_pubsub::should_poll_gmail(&pubsub, now_ms()) {
+                summary.providers_polled += 1;
+                continue;
+            }
+        }
         let autopilot_id = if provider.provider == "gmail" {
             control.gmail_autopilot_id.as_str()
         } else {
@@ -2325,6 +2510,267 @@ fn payload_excerpt_from_json(body_json: &str) -> String {
 
 fn payload_hash(body_json: &str) -> String {
     format!("{:x}", Sha256::digest(body_json.as_bytes()))
+}
+
+fn validate_gmail_trigger_mode(input: &str) -> Result<String, String> {
+    let v = input.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "polling" | "gmail_pubsub" | "auto" => Ok(v),
+        _ => Err("Gmail trigger mode must be Polling, Gmail PubSub, or Auto.".to_string()),
+    }
+}
+
+fn validate_gmail_pubsub_callback_mode(input: &str) -> Result<String, String> {
+    let v = input.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "relay" | "local_debug" => Ok(v),
+        _ => Err("Gmail PubSub callback mode must be Relay or Local Debug.".to_string()),
+    }
+}
+
+fn sanitize_gmail_pubsub_resource_name(raw: &str, label: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 240 {
+        return Err(format!("Gmail PubSub {label} is required."));
+    }
+    let bounded = trimmed
+        .chars()
+        .take(240)
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.' | ':'))
+        .collect::<String>();
+    if bounded.is_empty() || !bounded.contains('/') {
+        return Err(format!("Gmail PubSub {label} format is invalid."));
+    }
+    Ok(bounded)
+}
+
+fn gmail_watch_register(access_token: &str, topic_name: &str) -> Result<(i64, String), String> {
+    let client = HttpClient::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Could not initialize Gmail watch client.".to_string())?;
+    let body = serde_json::json!({
+        "topicName": topic_name,
+        "labelIds": ["INBOX"],
+        "labelFilterBehavior": "INCLUDE"
+    });
+    let json = client
+        .post("https://gmail.googleapis.com/gmail/v1/users/me/watch")
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .map_err(|_| "Could not register Gmail PubSub watch. Check connection and try again.".to_string())?
+        .error_for_status()
+        .map_err(|e| {
+            if e.status().map(|s| s.as_u16()) == Some(429) {
+                "Gmail watch registration is rate-limited right now. Try again shortly.".to_string()
+            } else {
+                "Could not register Gmail PubSub watch. Check Gmail PubSub topic settings and try again.".to_string()
+            }
+        })?
+        .json::<Value>()
+        .map_err(|_| "Could not parse Gmail watch registration response.".to_string())?;
+    let expiration_ms = json
+        .get("expiration")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<i64>().ok())
+                .or_else(|| v.as_i64())
+        })
+        .ok_or_else(|| "Gmail watch response is missing expiration.".to_string())?;
+    let history_id = json
+        .get("historyId")
+        .and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
+        .ok_or_else(|| "Gmail watch response is missing history id.".to_string())?;
+    Ok((expiration_ms, history_id))
+}
+
+fn reserve_relay_gmail_pubsub_callback_event(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    channel: Option<&str>,
+) -> Result<(), String> {
+    let inserted = connection
+        .execute(
+            "INSERT OR IGNORE INTO relay_gmail_pubsub_callback_events
+             (id, request_id, status, channel, created_at_ms)
+             VALUES (?1, ?2, 'received', ?3, ?4)",
+            rusqlite::params![
+                make_main_id("relay_gp"),
+                request_id.trim(),
+                sanitize_approval_resolution_field(channel, 32),
+                now_ms()
+            ],
+        )
+        .map_err(|e| format!("Could not record relay Gmail PubSub callback event: {e}"))?;
+    if inserted == 0 {
+        return Err("Relay Gmail PubSub callback request was already processed.".to_string());
+    }
+    Ok(())
+}
+
+fn update_relay_gmail_pubsub_callback_event_status(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE relay_gmail_pubsub_callback_events SET status = ?1 WHERE request_id = ?2",
+            rusqlite::params![status, request_id.trim()],
+        )
+        .map_err(|e| format!("Could not update relay Gmail PubSub callback status: {e}"))?;
+    Ok(())
+}
+
+fn run_gmail_watcher_from_control(
+    connection: &mut rusqlite::Connection,
+) -> Result<inbox_watcher::InboxWatcherTickSummary, String> {
+    let control = db::get_runner_control(connection)?;
+    inbox_watcher::run_watcher_tick(
+        connection,
+        "gmail",
+        &control.gmail_autopilot_id,
+        control.watcher_max_items as usize,
+    )
+}
+
+fn ingest_gmail_pubsub_event_internal<F>(
+    connection: &mut rusqlite::Connection,
+    relay_request_id: Option<String>,
+    relay_channel: Option<&str>,
+    body_json: &str,
+    require_relay_callback_auth: bool,
+    fetch_and_queue: F,
+) -> Result<GmailPubSubIngestResult, String>
+where
+    F: FnOnce(&mut rusqlite::Connection) -> Result<inbox_watcher::InboxWatcherTickSummary, String>,
+{
+    let now = now_ms();
+    if require_relay_callback_auth {
+        let request_id = relay_request_id.as_deref().unwrap_or("");
+        if let Err(err) =
+            reserve_relay_gmail_pubsub_callback_event(connection, request_id, relay_channel)
+        {
+            if err.contains("already processed") {
+                return Ok(GmailPubSubIngestResult {
+                    status: "duplicate".to_string(),
+                    event_dedupe_key: request_id.to_string(),
+                    created_run_count: 0,
+                    message: "Relay Gmail PubSub callback request was already processed."
+                        .to_string(),
+                });
+            }
+            return Err(err);
+        }
+    }
+
+    let env = match gmail_pubsub::parse_pubsub_envelope(body_json) {
+        Ok(v) => v,
+        Err(err) => {
+            let _ = gmail_pubsub::record_failure(connection, &err, now);
+            if require_relay_callback_auth {
+                let _ = update_relay_gmail_pubsub_callback_event_status(
+                    connection,
+                    relay_request_id.as_deref().unwrap_or(""),
+                    "rejected",
+                );
+            }
+            return Ok(GmailPubSubIngestResult {
+                status: "rejected".to_string(),
+                event_dedupe_key: "invalid".to_string(),
+                created_run_count: 0,
+                message: err,
+            });
+        }
+    };
+
+    let inserted = gmail_pubsub::insert_event(
+        connection,
+        &gmail_pubsub::GmailPubSubEventInsert {
+            id: make_main_id("gpub_evt"),
+            provider: "gmail".to_string(),
+            message_id: Some(env.message_id.clone()),
+            event_dedupe_key: env.dedupe_key.clone(),
+            history_id: env.history_id.clone(),
+            published_at_ms: env.published_at_ms,
+            received_at_ms: now,
+            status: "accepted".to_string(),
+            failure_reason: None,
+            created_run_count: 0,
+            created_at_ms: now,
+        },
+    )?;
+    if !inserted {
+        if require_relay_callback_auth {
+            let _ = update_relay_gmail_pubsub_callback_event_status(
+                connection,
+                relay_request_id.as_deref().unwrap_or(""),
+                "duplicate",
+            );
+        }
+        return Ok(GmailPubSubIngestResult {
+            status: "duplicate".to_string(),
+            event_dedupe_key: env.dedupe_key,
+            created_run_count: 0,
+            message: "Duplicate Gmail PubSub event ignored.".to_string(),
+        });
+    }
+
+    gmail_pubsub::update_event_status(connection, &env.dedupe_key, "queued_fetch", None, None)?;
+    match fetch_and_queue(connection) {
+        Ok(summary) => {
+            gmail_pubsub::update_event_status(
+                connection,
+                &env.dedupe_key,
+                "accepted",
+                None,
+                Some(summary.started_runs as i64),
+            )?;
+            gmail_pubsub::touch_event_success(connection, now, env.history_id.as_deref())?;
+            if require_relay_callback_auth {
+                update_relay_gmail_pubsub_callback_event_status(
+                    connection,
+                    relay_request_id.as_deref().unwrap_or(""),
+                    "applied",
+                )?;
+            }
+            Ok(GmailPubSubIngestResult {
+                status: "accepted".to_string(),
+                event_dedupe_key: env.dedupe_key,
+                created_run_count: summary.started_runs as i64,
+                message: "Gmail PubSub event accepted and inbox fetch queued.".to_string(),
+            })
+        }
+        Err(err) => {
+            let msg = sanitize_log_message(&err);
+            let _ = gmail_pubsub::update_event_status(
+                connection,
+                &env.dedupe_key,
+                "fetch_failed",
+                Some(&msg),
+                Some(0),
+            );
+            let _ = gmail_pubsub::record_failure(connection, &msg, now);
+            if require_relay_callback_auth {
+                let _ = update_relay_gmail_pubsub_callback_event_status(
+                    connection,
+                    relay_request_id.as_deref().unwrap_or(""),
+                    "fetch_failed",
+                );
+            }
+            Ok(GmailPubSubIngestResult {
+                status: "fetch_failed".to_string(),
+                event_dedupe_key: env.dedupe_key,
+                created_run_count: 0,
+                message: "Gmail PubSub event received, but inbox fetch failed. Terminus will keep polling fallback available.".to_string(),
+            })
+        }
+    }
 }
 
 fn validate_webhook_signature(
@@ -3591,6 +4037,101 @@ mod tests {
             "application/json"
         );
     }
+
+    #[test]
+    fn gmail_pubsub_ingest_dedupes_duplicate_event() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("db");
+        db::bootstrap_schema(&mut conn).expect("bootstrap");
+        gmail_pubsub::upsert_state(
+            &conn,
+            "active",
+            "auto",
+            Some("projects/x/topics/t"),
+            Some("projects/x/subscriptions/s"),
+            "relay",
+            None,
+            None,
+            None,
+            0,
+            now_ms(),
+        )
+        .expect("state");
+        let body = r#"{"message":{"messageId":"m1","publishTime":"2026-02-25T12:00:00Z","data":"eyJoaXN0b3J5SWQiOiIxIn0="}}"#;
+
+        let first = ingest_gmail_pubsub_event_internal(
+            &mut conn,
+            Some("req_1".to_string()),
+            Some("local_debug"),
+            body,
+            false,
+            |_conn| {
+                Ok(inbox_watcher::InboxWatcherTickSummary {
+                    provider: "gmail".to_string(),
+                    autopilot_id: "auto_inbox_watch_gmail".to_string(),
+                    fetched: 1,
+                    deduped: 0,
+                    started_runs: 1,
+                    failed: 0,
+                })
+            },
+        )
+        .expect("first");
+        assert_eq!(first.status, "accepted");
+        assert_eq!(first.created_run_count, 1);
+
+        let second = ingest_gmail_pubsub_event_internal(
+            &mut conn,
+            Some("req_2".to_string()),
+            Some("local_debug"),
+            body,
+            false,
+            |_conn| unreachable!("duplicate should not call fetch path"),
+        )
+        .expect("second");
+        assert_eq!(second.status, "duplicate");
+        assert_eq!(second.created_run_count, 0);
+    }
+
+    #[test]
+    fn gmail_pubsub_ingest_records_fetch_failure_without_crashing() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("db");
+        db::bootstrap_schema(&mut conn).expect("bootstrap");
+        gmail_pubsub::upsert_state(
+            &conn,
+            "active",
+            "auto",
+            Some("projects/x/topics/t"),
+            Some("projects/x/subscriptions/s"),
+            "relay",
+            None,
+            None,
+            None,
+            0,
+            now_ms(),
+        )
+        .expect("state");
+        let body = r#"{"message":{"messageId":"m2","publishTime":"2026-02-25T12:00:00Z","data":"eyJoaXN0b3J5SWQiOiIyIn0="}}"#;
+        let result = ingest_gmail_pubsub_event_internal(
+            &mut conn,
+            Some("req_3".to_string()),
+            Some("local_debug"),
+            body,
+            false,
+            |_conn| Err("Gmail inbox is rate-limited right now.".to_string()),
+        )
+        .expect("result");
+        assert_eq!(result.status, "fetch_failed");
+
+        let events = gmail_pubsub::list_events(&conn, 5).expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, "fetch_failed");
+        assert!(events[0]
+            .failure_reason
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("gmail"));
+    }
 }
 
 fn main() {
@@ -3646,6 +4187,13 @@ fn main() {
             get_codex_oauth_status,
             import_codex_oauth_from_local_auth,
             remove_codex_oauth,
+            get_gmail_pubsub_status,
+            enable_gmail_pubsub,
+            disable_gmail_pubsub,
+            renew_gmail_pubsub_watch,
+            list_gmail_pubsub_events,
+            ingest_gmail_pubsub_local_debug,
+            resolve_relay_gmail_pubsub_callback,
             list_webhook_triggers,
             create_webhook_trigger,
             rotate_webhook_trigger_secret,

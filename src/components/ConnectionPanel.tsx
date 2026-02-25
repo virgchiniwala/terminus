@@ -5,6 +5,8 @@ import type {
   ApiKeyRefStatusRecord,
   CodexOauthStatusRecord,
   EmailConnectionRecord,
+  GmailPubSubEventRecord,
+  GmailPubSubStatusRecord,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
   RelayApprovalSyncStatusRecord,
@@ -50,6 +52,15 @@ type Props = {
   setWatcherAutopilotId: Dispatch<SetStateAction<string>>;
   watcherMaxItems: number;
   setWatcherMaxItems: Dispatch<SetStateAction<number>>;
+  gmailPubSubStatus: GmailPubSubStatusRecord | null;
+  gmailPubSubEvents: GmailPubSubEventRecord[];
+  gmailPubSubTopicName: string;
+  setGmailPubSubTopicName: Dispatch<SetStateAction<string>>;
+  gmailPubSubSubscriptionName: string;
+  setGmailPubSubSubscriptionName: Dispatch<SetStateAction<string>>;
+  enableGmailPubSub: () => void;
+  renewGmailPubSubWatch: () => void;
+  disableGmailPubSub: () => void;
   runnerControl: RunnerControlRecord | null;
   saveRunnerControl: (next: RunnerControlRecord) => void;
   sendPolicyAutopilotId: string;
@@ -116,6 +127,15 @@ export function ConnectionPanel(props: Props) {
     setWatcherAutopilotId,
     watcherMaxItems,
     setWatcherMaxItems,
+    gmailPubSubStatus,
+    gmailPubSubEvents,
+    gmailPubSubTopicName,
+    setGmailPubSubTopicName,
+    gmailPubSubSubscriptionName,
+    setGmailPubSubSubscriptionName,
+    enableGmailPubSub,
+    renewGmailPubSubWatch,
+    disableGmailPubSub,
     runnerControl,
     saveRunnerControl,
     sendPolicyAutopilotId,
@@ -342,6 +362,77 @@ export function ConnectionPanel(props: Props) {
           Save Setup
         </button>
       </div>
+      <div className="watcher-controls">
+        <label>
+          <span>Gmail trigger mode</span>
+          <select
+            value={runnerControl?.gmailTriggerMode ?? "polling"}
+            onChange={(event) =>
+              runnerControl &&
+              saveRunnerControl({
+                ...runnerControl,
+                gmailTriggerMode: event.target.value,
+              })
+            }
+          >
+            <option value="polling">Polling</option>
+            <option value="auto">Auto (PubSub + fallback)</option>
+            <option value="gmail_pubsub">Gmail PubSub only</option>
+          </select>
+        </label>
+        <label>
+          <span>Gmail PubSub topic</span>
+          <input
+            value={gmailPubSubTopicName}
+            onChange={(event) => setGmailPubSubTopicName(event.target.value)}
+            placeholder="projects/your-project/topics/terminus-gmail"
+          />
+        </label>
+        <label>
+          <span>Subscription</span>
+          <input
+            value={gmailPubSubSubscriptionName}
+            onChange={(event) => setGmailPubSubSubscriptionName(event.target.value)}
+            placeholder="projects/your-project/subscriptions/terminus-gmail"
+          />
+        </label>
+        <label>
+          <span>&nbsp;</span>
+          <div className="transport-token-actions">
+            <button type="button" onClick={enableGmailPubSub}>Enable PubSub</button>
+            <button type="button" onClick={renewGmailPubSubWatch}>Renew Watch</button>
+            <button type="button" onClick={disableGmailPubSub}>Disable PubSub</button>
+          </div>
+        </label>
+      </div>
+      {gmailPubSubStatus && (
+        <p className="transport-status-note">
+          Gmail PubSub: {gmailPubSubStatus.status}
+          {gmailPubSubStatus.watchExpirationMs
+            ? ` • expires ${new Date(gmailPubSubStatus.watchExpirationMs).toLocaleString()}`
+            : ""}
+          {gmailPubSubStatus.lastEventAtMs
+            ? ` • last event ${new Date(gmailPubSubStatus.lastEventAtMs).toLocaleString()}`
+            : ""}
+          {gmailPubSubStatus.lastError ? ` • ${gmailPubSubStatus.lastError}` : ""}
+        </p>
+      )}
+      {gmailPubSubEvents.length > 0 && (
+        <div className="connection-list" role="list" aria-label="Recent Gmail PubSub events">
+          {gmailPubSubEvents.map((evt) => (
+            <article key={evt.id} className="connection-card" role="listitem">
+              <div className="connection-card-title">
+                <strong>{evt.status}</strong>
+                <span>{new Date(evt.receivedAtMs).toLocaleString()}</span>
+              </div>
+              <p className="connection-card-subtitle">
+                {evt.messageId ?? evt.eventDedupeKey} • runs created: {evt.createdRunCount}
+              </p>
+              {evt.failureReason && <p className="transport-status-note">{evt.failureReason}</p>}
+            </article>
+          ))}
+        </div>
+      )}
       <div className="watcher-controls">
         <label>
           Inbox Autopilot ID

@@ -58,27 +58,27 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 85/85 passing |
+| Backend Rust (`cargo test`) | 91/91 passing |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now
-### Codex OAuth BYOK Support (OpenAI/Codex sign-in import)
+### Gmail PubSub Trigger Path (Gmail-only, polling fallback preserved)
 Owner: active session
 Status: In progress
 Scope:
-- Add Codex OAuth BYOK auth mode by importing local Codex CLI OAuth session (`~/.codex/auth.json`)
-- Store imported Codex OAuth tokens in Keychain only (never SQLite/logs/receipts)
-- Let Local BYOK OpenAI requests use Codex OAuth access token when no manual API key is set
-- Add minimal Connections UI for import/remove/status (advanced mode)
-- Update packaging/strategy docs so Codex OAuth is marked shipped in BYOK lane
+- Add Gmail PubSub trigger state + event log tables (Gmail-only) and relay callback ingestion path
+- Reuse existing inbox watcher Gmail fetch/queue path (PubSub triggers fetch; no direct message processing)
+- Add trigger mode (`polling|gmail_pubsub|auto`) with polling fallback when PubSub is inactive/expired
+- Add minimal Connections UI for watch health, mode, config, and recent PubSub events
+- Update docs/handoff so trigger model and next phases stay aligned
 Acceptance:
-- Codex OAuth import reads only local `~/.codex/auth.json` and stores credentials in Keychain
-- No token values appear in logs/receipts/UI status payloads
-- OpenAI BYOK requests work with imported Codex OAuth credentials when API key is absent
-- Removing Codex OAuth credentials cleanly disables that auth path
+- Valid PubSub callback enqueues Gmail fetch path (through existing inbox watcher path), not a parallel runner path
+- Duplicate PubSub callbacks do not create duplicate runs
+- Invalid/malformed callback payloads fail with human-readable event status
+- `auto` mode falls back to polling when PubSub is expired/error/disabled
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -92,10 +92,10 @@ npm run build
 ## Next
 1. **Rule extraction / "Make This a Rule" (P0.12)**
    - rule object + rule applications + approval-gated creation
-2. **Interview onboarding polish + voice/rules UX**
-   - first-result path polish, stronger tests, clearer defaults
-3. **CallApi follow-up hardening**
-   - response parsing presets, method/domain policy expansion, reusable API action templates
+2. **Relay multi-device routing + device targeting foundations**
+   - explicit preferred target / queue-until-online semantics
+3. **Ownership leases + doctor surfaces**
+   - runner/push consumer ownership locks and operator-readable health/runbooks
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution

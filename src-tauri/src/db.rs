@@ -52,6 +52,7 @@ pub struct PrimaryOutcomeRecord {
 pub struct RunnerControlRecord {
     pub background_enabled: bool,
     pub watcher_enabled: bool,
+    pub gmail_trigger_mode: String,
     pub watcher_poll_seconds: i64,
     pub watcher_max_items: i64,
     pub gmail_autopilot_id: String,
@@ -370,6 +371,43 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               created_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS relay_gmail_pubsub_callback_events (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL,
+              channel TEXT,
+              created_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS gmail_pubsub_state (
+              provider TEXT PRIMARY KEY,
+              status TEXT NOT NULL DEFAULT 'disabled',
+              trigger_mode TEXT NOT NULL DEFAULT 'polling',
+              watch_expiration_ms INTEGER,
+              history_id TEXT,
+              topic_name TEXT,
+              subscription_name TEXT,
+              callback_mode TEXT NOT NULL DEFAULT 'relay',
+              last_event_at_ms INTEGER,
+              last_error TEXT,
+              consecutive_failures INTEGER NOT NULL DEFAULT 0,
+              updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS gmail_pubsub_events (
+              id TEXT PRIMARY KEY,
+              provider TEXT NOT NULL,
+              message_id TEXT,
+              event_dedupe_key TEXT NOT NULL UNIQUE,
+              history_id TEXT,
+              published_at_ms INTEGER,
+              received_at_ms INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              failure_reason TEXT,
+              created_run_count INTEGER NOT NULL DEFAULT 0,
+              created_at_ms INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS clarifications (
               id TEXT PRIMARY KEY,
               run_id TEXT NOT NULL,
@@ -655,6 +693,7 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
               background_enabled INTEGER NOT NULL DEFAULT 0,
               watcher_enabled INTEGER NOT NULL DEFAULT 1,
+              gmail_trigger_mode TEXT NOT NULL DEFAULT 'polling',
               watcher_poll_seconds INTEGER NOT NULL DEFAULT 60,
               watcher_max_items INTEGER NOT NULL DEFAULT 10,
               gmail_autopilot_id TEXT NOT NULL DEFAULT 'auto_inbox_watch_gmail',
@@ -802,6 +841,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         "TEXT",
     )?;
     ensure_column(connection, "email_ingest_events", "sender_email", "TEXT")?;
+    ensure_column(
+        connection,
+        "runner_control",
+        "gmail_trigger_mode",
+        "TEXT NOT NULL DEFAULT 'polling'",
+    )?;
     ensure_column(
         connection,
         "runner_control",
@@ -980,6 +1025,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
         .map_err(|e| format!("Failed to create inbox watcher state index: {e}"))?;
     connection
         .execute(
+            "CREATE INDEX IF NOT EXISTS idx_gmail_pubsub_events_received ON gmail_pubsub_events(received_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create gmail_pubsub_events received index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_gmail_pubsub_events_status_received ON gmail_pubsub_events(status, received_at_ms DESC)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create gmail_pubsub_events status index: {e}"))?;
+    connection
+        .execute(
             "CREATE INDEX IF NOT EXISTS idx_webhook_triggers_autopilot_updated ON webhook_triggers(autopilot_id, updated_at_ms DESC)",
             [],
         )
@@ -1089,9 +1146,9 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     connection
         .execute(
             "INSERT OR IGNORE INTO runner_control (
-               singleton_id, background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items,
+               singleton_id, background_enabled, watcher_enabled, gmail_trigger_mode, watcher_poll_seconds, watcher_max_items,
                gmail_autopilot_id, microsoft_autopilot_id, missed_runs_count, updated_at_ms
-             ) VALUES (1, 0, 1, 60, 10, 'auto_inbox_watch_gmail', 'auto_inbox_watch_microsoft365', 0, strftime('%s','now') * 1000)",
+             ) VALUES (1, 0, 1, 'polling', 60, 10, 'auto_inbox_watch_gmail', 'auto_inbox_watch_microsoft365', 0, strftime('%s','now') * 1000)",
             [],
         )
         .map_err(|e| format!("Failed to seed runner control: {e}"))?;
@@ -1601,19 +1658,20 @@ pub fn list_primary_outcomes(
 pub fn get_runner_control(connection: &Connection) -> Result<RunnerControlRecord, String> {
     connection
         .query_row(
-            "SELECT background_enabled, watcher_enabled, watcher_poll_seconds, watcher_max_items, gmail_autopilot_id, microsoft_autopilot_id, watcher_last_tick_ms, missed_runs_count
+            "SELECT background_enabled, watcher_enabled, gmail_trigger_mode, watcher_poll_seconds, watcher_max_items, gmail_autopilot_id, microsoft_autopilot_id, watcher_last_tick_ms, missed_runs_count
              FROM runner_control WHERE singleton_id = 1",
             [],
             |row| {
                 Ok(RunnerControlRecord {
                     background_enabled: row.get::<_, i64>(0)? == 1,
                     watcher_enabled: row.get::<_, i64>(1)? == 1,
-                    watcher_poll_seconds: row.get(2)?,
-                    watcher_max_items: row.get(3)?,
-                    gmail_autopilot_id: row.get(4)?,
-                    microsoft_autopilot_id: row.get(5)?,
-                    watcher_last_tick_ms: row.get(6)?,
-                    missed_runs_count: row.get(7)?,
+                    gmail_trigger_mode: row.get(2)?,
+                    watcher_poll_seconds: row.get(3)?,
+                    watcher_max_items: row.get(4)?,
+                    gmail_autopilot_id: row.get(5)?,
+                    microsoft_autopilot_id: row.get(6)?,
+                    watcher_last_tick_ms: row.get(7)?,
+                    missed_runs_count: row.get(8)?,
                 })
             },
         )
@@ -1722,17 +1780,19 @@ pub fn upsert_runner_control(
             "UPDATE runner_control
              SET background_enabled = ?1,
                  watcher_enabled = ?2,
-                 watcher_poll_seconds = ?3,
-                 watcher_max_items = ?4,
-                 gmail_autopilot_id = ?5,
-                 microsoft_autopilot_id = ?6,
-                 watcher_last_tick_ms = ?7,
-                 missed_runs_count = ?8,
+                 gmail_trigger_mode = ?3,
+                 watcher_poll_seconds = ?4,
+                 watcher_max_items = ?5,
+                 gmail_autopilot_id = ?6,
+                 microsoft_autopilot_id = ?7,
+                 watcher_last_tick_ms = ?8,
+                 missed_runs_count = ?9,
                  updated_at_ms = strftime('%s','now') * 1000
              WHERE singleton_id = 1",
             params![
                 if payload.background_enabled { 1 } else { 0 },
                 if payload.watcher_enabled { 1 } else { 0 },
+                payload.gmail_trigger_mode,
                 payload.watcher_poll_seconds,
                 payload.watcher_max_items,
                 payload.gmail_autopilot_id,
