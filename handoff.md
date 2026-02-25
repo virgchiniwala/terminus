@@ -178,11 +178,17 @@ Last updated: 2026-02-26
   - `get_relay_sync_status` surfaces sync health/backoff (`relay_sync_state`) for the Connections panel
   - sync applies decisions through the same callback/approval codepath (reuses replay/idempotency protections)
   - `tick_runner_cycle` now runs bounded relay sync after due-run resume and records sync status in summary
+- Relay push channel consumer (desktop-side long-poll/SSE-ready):
+  - `tick_relay_approval_push` listens for remote approval decisions via relay stream endpoint (long-poll request)
+  - `get_relay_push_status` surfaces push-channel health/backoff using a separate `relay_sync_state` row (`approval_push`)
+  - push path falls back to poll endpoint if stream endpoint is unavailable/rejected (compatibility during relay rollout)
+  - dedicated background relay push thread runs when background mode is enabled (separate from runner cycle thread)
+  - Connections panel now shows both poll sync status and push channel status, each with manual trigger controls
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
-- `cd src-tauri && cargo test` passes (78 tests)
+- `cd src-tauri && cargo test` passes (79 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
@@ -203,7 +209,7 @@ Last updated: 2026-02-26
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P1 relay push channel + Slack/mobile approval routing (WebSocket/SSE + relay server integration to desktop callback contract)
+  1. P1 Slack/mobile approval routing on relay server (consume desktop callback contract + push delivery)
   2. P2 interview-driven onboarding (agent-guided first result before configuration)
   3. P0.11/P0.12 Voice object + rule extraction approval flow
 

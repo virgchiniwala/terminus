@@ -182,6 +182,7 @@ struct RelayCallbackSecretIssuedResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RelayApprovalSyncStatusResponse {
+    channel: String,
     enabled: bool,
     relay_configured: bool,
     callback_ready: bool,
@@ -302,12 +303,42 @@ struct RelaySyncStateRow {
     total_processed_count: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RelayDecisionSyncChannel {
+    Poll,
+    Push,
+}
+
+impl RelayDecisionSyncChannel {
+    fn as_row_key(&self) -> &'static str {
+        match self {
+            Self::Poll => "approval_sync",
+            Self::Push => "approval_push",
+        }
+    }
+
+    fn as_api_label(&self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Push => "push",
+        }
+    }
+}
+
 #[tauri::command]
 fn get_relay_sync_status(
     state: tauri::State<AppState>,
 ) -> Result<RelayApprovalSyncStatusResponse, String> {
     let connection = open_connection(&state)?;
-    get_relay_sync_status_internal(&connection)
+    get_relay_sync_status_internal(&connection, RelayDecisionSyncChannel::Poll)
+}
+
+#[tauri::command]
+fn get_relay_push_status(
+    state: tauri::State<AppState>,
+) -> Result<RelayApprovalSyncStatusResponse, String> {
+    let connection = open_connection(&state)?;
+    get_relay_sync_status_internal(&connection, RelayDecisionSyncChannel::Push)
 }
 
 #[tauri::command]
@@ -315,11 +346,20 @@ fn tick_relay_approval_sync(
     state: tauri::State<AppState>,
 ) -> Result<RelayApprovalSyncTickResponse, String> {
     let mut connection = open_connection(&state)?;
-    tick_relay_approval_sync_internal(&mut connection, true)
+    tick_relay_approval_sync_internal(&mut connection, true, RelayDecisionSyncChannel::Poll)
+}
+
+#[tauri::command]
+fn tick_relay_approval_push(
+    state: tauri::State<AppState>,
+) -> Result<RelayApprovalSyncTickResponse, String> {
+    let mut connection = open_connection(&state)?;
+    tick_relay_approval_sync_internal(&mut connection, true, RelayDecisionSyncChannel::Push)
 }
 
 fn get_relay_sync_status_internal(
     connection: &rusqlite::Connection,
+    channel: RelayDecisionSyncChannel,
 ) -> Result<RelayApprovalSyncStatusResponse, String> {
     let transport = ProviderRuntime::default().transport_status();
     let relay_configured = transport.relay_configured;
@@ -327,7 +367,7 @@ fn get_relay_sync_status_internal(
         .map_err(|e| e.to_string())?
         .is_some_and(|v| !v.trim().is_empty());
     let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
-    let state = load_relay_sync_state(connection)?;
+    let state = load_relay_sync_state(connection, channel)?;
     let enabled = relay_configured && callback_ready;
     let now = now_ms();
     let status = if !relay_configured {
@@ -349,6 +389,7 @@ fn get_relay_sync_status_internal(
         "idle"
     };
     Ok(RelayApprovalSyncStatusResponse {
+        channel: channel.as_api_label().to_string(),
         enabled,
         relay_configured,
         callback_ready,
@@ -367,6 +408,7 @@ fn get_relay_sync_status_internal(
 fn tick_relay_approval_sync_internal(
     connection: &mut rusqlite::Connection,
     manual: bool,
+    channel: RelayDecisionSyncChannel,
 ) -> Result<RelayApprovalSyncTickResponse, String> {
     let status = ProviderRuntime::default().transport_status();
     let relay_token = providers::keychain::get_relay_subscriber_token()
@@ -376,15 +418,15 @@ fn tick_relay_approval_sync_internal(
         .map_err(|e| e.to_string())?
         .filter(|v| !v.trim().is_empty());
     let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
-    let mut sync_state = load_relay_sync_state(connection)?;
+    let mut sync_state = load_relay_sync_state(connection, channel)?;
     let now = now_ms();
 
     if relay_token.is_none() || !status.relay_configured {
         sync_state.last_error = None;
         sync_state.backoff_until_ms = None;
-        persist_relay_sync_state(connection, &sync_state, now)?;
+        persist_relay_sync_state(connection, channel, &sync_state, now)?;
         return Ok(RelayApprovalSyncTickResponse {
-            status: get_relay_sync_status_internal(connection)?,
+            status: get_relay_sync_status_internal(connection, channel)?,
             applied_count: 0,
         });
     }
@@ -392,25 +434,48 @@ fn tick_relay_approval_sync_internal(
         sync_state.last_error = Some(
             "Remote approvals are not ready yet. Generate a callback secret first.".to_string(),
         );
-        persist_relay_sync_state(connection, &sync_state, now)?;
+        persist_relay_sync_state(connection, channel, &sync_state, now)?;
         return Ok(RelayApprovalSyncTickResponse {
-            status: get_relay_sync_status_internal(connection)?,
+            status: get_relay_sync_status_internal(connection, channel)?,
             applied_count: 0,
         });
     }
     if !manual && sync_state.backoff_until_ms.is_some_and(|until| until > now) {
         return Ok(RelayApprovalSyncTickResponse {
-            status: get_relay_sync_status_internal(connection)?,
+            status: get_relay_sync_status_internal(connection, channel)?,
             applied_count: 0,
         });
     }
 
     sync_state.last_poll_at_ms = Some(now);
-    persist_relay_sync_state(connection, &sync_state, now)?;
+    persist_relay_sync_state(connection, channel, &sync_state, now)?;
 
     let relay = RelayTransport::new(RelayTransport::default_url());
-    let poll_result =
-        relay.poll_approval_decisions(relay_token.as_deref().unwrap_or_default(), &device_id, 20);
+    let poll_result = match channel {
+        RelayDecisionSyncChannel::Poll => relay.poll_approval_decisions(
+            relay_token.as_deref().unwrap_or_default(),
+            &device_id,
+            20,
+        ),
+        RelayDecisionSyncChannel::Push => relay
+            .stream_approval_decisions(
+                relay_token.as_deref().unwrap_or_default(),
+                &device_id,
+                20,
+                20,
+            )
+            .or_else(|stream_err| {
+                if stream_err.is_retryable() {
+                    Err(stream_err)
+                } else {
+                    relay.poll_approval_decisions(
+                        relay_token.as_deref().unwrap_or_default(),
+                        &device_id,
+                        20,
+                    )
+                }
+            }),
+    };
 
     let mut applied_count = 0usize;
     match poll_result {
@@ -434,7 +499,7 @@ fn tick_relay_approval_sync_internal(
             sync_state.total_processed_count = sync_state
                 .total_processed_count
                 .saturating_add(applied_count as i64);
-            persist_relay_sync_state(connection, &sync_state, now_ms())?;
+            persist_relay_sync_state(connection, channel, &sync_state, now_ms())?;
         }
         Err(err) => {
             sync_state.consecutive_failures = sync_state.consecutive_failures.saturating_add(1);
@@ -448,12 +513,12 @@ fn tick_relay_approval_sync_internal(
             } else {
                 sync_state.backoff_until_ms = None;
             }
-            persist_relay_sync_state(connection, &sync_state, now)?;
+            persist_relay_sync_state(connection, channel, &sync_state, now)?;
         }
     }
 
     Ok(RelayApprovalSyncTickResponse {
-        status: get_relay_sync_status_internal(connection)?,
+        status: get_relay_sync_status_internal(connection, channel)?,
         applied_count,
     })
 }
@@ -479,13 +544,16 @@ fn apply_relay_polled_decision(
     resolve_relay_approval_callback_with_connection(connection, &input).map(Some)
 }
 
-fn load_relay_sync_state(connection: &rusqlite::Connection) -> Result<RelaySyncStateRow, String> {
+fn load_relay_sync_state(
+    connection: &rusqlite::Connection,
+    channel: RelayDecisionSyncChannel,
+) -> Result<RelaySyncStateRow, String> {
     connection
         .query_row(
             "SELECT last_poll_at_ms, last_success_at_ms, consecutive_failures, backoff_until_ms,
                     last_error, last_processed_count, total_processed_count
-             FROM relay_sync_state WHERE channel = 'approval_sync' LIMIT 1",
-            [],
+             FROM relay_sync_state WHERE channel = ?1 LIMIT 1",
+            rusqlite::params![channel.as_row_key()],
             |row| {
                 Ok(RelaySyncStateRow {
                     last_poll_at_ms: row.get(0)?,
@@ -505,6 +573,7 @@ fn load_relay_sync_state(connection: &rusqlite::Connection) -> Result<RelaySyncS
 
 fn persist_relay_sync_state(
     connection: &rusqlite::Connection,
+    channel: RelayDecisionSyncChannel,
     state: &RelaySyncStateRow,
     now: i64,
 ) -> Result<(), String> {
@@ -513,7 +582,7 @@ fn persist_relay_sync_state(
             "INSERT INTO relay_sync_state (
                 channel, last_poll_at_ms, last_success_at_ms, consecutive_failures, backoff_until_ms,
                 last_error, last_processed_count, total_processed_count, updated_at_ms
-             ) VALUES ('approval_sync', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(channel) DO UPDATE SET
                 last_poll_at_ms = excluded.last_poll_at_ms,
                 last_success_at_ms = excluded.last_success_at_ms,
@@ -524,6 +593,7 @@ fn persist_relay_sync_state(
                 total_processed_count = excluded.total_processed_count,
                 updated_at_ms = excluded.updated_at_ms",
             rusqlite::params![
+                channel.as_row_key(),
                 state.last_poll_at_ms,
                 state.last_success_at_ms,
                 state.consecutive_failures,
@@ -1027,7 +1097,7 @@ fn tick_runner_cycle_internal(
 
     let resumed = RunnerEngine::resume_due_runs(connection, 20).map_err(|e| e.to_string())?;
     summary.resumed_due_runs = resumed.len();
-    match tick_relay_approval_sync_internal(connection, false) {
+    match tick_relay_approval_sync_internal(connection, false, RelayDecisionSyncChannel::Poll) {
         Ok(sync) => {
             summary.relay_sync_status = sync.status.status;
             summary.relay_decisions_applied = sync.applied_count;
@@ -1066,6 +1136,41 @@ fn spawn_background_cycle_thread(app: &tauri::AppHandle, db_path: PathBuf) {
                 "background runner cycle failed: {}",
                 sanitize_log_message(&err)
             );
+        }
+    });
+}
+
+fn spawn_background_relay_push_thread(app: &tauri::AppHandle, db_path: PathBuf) {
+    let app_handle = app.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(5));
+        let app_state = app_handle.state::<AppState>();
+        if app_state
+            .db_path
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_none()
+        {
+            continue;
+        }
+        let mut connection = match open_connection_from_path(&db_path) {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        let control = match db::get_runner_control(&connection) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !control.background_enabled {
+            continue;
+        }
+        if let Err(err) = tick_relay_approval_sync_internal(
+            &mut connection,
+            false,
+            RelayDecisionSyncChannel::Push,
+        ) {
+            eprintln!("relay push sync failed: {}", sanitize_log_message(&err));
         }
     });
 }
@@ -2212,6 +2317,11 @@ fn main() {
             }
             install_tray(app.handle())?;
             spawn_background_cycle_thread(app.handle(), db_path);
+            if let Ok(guard) = state.db_path.lock() {
+                if let Some(path) = guard.clone() {
+                    spawn_background_relay_push_thread(app.handle(), path);
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -2236,7 +2346,9 @@ fn main() {
             get_transport_status,
             get_remote_approval_readiness,
             get_relay_sync_status,
+            get_relay_push_status,
             tick_relay_approval_sync,
+            tick_relay_approval_push,
             issue_relay_callback_secret,
             clear_relay_callback_secret,
             set_subscriber_token,

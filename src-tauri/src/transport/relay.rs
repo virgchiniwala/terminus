@@ -56,6 +56,20 @@ impl RelayTransport {
         }
     }
 
+    pub fn default_approval_stream_url() -> String {
+        if let Ok(url) = std::env::var("TERMINUS_RELAY_APPROVAL_STREAM_URL") {
+            if !url.trim().is_empty() {
+                return url;
+            }
+        }
+        let dispatch = Self::default_url();
+        if let Some((prefix, _)) = dispatch.rsplit_once('/') {
+            format!("{prefix}/approvals/stream")
+        } else {
+            format!("{dispatch}/approvals/stream")
+        }
+    }
+
     fn require_token(keychain_token: Option<&str>) -> Result<&str, ProviderError> {
         keychain_token
             .filter(|v| !v.trim().is_empty())
@@ -98,12 +112,22 @@ impl RelayTransport {
         token: &str,
         body_json: &Value,
     ) -> Result<Value, ProviderError> {
+        self.curl_json_request_to_url_with_timeout(url, token, body_json, 30)
+    }
+
+    fn curl_json_request_to_url_with_timeout(
+        &self,
+        url: &str,
+        token: &str,
+        body_json: &Value,
+        max_time_seconds: i64,
+    ) -> Result<Value, ProviderError> {
         let sentinel = "__TERMINUS_HTTP_STATUS__:";
         let mut config = String::new();
         config.push_str("silent\n");
         config.push_str("show-error\n");
         config.push_str("location\n");
-        config.push_str("max-time = 30\n");
+        config.push_str(&format!("max-time = {}\n", max_time_seconds.clamp(5, 60)));
         config.push_str("request = \"POST\"\n");
         config.push_str(&format!("url = \"{url}\"\n"));
         config.push_str("header = \"Content-Type: application/json\"\n");
@@ -184,6 +208,39 @@ impl RelayTransport {
                 ProviderError::retryable("Relay approval sync response could not be parsed.")
             })
     }
+
+    pub fn stream_approval_decisions(
+        &self,
+        token: &str,
+        device_id: &str,
+        limit: usize,
+        wait_seconds: i64,
+    ) -> Result<RelayApprovalPollResponse, ProviderError> {
+        let payload = serde_json::json!({
+            "deviceId": device_id,
+            "limit": limit.clamp(1, 50),
+            "waitSeconds": wait_seconds.clamp(1, 25),
+        });
+        let json = self.curl_json_request_to_url_with_timeout(
+            &Self::default_approval_stream_url(),
+            token,
+            &payload,
+            wait_seconds.saturating_add(5),
+        )?;
+        serde_json::from_value::<RelayApprovalPollResponse>(json.clone())
+            .or_else(|_| {
+                json.get("decisions")
+                    .cloned()
+                    .ok_or(())
+                    .and_then(|arr| {
+                        serde_json::from_value::<Vec<RelayApprovalDecision>>(arr).map_err(|_| ())
+                    })
+                    .map(|decisions| RelayApprovalPollResponse { decisions })
+            })
+            .map_err(|_| {
+                ProviderError::retryable("Relay approval stream response could not be parsed.")
+            })
+    }
 }
 
 impl ExecutionTransport for RelayTransport {
@@ -227,5 +284,12 @@ mod tests {
         let url = RelayTransport::default_approval_poll_url();
         assert!(url.starts_with("http"));
         assert!(url.contains("/approvals/pull"));
+    }
+
+    #[test]
+    fn default_approval_stream_url_uses_expected_path() {
+        let url = RelayTransport::default_approval_stream_url();
+        assert!(url.starts_with("http"));
+        assert!(url.contains("/approvals/stream"));
     }
 }

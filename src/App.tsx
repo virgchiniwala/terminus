@@ -105,6 +105,7 @@ export function App() {
   const [transportStatus, setTransportStatus] = useState<TransportStatusRecord | null>(null);
   const [remoteApprovalReadiness, setRemoteApprovalReadiness] = useState<RemoteApprovalReadinessRecord | null>(null);
   const [relaySyncStatus, setRelaySyncStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
+  const [relayPushStatus, setRelayPushStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
   const [relayCallbackSecretPreview, setRelayCallbackSecretPreview] = useState<string | null>(null);
   const [relaySubscriberTokenInput, setRelaySubscriberTokenInput] = useState("");
   const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
@@ -361,6 +362,15 @@ export function App() {
       });
   }, []);
 
+  const loadRelayPushStatus = useCallback(() => {
+    invoke<RelayApprovalSyncStatusRecord>("get_relay_push_status")
+      .then((payload) => setRelayPushStatus(payload))
+      .catch((err) => {
+        console.error("Failed to load relay push status:", err);
+        setConnectionsMessage((prev) => prev ?? "Could not load relay push channel status.");
+      });
+  }, []);
+
   const loadRunnerControl = useCallback(() => {
     invoke<RunnerControlRecord>("get_runner_control")
       .then((payload: any) => {
@@ -497,11 +507,12 @@ export function App() {
     loadTransportStatus();
     loadRemoteApprovalReadiness();
     loadRelaySyncStatus();
+    loadRelayPushStatus();
     loadRunnerControl();
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
-  }, [loadSnapshot, loadConnections, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+  }, [loadSnapshot, loadConnections, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -520,6 +531,7 @@ export function App() {
           loadRunDiagnostics();
           loadMissions();
           loadRelaySyncStatus();
+          loadRelayPushStatus();
           if (selectedMissionId) {
             loadMissionDetail(selectedMissionId);
           }
@@ -529,7 +541,7 @@ export function App() {
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, selectedMissionId]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, selectedMissionId]);
 
   useEffect(() => {
     return () => {
@@ -663,6 +675,7 @@ export function App() {
         setTransportStatus(payload);
         loadRemoteApprovalReadiness();
         loadRelaySyncStatus();
+        loadRelayPushStatus();
         setRelaySubscriberTokenInput("");
         setConnectionsMessage("Hosted plan token saved to Keychain.");
       })
@@ -679,6 +692,7 @@ export function App() {
         setTransportStatus(payload);
         loadRemoteApprovalReadiness();
         loadRelaySyncStatus();
+        loadRelayPushStatus();
         setRelaySubscriberTokenInput("");
         setConnectionsMessage("Hosted plan token removed.");
       })
@@ -695,6 +709,7 @@ export function App() {
       .then((payload) => {
         setRemoteApprovalReadiness(payload.readiness);
         loadRelaySyncStatus();
+        loadRelayPushStatus();
         setRelayCallbackSecretPreview(payload.callbackSecret);
         setConnectionsMessage("Relay callback secret issued. Copy it into the relay once.");
       })
@@ -711,6 +726,7 @@ export function App() {
       .then((payload) => {
         setRemoteApprovalReadiness(payload);
         loadRelaySyncStatus();
+        loadRelayPushStatus();
         setConnectionsMessage("Relay callback secret cleared.");
       })
       .catch((err) => {
@@ -737,10 +753,37 @@ export function App() {
         } else {
           setConnectionsMessage("Remote approval sync complete.");
         }
+        loadRelayPushStatus();
       })
       .catch((err) => {
         console.error("Failed to sync remote approvals:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not sync remote approvals.");
+      });
+  };
+
+  const tickRelayApprovalPush = () => {
+    setConnectionsMessage(null);
+    invoke<RelayApprovalSyncTickRecord>("tick_relay_approval_push")
+      .then((payload) => {
+        setRelayPushStatus(payload.status);
+        const applied = payload.appliedCount ?? 0;
+        if (applied > 0) {
+          setConnectionsMessage(`Push channel applied ${applied} remote decision${applied === 1 ? "" : "s"}.`);
+          loadSnapshot();
+          loadClarifications();
+          loadRunDiagnostics();
+          loadMissions();
+          if (selectedMissionId) {
+            loadMissionDetail(selectedMissionId);
+          }
+        } else {
+          setConnectionsMessage("Push channel listen completed.");
+        }
+        loadRelaySyncStatus();
+      })
+      .catch((err) => {
+        console.error("Failed to listen for remote approvals:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not listen for remote approvals.");
       });
   };
 
@@ -1258,10 +1301,12 @@ export function App() {
           transportStatus={transportStatus}
           remoteApprovalReadiness={remoteApprovalReadiness}
           relaySyncStatus={relaySyncStatus}
+          relayPushStatus={relayPushStatus}
           relayCallbackSecretPreview={relayCallbackSecretPreview}
           issueRelayCallbackSecret={issueRelayCallbackSecret}
           clearRelayCallbackSecret={clearRelayCallbackSecret}
           tickRelayApprovalSync={tickRelayApprovalSync}
+          tickRelayApprovalPush={tickRelayApprovalPush}
           relaySubscriberTokenInput={relaySubscriberTokenInput}
           setRelaySubscriberTokenInput={setRelaySubscriberTokenInput}
           saveRelaySubscriberToken={saveRelaySubscriberToken}

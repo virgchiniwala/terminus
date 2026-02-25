@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-26
+Last updated: 2026-02-27
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/relay-sync-polling`
+- Branch: `codex/relay-push-channel-consumer`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -52,27 +52,27 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 78/78 passing |
+| Backend Rust (`cargo test`) | 79/79 passing |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now (P1d)
-### Relay Approval Sync Loop + Push Routing Readiness (Desktop)
+### Relay Push Channel Consumer + Poll Fallback (Desktop)
 Owner: active session
 Status: In progress
 Scope:
-- Add desktop relay approval sync tick (`tick_relay_approval_sync`) + status read API (`get_relay_sync_status`)
-- Poll relay for pending remote approval decisions using hosted subscriber token + stable device id
-- Apply decisions through canonical callback/approval codepath (no parallel approval execution path)
-- Persist relay sync health/backoff in SQLite (`relay_sync_state`)
-- Integrate bounded sync into existing runner cycle + Connections panel status
+- Add desktop relay push-channel consumer (`tick_relay_approval_push`) using relay long-poll/stream endpoint
+- Keep poll sync as compatibility path and fallback when push endpoint is unavailable
+- Persist separate health/backoff for poll + push in SQLite (`relay_sync_state` channel rows)
+- Run push consumer in a dedicated background thread (no blocking of runner cycle thread)
+- Surface poll + push channel status in Connections panel with manual controls
 Acceptance:
-- Relay sync never duplicates side effects (reuses callback request-id replay protection)
-- Transient relay errors back off and surface human-readable sync status
-- Background/manual cycle can apply remote decisions without blocking runner execution model
-- Connections UI shows relay sync status, backoff, and last applied count
+- Push channel applies remote decisions through canonical callback path with replay safety
+- Push channel falls back to poll safely when stream endpoint is unavailable
+- Dedicated push thread does not block runner cycle thread
+- Connections UI shows separate poll and push health/backoff/applied counts
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -85,9 +85,9 @@ npm run build
 
 ## Next
 1. **P1d: Relay Push Channel + Slack Bot**
-   - WebSocket/SSE push for approval routing (server-side + desktop consumer after polling MVP)
    - Slack bot via Vercel Chat SDK pattern (approve from Slack)
    - Relay server callback/auth integration using the desktop callback contract
+   - Server-side push channel (WebSocket/SSE) to deliver approval decisions
 
 2. **P2: Interview-Driven Onboarding**
    - Blank canvas first-launch experience
