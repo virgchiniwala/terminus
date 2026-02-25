@@ -74,6 +74,12 @@ export interface RunnerControlRecord {
   missedRunsCount: number;
 }
 
+export interface TransportStatusRecord {
+  mode: "hosted_relay" | "byok_local" | "mock" | string;
+  relayConfigured: boolean;
+  relayUrl: string;
+}
+
 export interface AutopilotSendPolicyRecord {
   autopilotId: string;
   allowSending: boolean;

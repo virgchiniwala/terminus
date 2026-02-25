@@ -1,56 +1,81 @@
 # PRIMITIVES.md
-Last updated: 2026-02-22
+Last updated: 2026-02-25
 
 ## Purpose
 Primitives are Terminus runtime actions. They are constrained by design and deny-by-default.
 
-A plan can only execute primitives explicitly allowlisted in that plan.
+A plan can only execute primitives explicitly allowlisted in that plan (`allowed_primitives` field). This is enforced by `PrimitiveGuard` in `src-tauri/src/primitives.rs` — an unknown or non-allowlisted primitive fails with a human-readable error before any side effect executes.
 
-## Primitive Catalog (MVP)
-Read:
-- `read.web`
-- `read.forwarded_email`
-- `read.sources`
+## Primitive Catalog (Complete)
 
-Write:
-- `triage.email` (approval-gated provider action)
-- `write.outcome_draft`
-- `write.email_draft`
+**Read (low risk, no approval needed by default):**
+- `ReadWeb` — fetch content from a URL; requires `web_allowed_domains` to include the host
+- `ReadForwardedEmail` — read an email that was forwarded or pasted
+- `ReadSources` — read multiple configured source URLs
+- `ReadVaultFile` — path-scoped file read (after explicit vault setup)
 
-Restricted / disabled in MVP by default:
-- `send.email` (blocked unless strict policy gates pass)
-- `schedule.run` (manual-first policy; not auto-allowlisted)
-- `read.vault_file` (path-scoped only after explicit vault setup)
+**Aggregate (medium risk, no approval needed by default):**
+- `AggregateDailySummary` — synthesize multiple source contents into a cohesive summary
+
+**Write (medium risk, approval required by default):**
+- `TriageEmail` — classify and label an email (archive, label, flag)
+- `WriteOutcomeDraft` — create a completed outcome card (summary, brief, analysis)
+- `WriteEmailDraft` — draft an email for the approval queue
+
+**Restricted / High Risk (always approval required):**
+- `SendEmail` — send an approved email; all 5 Safe Effector gates must pass; **always requires approval regardless of plan or LLM output**
+- `ScheduleRun` — schedule a future run; manual-first policy; not auto-allowlisted
+- `NotifyUser` — send a system notification (low risk)
 
 ## Safety Rules
-- Unknown primitive: fail with human-readable message.
-- Non-allowlisted primitive: fail with human-readable message.
+- **Unknown primitive:** fail with human-readable message. `PrimitiveGuard::validate()` rejects.
+- **Non-allowlisted primitive:** fail with human-readable message. PrimitiveGuard enforces before execution.
+- **`SendEmail` always requires approval.** Server-side validation (`validate_and_build_plan()`) enforces this regardless of plan source (preset or LLM-generated).
 - No arbitrary shell or code execution primitive.
 - No primitive that installs or executes third-party end-user tools.
 
 ## Recipe-to-Primitive Mapping
-Website Monitor:
-1. `read.web`
-2. `write.outcome_draft` (approval)
-3. `write.email_draft` (approval)
 
-Inbox Triage:
-1. `read.forwarded_email`
-2. `triage.email` (approval)
-3. `write.outcome_draft`
-4. `write.email_draft` (approval)
+**Website Monitor:**
+1. `ReadWeb` → fetch source URL
+2. `WriteOutcomeDraft` → diff summary (approval)
+3. `WriteEmailDraft` → notification draft (approval)
 
-Daily Brief:
-1. `read.sources`
-2. `aggregate.daily_summary` behavior via provider execution step
-3. `write.outcome_draft` (approval)
+**Inbox Triage:**
+1. `ReadForwardedEmail` → read pasted/forwarded content
+2. `TriageEmail` → classify + triage action (approval)
+3. `WriteOutcomeDraft` → triage summary
+4. `WriteEmailDraft` → reply draft (approval)
 
-Note: Aggregation behavior is represented in plan/runner as a constrained runtime step, not an open plugin hook.
+**Daily Brief:**
+1. `ReadSources` → read configured source URLs
+2. `AggregateDailySummary` → synthesize content
+3. `WriteOutcomeDraft` → daily brief card (approval)
+
+**Custom (Dynamic Plan Generation):**
+Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `AggregateDailySummary`, `WriteOutcomeDraft`, `WriteEmailDraft`, `SendEmail`, `NotifyUser`} as determined by LLM plan generation + server-side validation. The `allowed_primitives` field is computed from actual steps, not from LLM-declared list. Safety invariants apply regardless of what the LLM outputs.
 
 ## What Primitives Cannot Do
-- expand permissions at runtime
-- bypass approvals for write/send actions
-- change allowlists autonomously
-- create new executable capabilities
+- Expand permissions at runtime
+- Bypass approvals for write/send actions
+- Change allowlists autonomously
+- Create new executable capabilities
+- Access system resources not in the bounded catalog
 
-See `docs/SECURITY_AND_CONTROL.md` and `docs/LEARNING_LAYER.md`.
+## PrimitiveGuard Enforcement
+`PrimitiveGuard` in `src-tauri/src/primitives.rs` is the deny-by-default enforcement layer:
+- `PrimitiveGuard::new(allowed_primitives)` — constructed from plan's allowlist
+- `validate(primitive_id)` — returns `PrimitiveGuardError::NotAllowed` if not in allowlist
+- Called in `execute_step()` before any primitive logic runs
+- Failure is non-retryable and results in a human-readable error on the Outcome
+
+## MCP Direction (Long-term Architectural Note)
+
+The current primitive catalog is hardcoded (11 `PrimitiveId` enum variants). The long-term direction is to make primitives MCP-consumable:
+- `terminus load-mcp box` → BoxRead/BoxWrite primitives
+- `terminus load-mcp slack` → SlackRead/SlackSend primitives
+- `terminus load-mcp calendar` → CalendarRead primitive
+
+**Design implication:** Do NOT make `PrimitiveId` a closed/exhaustive enum. Keep it extensible so future MCP tool IDs can be added without breaking existing match arms. See `docs/FUTURE_EXTENSION.md`.
+
+See `docs/SECURITY_AND_CONTROL.md` and `docs/LEARNING_LAYER.md` for full safety model.

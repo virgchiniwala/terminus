@@ -16,7 +16,7 @@ use guidance_utils::{
     classify_guidance, compute_missed_cycles, normalize_guidance_instruction, sanitize_log_message,
     GuidanceMode,
 };
-use providers::runtime::ProviderRuntime;
+use providers::runtime::{ProviderRuntime, TransportStatus};
 use providers::types::{
     ProviderKind as ApiProviderKind, ProviderRequest, ProviderTier as ApiProviderTier,
 };
@@ -119,6 +119,20 @@ struct GuidanceResponse {
     proposed_rule: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransportStatusResponse {
+    mode: String,
+    relay_configured: bool,
+    relay_url: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelaySubscriberTokenInput {
+    token: String,
+}
+
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
     let db_path = state
         .db_path
@@ -161,6 +175,31 @@ fn list_primary_outcomes(
 ) -> Result<Vec<db::PrimaryOutcomeRecord>, String> {
     let connection = open_connection(&state)?;
     db::list_primary_outcomes(&connection, limit.unwrap_or(50))
+}
+
+#[tauri::command]
+fn get_transport_status() -> Result<TransportStatusResponse, String> {
+    let status: TransportStatus = ProviderRuntime::default().transport_status();
+    Ok(TransportStatusResponse {
+        mode: status.mode.as_str().to_string(),
+        relay_configured: status.relay_configured,
+        relay_url: status.relay_url,
+    })
+}
+
+#[tauri::command]
+fn set_subscriber_token(
+    input: RelaySubscriberTokenInput,
+) -> Result<TransportStatusResponse, String> {
+    providers::keychain::set_relay_subscriber_token(input.token.trim())
+        .map_err(|e| e.to_string())?;
+    get_transport_status()
+}
+
+#[tauri::command]
+fn remove_subscriber_token() -> Result<TransportStatusResponse, String> {
+    providers::keychain::delete_relay_subscriber_token().map_err(|e| e.to_string())?;
+    get_transport_status()
 }
 
 #[tauri::command]
@@ -1534,6 +1573,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_home_snapshot,
             list_primary_outcomes,
+            get_transport_status,
+            set_subscriber_token,
+            remove_subscriber_token,
             draft_intent,
             start_recipe_run,
             run_tick,

@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `main`
+- Branch: `codex/relay-transport-doc-sync`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -42,7 +42,7 @@ Read these in order before starting work:
 - Retry/backoff with due-run resumption
 - Spend rails in cents with pre-side-effect hard stops
 - Terminal receipts with redaction
-- Provider/transport seam (LocalHttpTransport BYOK + MockTransport tests)
+- Provider/transport seam (LocalHttpTransport BYOK + RelayTransport hosted + MockTransport tests)
 - Learning Layer: Evaluate → Adapt → Memory
 - OAuth provider connections + inbox watcher cadence controls
 - Safe send policy gates + typed approval payload columns
@@ -52,28 +52,27 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 73/73 passing |
+| Backend Rust (`cargo test`) | 77/77 passing |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
-## Now (P0)
-### Dynamic Plan Generation — Custom Recipe
+## Now (P1)
+### Relay Transport (Desktop Client) + Docs Sync
 Owner: active session
-Status: Implemented on branch `codex/dynamic-plan-generation-mvp` (next PR to merge)
+Status: In progress
 Scope:
-- Add `RecipeKind::Custom` to `src-tauri/src/schema.rs`
-- Add `generate_custom_plan()` + `validate_and_build_custom_plan()` / `validate_custom_execution_plan()` to `src-tauri/src/main.rs`
-- Update runner ReadWeb gate to allow Custom recipe (~2 lines in `runner.rs`)
-- Update `start_recipe_run` to accept `plan_json` parameter for pre-generated Custom plans
-- Update frontend `runDraft()` to pass `planJson` for Custom recipes
-- Add validation/classification regression tests and keep full existing suite green
+- Add `RelayTransport` in `src-tauri/src/transport/relay.rs` (ExecutionTransport seam)
+- Add Keychain subscriber token helpers + Tauri commands (`get/set/remove`)
+- Dynamic runtime transport selection (Hosted Relay > BYOK local > Mock)
+- Minimal transport-mode visibility in Connections panel (Hosted/BYOK/Mock)
+- Commit all current Terminus doc updates to prevent drift
 Acceptance:
-- User types any professional workflow → Custom recipe detected → LLM-generated plan shown in Draft Plan Card
-- SendEmail in Custom plan always has `requires_approval: true` regardless of LLM output
-- Unknown primitives rejected by validation
-- Existing 3 recipes work unchanged (classification regression tests)
+- Hosted plan token can be saved/removed in Keychain (no SQLite storage)
+- Transport mode is visible in UI and switches to Hosted when token is present
+- Existing provider call paths remain compatible (runner unchanged)
+- Docs on strategy/provider packaging/current priorities are committed and aligned
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -85,7 +84,7 @@ npm run build
 ```
 
 ## Next
-1. **P1: Relay Transport + Remote Approval + Slack Bot**
+1. **P1b: Remote Approval + Slack Bot**
    - `RelayTransport` in `src-tauri/src/transport/relay.rs`
    - Subscriber token in Keychain
    - Push channel (WebSocket/SSE) for approval routing

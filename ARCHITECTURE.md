@@ -1,18 +1,20 @@
 # Architecture Overview
 
-Last updated: 2026-02-22
+Last updated: 2026-02-25
 Version: MVP (v0.1.x, local-first desktop)
 
 ## What Terminus Is
-Terminus is a local-first desktop system for repeatable follow-through.
-The product surface is object-first: `Autopilots / Outcomes / Approvals / Activity`.
-Chat-style input exists only as an intake method (Intent Bar), not as the primary runtime surface.
+Terminus is a local-first desktop system for repeatable professional follow-through — a **Personal AI OS and personal agent harness**.
+
+The product surface is object-first: `Autopilots / Outcomes / Approvals / Activity`. Chat-style input exists only as an intake method (Intent Bar), not as the primary runtime surface.
+
+**Harness framing:** The runtime provides the same structural guarantees that the best engineering teams build for their coding agents — architecture as guardrails (PrimitiveGuard), bounded tool catalog (11 primitives), documented preferences (Voice/Rules), and planning before execution (classify → preview → approve → run) — for non-technical professional users.
 
 ## Current Stack
-- Desktop shell: Tauri (macOS target first)
-- Frontend: React + TypeScript
+- Desktop shell: Tauri 2 (macOS target first)
+- Frontend: React 19 + TypeScript (strict)
 - Runtime: Rust (tick-based runner)
-- Storage: SQLite + local vault files (vault usage remains constrained)
+- Storage: SQLite (WAL mode) + local vault files
 - Secrets: macOS Keychain only
 - Model providers: OpenAI + Anthropic (Supported), Gemini (Experimental)
 
@@ -25,7 +27,7 @@ Core commands:
 - `resume_due_runs(limit)` resumes retrying runs that are due
 - `tick_runner_cycle()` performs a bounded background/app-open cycle (runner + watcher cadence)
 
-### Run states (current)
+### Run states
 - `ready`
 - `running`
 - `needs_approval`
@@ -43,16 +45,12 @@ Key behavior:
 - State transitions and activity rows are written atomically in one transaction.
 
 ## Action-First Completion Model
-Terminus is transitioning from draft-first internals to action-canonical behavior.
-
 Canonical runtime primitives produce:
 - `Actions` (typed executable work)
 - `Approvals` (authorization gates for risky actions)
 - `Outcomes` (completed work summary + receipts)
 
-Important distinction:
-- Generated text may still exist as payload/internal compatibility artifacts.
-- The user-facing product surface should represent completed work or a one-tap approval to execute.
+The user-facing product surface represents completed work or a one-tap approval to execute — never draft text for the user to copy elsewhere.
 
 ## Objects and Persistence
 SQLite is the source of truth for runtime state.
@@ -67,85 +65,95 @@ Primary tables (selected):
 - `outcomes` — completed outcome payloads + terminal receipts
 - `spend_ledger` — per-step spend entries (integer cents, idempotent keys)
 - `provider_calls` — provider observability metadata (latency/usage/cost estimates)
-- `autopilot_profile`, `decision_events`, `run_evaluations`, `adaptation_log`, `memory_cards` — Learning Layer data
+- `autopilot_profile`, `decision_events`, `run_evaluations`, `adaptation_log`, `memory_cards` — Learning Layer
 - `email_ingest_events`, `inbox_watcher_state` — inbox watcher ingestion + watcher backoff state
 - `runner_control` — background runner + watcher cadence config/status
 
-SQLite runtime hardening already in place:
+SQLite runtime hardening:
 - WAL mode
 - busy timeout
 - migration-safe `ensure_column(...)` style upgrades
 - schema metadata row (`schema_meta`)
 
-## Shared MVP Preset Runtime
-All three MVP presets run on one shared schema + runner + approvals + receipts stack.
+## Recipes (Shared Runtime)
+All four recipes run on one shared schema + runner + approvals + receipts stack.
 
-1. Website Monitor
-- `read_web` (allowlisted domains only)
+**1. Website Monitor**
+- `ReadWeb` (allowlisted domains only)
 - snapshot persistence + change detection
 - summarization / outcome generation
-- approval-gated follow-through (e.g. email send remains gated)
+- approval-gated follow-through
 
-2. Inbox Triage (MVP input: paste/forward/share-in + watcher path)
-- `read_forwarded_email`
+**2. Inbox Triage** (paste/forward/share-in + watcher path)
+- `ReadForwardedEmail`
 - triage/classify/extract
 - outcome/task-style completion and optional gated outbound/send
-- OAuth watcher path exists but mailbox mutations/sends remain policy-gated
+- OAuth watcher path; mailbox mutations/sends remain policy-gated
 
-3. Daily Brief
-- `read_sources`
-- `aggregate_daily_summary`
+**3. Daily Brief**
+- `ReadSources`
+- `AggregateDailySummary`
 - dedupe/history persistence
 - outcome generation / delivery path stays constrained
 
+**4. Custom (Dynamic Plan Generation) — P0 in active development**
+- User describes any professional workflow in natural language via Intent Bar
+- `generate_custom_plan()` sends primitives catalog + intent to LLM, receives plan JSON
+- `validate_and_build_plan()` enforces safety invariants server-side (SendEmail always approval, max 10 steps, no invented primitives)
+- Plan shown in Draft Plan Card for user review before committing
+- `start_recipe_run` accepts `plan_json` parameter for pre-validated Custom plans
+- Runner `execute_step()` dispatches by `PrimitiveId` (recipe-agnostic); only two coupling points needed updating (ReadWeb gate + prompt fallback)
+
 ## Provider + Transport Architecture
-Provider execution is abstracted behind provider and transport seams.
 
 Provider layer:
 - `ProviderKind`: OpenAI / Anthropic / Gemini
 - `ProviderTier`: Supported / Experimental
 - `ProviderRequest`, `ProviderResponse`, `ProviderError` (retryable classification)
 
-Transport layer:
-- `MockTransport` (deterministic tests)
-- `LocalHttpTransport` (real BYOK local execution)
-- Future seam: hosted Relay transport (not implemented)
+Transport layer (`ExecutionTransport` trait, `src-tauri/src/transport/mod.rs`):
+- `MockTransport` — deterministic tests, no network
+- `LocalHttpTransport` — BYOK via Keychain-stored API keys (advanced/fallback)
+- `RelayTransport` — **P1 in active development** — hosted plan via subscriber_token in Keychain; relay enforces tier limits, selects provider, returns response; enables remote approval via push channel (WebSocket/SSE)
+
+Transport selection: if `subscriber_token` present → `RelayTransport`; else → `LocalHttpTransport`.
 
 Secrets:
-- Provider keys and OAuth tokens are stored in macOS Keychain
+- Provider keys, OAuth tokens, subscriber token stored in macOS Keychain
 - Never stored in SQLite
 - Never logged or exported in receipts
 
 ## Security and Control Boundaries
 Non-negotiable runtime boundaries enforced in code:
-- deny-by-default primitive allowlists
-- approvals required for write/send actions by default
-- compose-first email policy with explicit send enable + allowlists + quiet hours + max/day
-- spend rails enforced at runtime in integer cents
-- receipts are redacted and human-readable
+- Deny-by-default primitive allowlists (PrimitiveGuard)
+- Approvals required for write/send actions by default
+- `SendEmail` ALWAYS requires approval — enforced in both preset steps and `validate_and_build_plan()`
+- Compose-first email policy with explicit send enable + allowlists + quiet hours + max/day
+- Spend rails enforced at runtime in integer cents before side effects
+- Receipts are redacted and human-readable
 
-Web fetch hardening (current):
+Web fetch hardening:
 - HTTP/HTTPS only
-- domain allowlist required
-- redirect re-validation per hop
-- private/local/loopback rejection
-- resolved IP pinning into `curl` (`--resolve`) to reduce DNS rebinding risk
-- response size/content-type limits
+- Domain allowlist required
+- Redirect re-validation per hop
+- Private/local/loopback rejection
+- Resolved IP pinning into `curl` (`--resolve`) to reduce DNS rebinding risk
+- Response size/content-type limits
 
-Tauri hardening (current baseline):
-- production CSP enabled (separate dev override config)
-- main window has explicit capability file boundary (`src-tauri/capabilities/main-window.json`)
+Tauri hardening:
+- Production CSP enabled (separate dev override config)
+- Main window has explicit capability file boundary (`src-tauri/capabilities/main-window.json`)
 
 ## Background Runtime and Watchers
 Terminus remains local-first:
-- background runner works while app process is alive and Mac is awake
-- app-open mode is explicit when background mode is off
-- missed cycles are detected and surfaced as user-visible truth
+- Background runner works while app process is alive and Mac is awake
+- App-open mode is explicit when background mode is off
+- Missed cycles are detected and surfaced as user-visible truth
 
 Inbox watcher behavior:
-- provider-specific polling (Gmail / Microsoft 365)
-- per-provider dedupe (`email_ingest_events`)
-- provider-level backoff state (`inbox_watcher_state`) for rate-limit/retryable failures
+- Provider-specific polling (Gmail / Microsoft 365)
+- Per-provider dedupe (`email_ingest_events`)
+- Provider-level backoff state (`inbox_watcher_state`)
 - Gmail path uses batch message-details fetch (with sequential fallback)
 
 ## Learning Layer (Evaluate → Adapt → Memory)
@@ -158,22 +166,26 @@ Pipeline (terminal runs only, and only when enabled):
 4. Enrich terminal receipt with evaluation/adaptation/memory titles
 
 Safety constraints:
-- no raw email/web/provider payload storage in learning tables
-- bounded JSON schemas, rate limits, retention/compaction
-- learning cannot expand primitive allowlists, recipients, send toggles, or capabilities
+- No raw email/web/provider payload storage in learning tables
+- Bounded JSON schemas, rate limits, retention/compaction
+- Learning cannot expand primitive allowlists, recipients, send toggles, or capabilities
 
-## Current Known Debt (intentional / deferred)
-- `runner.rs` and `App.tsx` are still large and need structural decomposition
-- fine-grained per-command Tauri app IPC permissions are not yet defined (window capability boundary exists)
-- some DB schema inconsistencies (legacy columns/timestamps) remain for compatibility and need a cleanup migration plan
-- Gmail watcher batching is implemented, but broader watcher observability/backoff UX can be improved further
+## Known Debt (intentional / deferred)
+- `runner.rs` (~236KB) and `App.tsx` (1,253 lines) are large and need structural decomposition (P7)
+- Frontend test coverage is ~10% — App.tsx has zero tests; critical surfaces untested (P7)
+- Fine-grained per-command Tauri app IPC permissions not yet defined
+- Some DB schema inconsistencies (legacy columns/timestamps) need cleanup migration
+- Gmail watcher batching is implemented but broader watcher observability/backoff UX can improve
+- snake_case ↔ camelCase normalization layer in `uiLogic.ts` should be replaced with `#[serde(rename_all = "camelCase")]` on Rust structs
 
 ## How to Reason About the System
 If you are modifying Terminus, preserve these invariants:
-- object-first UX (not chat-first)
-- tick-based bounded execution (no loop-to-terminal blocking)
-- deny-by-default primitives
-- approvals for risky writes/sends
-- idempotent side effects + persisted receipts
-- local secrets only (Keychain)
-- no capability growth from learning/guidance paths
+- Object-first UX (not chat-first)
+- Tick-based bounded execution (no loop-to-terminal blocking)
+- Deny-by-default primitives (PrimitiveGuard)
+- Approvals for risky writes/sends (SendEmail always approval)
+- Idempotent side effects + persisted receipts
+- Local secrets only (Keychain)
+- No capability growth from learning/guidance paths
+- Relay is transport, not compute — runner stays local
+- PrimitiveId must remain extensible (MCP direction, long-term)

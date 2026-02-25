@@ -5,6 +5,7 @@ import type {
   EmailConnectionRecord,
   OAuthStartResponse,
   RunnerControlRecord,
+  TransportStatusRecord,
 } from "../types";
 
 type GuideScopeType = "autopilot" | "run" | "approval" | "outcome";
@@ -17,6 +18,11 @@ type Props = {
   oauthRedirectUri: string;
   setOauthRedirectUri: Dispatch<SetStateAction<string>>;
   saveOauthSetup: () => void;
+  transportStatus: TransportStatusRecord | null;
+  relaySubscriberTokenInput: string;
+  setRelaySubscriberTokenInput: Dispatch<SetStateAction<string>>;
+  saveRelaySubscriberToken: () => void;
+  removeRelaySubscriberToken: () => void;
   watcherAutopilotId: string;
   setWatcherAutopilotId: Dispatch<SetStateAction<string>>;
   watcherMaxItems: number;
@@ -59,6 +65,11 @@ export function ConnectionPanel(props: Props) {
     oauthRedirectUri,
     setOauthRedirectUri,
     saveOauthSetup,
+    transportStatus,
+    relaySubscriberTokenInput,
+    setRelaySubscriberTokenInput,
+    saveRelaySubscriberToken,
+    removeRelaySubscriberToken,
     watcherAutopilotId,
     setWatcherAutopilotId,
     watcherMaxItems,
@@ -98,6 +109,42 @@ export function ConnectionPanel(props: Props) {
         <h2>Email Connections</h2>
         <p>Connect Gmail or Microsoft 365 once so inbox automations can run while your Mac is awake.</p>
       </div>
+      <div className="watcher-controls">
+        <label>
+          <span>Execution mode</span>
+          <input
+            value={
+              transportStatus?.mode === "hosted_relay"
+                ? "Hosted (Relay)"
+                : transportStatus?.mode === "byok_local"
+                  ? "BYOK (Local)"
+                  : "Mock (Dev/Test)"
+            }
+            readOnly
+          />
+        </label>
+        <label>
+          <span>Hosted plan token</span>
+          <input
+            type="password"
+            value={relaySubscriberTokenInput}
+            onChange={(event) => setRelaySubscriberTokenInput(event.target.value)}
+            placeholder={transportStatus?.relayConfigured ? "Token saved in Keychain" : "Paste subscriber token"}
+          />
+        </label>
+        <label>
+          <span>&nbsp;</span>
+          <div className="transport-token-actions">
+            <button type="button" onClick={saveRelaySubscriberToken}>Save Token</button>
+            <button type="button" onClick={removeRelaySubscriberToken}>Remove</button>
+          </div>
+        </label>
+      </div>
+      {transportStatus && (
+        <p className="transport-status-note">
+          Relay endpoint: {transportStatus.relayUrl} {transportStatus.relayConfigured ? "• token saved" : "• no token saved"}
+        </p>
+      )}
       <div className="connection-setup-grid">
         <label>
           Provider
@@ -390,4 +437,3 @@ export function ConnectionPanel(props: Props) {
     </section>
   );
 }
-
