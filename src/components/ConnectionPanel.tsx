@@ -5,6 +5,7 @@ import type {
   EmailConnectionRecord,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
+  RelayApprovalSyncStatusRecord,
   RunnerControlRecord,
   TransportStatusRecord,
 } from "../types";
@@ -21,9 +22,11 @@ type Props = {
   saveOauthSetup: () => void;
   transportStatus: TransportStatusRecord | null;
   remoteApprovalReadiness: RemoteApprovalReadinessRecord | null;
+  relaySyncStatus: RelayApprovalSyncStatusRecord | null;
   relayCallbackSecretPreview: string | null;
   issueRelayCallbackSecret: () => void;
   clearRelayCallbackSecret: () => void;
+  tickRelayApprovalSync: () => void;
   relaySubscriberTokenInput: string;
   setRelaySubscriberTokenInput: Dispatch<SetStateAction<string>>;
   saveRelaySubscriberToken: () => void;
@@ -72,9 +75,11 @@ export function ConnectionPanel(props: Props) {
     saveOauthSetup,
     transportStatus,
     remoteApprovalReadiness,
+    relaySyncStatus,
     relayCallbackSecretPreview,
     issueRelayCallbackSecret,
     clearRelayCallbackSecret,
+    tickRelayApprovalSync,
     relaySubscriberTokenInput,
     setRelaySubscriberTokenInput,
     saveRelaySubscriberToken,
@@ -177,9 +182,22 @@ export function ConnectionPanel(props: Props) {
               <div className="transport-token-actions">
                 <button type="button" onClick={issueRelayCallbackSecret}>Issue Callback Secret</button>
                 <button type="button" onClick={clearRelayCallbackSecret}>Clear Secret</button>
+                <button type="button" onClick={tickRelayApprovalSync}>Sync Remote Approvals</button>
               </div>
             </label>
           </div>
+          {relaySyncStatus && (
+            <p className="transport-status-note">
+              Remote sync: {relaySyncStatus.status}
+              {relaySyncStatus.backoffUntilMs
+                ? ` • retrying after ${new Date(relaySyncStatus.backoffUntilMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                : ""}
+              {relaySyncStatus.lastProcessedCount > 0
+                ? ` • applied ${relaySyncStatus.lastProcessedCount} decision${relaySyncStatus.lastProcessedCount === 1 ? "" : "s"} last tick`
+                : ""}
+              {relaySyncStatus.lastError ? ` • ${relaySyncStatus.lastError}` : ""}
+            </p>
+          )}
           {relayCallbackSecretPreview && (
             <p className="transport-status-note">
               New callback secret (copy once into relay): {relayCallbackSecretPreview}

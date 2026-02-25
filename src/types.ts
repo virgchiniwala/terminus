@@ -94,6 +94,26 @@ export interface RelayCallbackSecretIssuedRecord {
   callbackSecret: string;
 }
 
+export interface RelayApprovalSyncStatusRecord {
+  enabled: boolean;
+  relayConfigured: boolean;
+  callbackReady: boolean;
+  deviceId: string;
+  status: string;
+  lastPollAtMs: number | null;
+  lastSuccessAtMs: number | null;
+  consecutiveFailures: number;
+  backoffUntilMs: number | null;
+  lastError: string | null;
+  lastProcessedCount: number;
+  totalProcessedCount: number;
+}
+
+export interface RelayApprovalSyncTickRecord {
+  status: RelayApprovalSyncStatusRecord;
+  appliedCount: number;
+}
+
 export interface AutopilotSendPolicyRecord {
   autopilotId: string;
   allowSending: boolean;

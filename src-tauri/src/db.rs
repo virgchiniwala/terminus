@@ -310,6 +310,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               created_at_ms INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS relay_sync_state (
+              channel TEXT PRIMARY KEY,
+              last_poll_at_ms INTEGER,
+              last_success_at_ms INTEGER,
+              consecutive_failures INTEGER NOT NULL DEFAULT 0,
+              backoff_until_ms INTEGER,
+              last_error TEXT,
+              last_processed_count INTEGER NOT NULL DEFAULT 0,
+              total_processed_count INTEGER NOT NULL DEFAULT 0,
+              updated_at_ms INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS clarifications (
               id TEXT PRIMARY KEY,
               run_id TEXT NOT NULL,
@@ -703,6 +715,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     ensure_column(connection, "approvals", "decided_by", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "channel", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "actor_label", "TEXT")?;
+    ensure_column(
+        connection,
+        "relay_sync_state",
+        "last_processed_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "relay_sync_state",
+        "total_processed_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(connection, "decision_events", "client_event_id", "TEXT")?;
     ensure_column(
         connection,
@@ -873,6 +897,12 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to create mission events index: {e}"))?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_relay_sync_state_backoff ON relay_sync_state(backoff_until_ms)",
+            [],
+        )
+        .map_err(|e| format!("Failed to create relay sync state index: {e}"))?;
     connection
         .execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clarifications_single_pending ON clarifications(run_id, step_id, status) WHERE status = 'pending'",

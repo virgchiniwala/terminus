@@ -13,6 +13,8 @@ import type {
   MissionTickResult,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
+  RelayApprovalSyncStatusRecord,
+  RelayApprovalSyncTickRecord,
   RelayCallbackSecretIssuedRecord,
   RecipeKind,
   RunDiagnosticRecord,
@@ -102,6 +104,7 @@ export function App() {
   const [connectionsMessage, setConnectionsMessage] = useState<string | null>(null);
   const [transportStatus, setTransportStatus] = useState<TransportStatusRecord | null>(null);
   const [remoteApprovalReadiness, setRemoteApprovalReadiness] = useState<RemoteApprovalReadinessRecord | null>(null);
+  const [relaySyncStatus, setRelaySyncStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
   const [relayCallbackSecretPreview, setRelayCallbackSecretPreview] = useState<string | null>(null);
   const [relaySubscriberTokenInput, setRelaySubscriberTokenInput] = useState("");
   const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
@@ -349,6 +352,15 @@ export function App() {
       });
   }, []);
 
+  const loadRelaySyncStatus = useCallback(() => {
+    invoke<RelayApprovalSyncStatusRecord>("get_relay_sync_status")
+      .then((payload) => setRelaySyncStatus(payload))
+      .catch((err) => {
+        console.error("Failed to load relay sync status:", err);
+        setConnectionsMessage((prev) => prev ?? "Could not load remote sync status.");
+      });
+  }, []);
+
   const loadRunnerControl = useCallback(() => {
     invoke<RunnerControlRecord>("get_runner_control")
       .then((payload: any) => {
@@ -484,11 +496,12 @@ export function App() {
     loadConnections();
     loadTransportStatus();
     loadRemoteApprovalReadiness();
+    loadRelaySyncStatus();
     loadRunnerControl();
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
-  }, [loadSnapshot, loadConnections, loadTransportStatus, loadRemoteApprovalReadiness, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+  }, [loadSnapshot, loadConnections, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -506,6 +519,7 @@ export function App() {
           loadClarifications();
           loadRunDiagnostics();
           loadMissions();
+          loadRelaySyncStatus();
           if (selectedMissionId) {
             loadMissionDetail(selectedMissionId);
           }
@@ -515,7 +529,7 @@ export function App() {
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, selectedMissionId]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, selectedMissionId]);
 
   useEffect(() => {
     return () => {
@@ -648,6 +662,7 @@ export function App() {
       .then((payload) => {
         setTransportStatus(payload);
         loadRemoteApprovalReadiness();
+        loadRelaySyncStatus();
         setRelaySubscriberTokenInput("");
         setConnectionsMessage("Hosted plan token saved to Keychain.");
       })
@@ -663,6 +678,7 @@ export function App() {
       .then((payload) => {
         setTransportStatus(payload);
         loadRemoteApprovalReadiness();
+        loadRelaySyncStatus();
         setRelaySubscriberTokenInput("");
         setConnectionsMessage("Hosted plan token removed.");
       })
@@ -678,6 +694,7 @@ export function App() {
     invoke<RelayCallbackSecretIssuedRecord>("issue_relay_callback_secret")
       .then((payload) => {
         setRemoteApprovalReadiness(payload.readiness);
+        loadRelaySyncStatus();
         setRelayCallbackSecretPreview(payload.callbackSecret);
         setConnectionsMessage("Relay callback secret issued. Copy it into the relay once.");
       })
@@ -693,11 +710,37 @@ export function App() {
     invoke<RemoteApprovalReadinessRecord>("clear_relay_callback_secret")
       .then((payload) => {
         setRemoteApprovalReadiness(payload);
+        loadRelaySyncStatus();
         setConnectionsMessage("Relay callback secret cleared.");
       })
       .catch((err) => {
         console.error("Failed to clear relay callback secret:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not clear callback secret.");
+      });
+  };
+
+  const tickRelayApprovalSync = () => {
+    setConnectionsMessage(null);
+    invoke<RelayApprovalSyncTickRecord>("tick_relay_approval_sync")
+      .then((payload) => {
+        setRelaySyncStatus(payload.status);
+        const applied = payload.appliedCount ?? 0;
+        if (applied > 0) {
+          setConnectionsMessage(`Remote approvals synced. Applied ${applied} decision${applied === 1 ? "" : "s"}.`);
+          loadSnapshot();
+          loadClarifications();
+          loadRunDiagnostics();
+          loadMissions();
+          if (selectedMissionId) {
+            loadMissionDetail(selectedMissionId);
+          }
+        } else {
+          setConnectionsMessage("Remote approval sync complete.");
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to sync remote approvals:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not sync remote approvals.");
       });
   };
 
@@ -1214,9 +1257,11 @@ export function App() {
           saveOauthSetup={saveOauthSetup}
           transportStatus={transportStatus}
           remoteApprovalReadiness={remoteApprovalReadiness}
+          relaySyncStatus={relaySyncStatus}
           relayCallbackSecretPreview={relayCallbackSecretPreview}
           issueRelayCallbackSecret={issueRelayCallbackSecret}
           clearRelayCallbackSecret={clearRelayCallbackSecret}
+          tickRelayApprovalSync={tickRelayApprovalSync}
           relaySubscriberTokenInput={relaySubscriberTokenInput}
           setRelaySubscriberTokenInput={setRelaySubscriberTokenInput}
           saveRelaySubscriberToken={saveRelaySubscriberToken}
