@@ -23,10 +23,12 @@ type Props = {
   transportStatus: TransportStatusRecord | null;
   remoteApprovalReadiness: RemoteApprovalReadinessRecord | null;
   relaySyncStatus: RelayApprovalSyncStatusRecord | null;
+  relayPushStatus: RelayApprovalSyncStatusRecord | null;
   relayCallbackSecretPreview: string | null;
   issueRelayCallbackSecret: () => void;
   clearRelayCallbackSecret: () => void;
   tickRelayApprovalSync: () => void;
+  tickRelayApprovalPush: () => void;
   relaySubscriberTokenInput: string;
   setRelaySubscriberTokenInput: Dispatch<SetStateAction<string>>;
   saveRelaySubscriberToken: () => void;
@@ -76,10 +78,12 @@ export function ConnectionPanel(props: Props) {
     transportStatus,
     remoteApprovalReadiness,
     relaySyncStatus,
+    relayPushStatus,
     relayCallbackSecretPreview,
     issueRelayCallbackSecret,
     clearRelayCallbackSecret,
     tickRelayApprovalSync,
+    tickRelayApprovalPush,
     relaySubscriberTokenInput,
     setRelaySubscriberTokenInput,
     saveRelaySubscriberToken,
@@ -183,6 +187,7 @@ export function ConnectionPanel(props: Props) {
                 <button type="button" onClick={issueRelayCallbackSecret}>Issue Callback Secret</button>
                 <button type="button" onClick={clearRelayCallbackSecret}>Clear Secret</button>
                 <button type="button" onClick={tickRelayApprovalSync}>Sync Remote Approvals</button>
+                <button type="button" onClick={tickRelayApprovalPush}>Listen Once (Push)</button>
               </div>
             </label>
           </div>
@@ -196,6 +201,18 @@ export function ConnectionPanel(props: Props) {
                 ? ` • applied ${relaySyncStatus.lastProcessedCount} decision${relaySyncStatus.lastProcessedCount === 1 ? "" : "s"} last tick`
                 : ""}
               {relaySyncStatus.lastError ? ` • ${relaySyncStatus.lastError}` : ""}
+            </p>
+          )}
+          {relayPushStatus && (
+            <p className="transport-status-note">
+              Push channel: {relayPushStatus.status}
+              {relayPushStatus.backoffUntilMs
+                ? ` • retrying after ${new Date(relayPushStatus.backoffUntilMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                : ""}
+              {relayPushStatus.lastProcessedCount > 0
+                ? ` • applied ${relayPushStatus.lastProcessedCount} decision${relayPushStatus.lastProcessedCount === 1 ? "" : "s"} last listen`
+                : ""}
+              {relayPushStatus.lastError ? ` • ${relayPushStatus.lastError}` : ""}
             </p>
           )}
           {relayCallbackSecretPreview && (

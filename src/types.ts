@@ -95,6 +95,7 @@ export interface RelayCallbackSecretIssuedRecord {
 }
 
 export interface RelayApprovalSyncStatusRecord {
+  channel: "poll" | "push" | string;
   enabled: boolean;
   relayConfigured: boolean;
   callbackReady: boolean;
