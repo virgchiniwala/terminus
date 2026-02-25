@@ -4,6 +4,13 @@ Last updated: 2026-02-25
 ## Fresh Session Note
 - For the agentic-orchestration plan, implemented supervisor diagnostics slice, and latest cross-session context summary, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
 
+## Current Work (PR45)
+- Relay multi-device routing + device targeting foundations (in progress)
+  - device registry and preferred-target routing policy
+  - local desktop auto-registration / heartbeat
+  - relay sync/push gating when this device is standby or manual-target-only
+  - minimal Connections UI for relay devices and fallback policy
+
 ## What Is Shipped
 - Object-first desktop shell and home surfaces
 - Shared plan schema for Website Monitor, Inbox Triage, Daily Brief
@@ -236,11 +243,16 @@ Last updated: 2026-02-25
   - trigger mode support (`polling`, `gmail_pubsub`, `auto`) with fallback to polling when PubSub is inactive/expired/error
   - Connections panel shows Gmail PubSub mode, watch health, config fields, and recent PubSub events
   - backend tests cover envelope parsing, event dedupe, duplicate callback dedupe, and fetch failure recording
+- Relay multi-device routing foundations (PR45):
+  - new `relay_devices` + `relay_routing_policy` tables (migration-safe, seeded policy singleton)
+  - relay status/readiness paths auto-register this desktop device and maintain last-seen timestamps
+  - relay sync/push returns `device_not_target` with human-readable message when routing policy blocks local pulls
+  - Connections panel shows relay device list (preferred/standby/offline/disabled) and offline fallback policy control
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
-- `cd src-tauri && cargo test` passes (91 tests)
+- `cd src-tauri && cargo test` passes (93 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes

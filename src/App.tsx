@@ -18,9 +18,11 @@ import type {
   GmailPubSubStatusRecord,
   CodexOauthStatusRecord,
   RemoteApprovalReadinessRecord,
+  RelayDeviceRecord,
   RelayApprovalSyncStatusRecord,
   RelayApprovalSyncTickRecord,
   RelayCallbackSecretIssuedRecord,
+  RelayRoutingPolicyRecord,
   RecipeKind,
   RunDiagnosticRecord,
   RunnerControlRecord,
@@ -165,6 +167,9 @@ export function App() {
   const [remoteApprovalReadiness, setRemoteApprovalReadiness] = useState<RemoteApprovalReadinessRecord | null>(null);
   const [relaySyncStatus, setRelaySyncStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
   const [relayPushStatus, setRelayPushStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
+  const [relayDevices, setRelayDevices] = useState<RelayDeviceRecord[]>([]);
+  const [relayRoutingPolicy, setRelayRoutingPolicy] = useState<RelayRoutingPolicyRecord | null>(null);
+  const [relayFallbackPolicyInput, setRelayFallbackPolicyInput] = useState("queue_until_online");
   const [relayCallbackSecretPreview, setRelayCallbackSecretPreview] = useState<string | null>(null);
   const [relaySubscriberTokenInput, setRelaySubscriberTokenInput] = useState("");
   const [apiKeyRefName, setApiKeyRefName] = useState("crm_prod");
@@ -614,6 +619,46 @@ export function App() {
       });
   }, []);
 
+  const loadRelayDevices = useCallback(() => {
+    invoke<RelayDeviceRecord[]>("list_relay_devices")
+      .then((rows: any[]) => {
+        setRelayDevices(
+          rows.map((row) => ({
+            deviceId: row.deviceId ?? row.device_id,
+            deviceLabel: row.deviceLabel ?? row.device_label ?? "Device",
+            status: row.status ?? "active",
+            lastSeenAtMs: row.lastSeenAtMs ?? row.last_seen_at_ms ?? null,
+            capabilitiesJson: row.capabilitiesJson ?? row.capabilities_json ?? "{}",
+            isPreferredTarget:
+              (row.isPreferredTarget ?? row.is_preferred_target ?? false) === true ||
+              Number(row.isPreferredTarget ?? row.is_preferred_target ?? 0) === 1,
+            updatedAtMs: row.updatedAtMs ?? row.updated_at_ms ?? 0,
+          }))
+        );
+      })
+      .catch((err) => {
+        console.error("Failed to load relay devices:", err);
+        setConnectionsMessage((prev) => prev ?? "Could not load relay device routing.");
+      });
+  }, []);
+
+  const loadRelayRoutingPolicy = useCallback(() => {
+    invoke<RelayRoutingPolicyRecord>("get_relay_routing_policy")
+      .then((payload: any) => {
+        const normalized: RelayRoutingPolicyRecord = {
+          approvalTargetMode: payload.approvalTargetMode ?? payload.approval_target_mode ?? "preferred_only",
+          triggerTargetMode: payload.triggerTargetMode ?? payload.trigger_target_mode ?? "preferred_only",
+          fallbackPolicy: payload.fallbackPolicy ?? payload.fallback_policy ?? "queue_until_online",
+          updatedAtMs: payload.updatedAtMs ?? payload.updated_at_ms ?? 0,
+        };
+        setRelayRoutingPolicy(normalized);
+        setRelayFallbackPolicyInput(normalized.fallbackPolicy || "queue_until_online");
+      })
+      .catch((err) => {
+        console.error("Failed to load relay routing policy:", err);
+      });
+  }, []);
+
   const loadRunnerControl = useCallback(() => {
     invoke<RunnerControlRecord>("get_runner_control")
       .then((payload: any) => {
@@ -805,6 +850,8 @@ export function App() {
     loadTransportStatus();
     loadCodexOauthStatus();
     loadRemoteApprovalReadiness();
+    loadRelayDevices();
+    loadRelayRoutingPolicy();
     loadRelaySyncStatus();
     loadRelayPushStatus();
     loadGmailPubSubStatus();
@@ -814,7 +861,7 @@ export function App() {
     loadRunDiagnostics();
     loadMissions();
     loadWebhookTriggers();
-  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadCodexOauthStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadGmailPubSubStatus, loadGmailPubSubEvents, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
+  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadCodexOauthStatus, loadRemoteApprovalReadiness, loadRelayDevices, loadRelayRoutingPolicy, loadRelaySyncStatus, loadRelayPushStatus, loadGmailPubSubStatus, loadGmailPubSubEvents, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -833,6 +880,8 @@ export function App() {
           loadRunDiagnostics();
           loadMissions();
           loadWebhookTriggers();
+          loadRelayDevices();
+          loadRelayRoutingPolicy();
           loadRelaySyncStatus();
           loadRelayPushStatus();
           loadGmailPubSubStatus();
@@ -847,7 +896,7 @@ export function App() {
         });
     }, 10_000);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelaySyncStatus, loadRelayPushStatus, loadGmailPubSubStatus, loadGmailPubSubEvents, loadOnboardingState, loadWebhookTriggers, selectedMissionId]);
+  }, [loadSnapshot, loadClarifications, loadRunDiagnostics, loadMissions, loadMissionDetail, loadRelayDevices, loadRelayRoutingPolicy, loadRelaySyncStatus, loadRelayPushStatus, loadGmailPubSubStatus, loadGmailPubSubEvents, loadOnboardingState, loadWebhookTriggers, selectedMissionId]);
 
   useEffect(() => {
     if (!selectedWebhookTriggerId) {
@@ -1267,6 +1316,63 @@ export function App() {
         setConnectionsMessage(typeof err === "string" ? err : "Could not listen for remote approvals.");
       });
   };
+
+  const refreshRelayRouting = useCallback(() => {
+    loadRelayDevices();
+    loadRelayRoutingPolicy();
+    loadRelaySyncStatus();
+    loadRelayPushStatus();
+  }, [loadRelayDevices, loadRelayRoutingPolicy, loadRelaySyncStatus, loadRelayPushStatus]);
+
+  const setRelayDeviceStatus = useCallback((deviceId: string, status: string) => {
+    setConnectionsMessage(null);
+    invoke<RelayDeviceRecord[]>("set_relay_device_status", { input: { deviceId, status } })
+      .then(() => {
+        refreshRelayRouting();
+        setConnectionsMessage("Relay device status updated.");
+      })
+      .catch((err) => {
+        console.error("Failed to update relay device status:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not update relay device status.");
+      });
+  }, [refreshRelayRouting]);
+
+  const setPreferredRelayDevice = useCallback((deviceId: string) => {
+    setConnectionsMessage(null);
+    invoke<RelayDeviceRecord[]>("set_preferred_relay_device", { deviceId })
+      .then(() => {
+        refreshRelayRouting();
+        setConnectionsMessage("Preferred relay device updated.");
+      })
+      .catch((err) => {
+        console.error("Failed to set preferred relay device:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not set preferred relay device.");
+      });
+  }, [refreshRelayRouting]);
+
+  const saveRelayRoutingPolicy = useCallback(() => {
+    const current = relayRoutingPolicy;
+    if (!current) {
+      setConnectionsMessage("Relay routing policy is not loaded yet.");
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<RelayRoutingPolicyRecord>("update_relay_routing_policy", {
+      input: {
+        approvalTargetMode: current.approvalTargetMode,
+        triggerTargetMode: current.triggerTargetMode,
+        fallbackPolicy: relayFallbackPolicyInput,
+      },
+    })
+      .then(() => {
+        refreshRelayRouting();
+        setConnectionsMessage("Relay routing policy updated.");
+      })
+      .catch((err) => {
+        console.error("Failed to update relay routing policy:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not update relay routing policy.");
+      });
+  }, [relayRoutingPolicy, relayFallbackPolicyInput, refreshRelayRouting]);
 
   const persistOnboardingState = useCallback(
     (overrides?: Partial<OnboardingStateRecord>) => {
@@ -2312,6 +2418,14 @@ export function App() {
           remoteApprovalReadiness={remoteApprovalReadiness}
           relaySyncStatus={relaySyncStatus}
           relayPushStatus={relayPushStatus}
+          relayDevices={relayDevices}
+          relayRoutingPolicy={relayRoutingPolicy}
+          relayFallbackPolicyInput={relayFallbackPolicyInput}
+          setRelayFallbackPolicyInput={setRelayFallbackPolicyInput}
+          refreshRelayRouting={refreshRelayRouting}
+          setRelayDeviceStatus={setRelayDeviceStatus}
+          setPreferredRelayDevice={setPreferredRelayDevice}
+          saveRelayRoutingPolicy={saveRelayRoutingPolicy}
           relayCallbackSecretPreview={relayCallbackSecretPreview}
           issueRelayCallbackSecret={issueRelayCallbackSecret}
           clearRelayCallbackSecret={clearRelayCallbackSecret}

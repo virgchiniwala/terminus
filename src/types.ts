@@ -188,6 +188,23 @@ export interface RelayApprovalSyncTickRecord {
   appliedCount: number;
 }
 
+export interface RelayDeviceRecord {
+  deviceId: string;
+  deviceLabel: string;
+  status: "active" | "standby" | "offline" | "disabled" | string;
+  lastSeenAtMs: number | null;
+  capabilitiesJson: string;
+  isPreferredTarget: boolean;
+  updatedAtMs: number;
+}
+
+export interface RelayRoutingPolicyRecord {
+  approvalTargetMode: "preferred_only" | "manual_target_only" | string;
+  triggerTargetMode: "preferred_only" | "manual_target_only" | string;
+  fallbackPolicy: "queue_until_online" | "fallback_to_standby" | string;
+  updatedAtMs: number;
+}
+
 export interface WebhookTriggerRecord {
   id: string;
   autopilotId: string;
