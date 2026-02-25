@@ -4,6 +4,10 @@ use std::process::{Command, Stdio};
 
 pub const RELAY_SUBSCRIBER_TOKEN_SERVICE: &str = "terminus.relay.subscriber_token";
 pub const RELAY_SUBSCRIBER_TOKEN_ACCOUNT: &str = "TerminusRelay";
+pub const RELAY_CALLBACK_SECRET_SERVICE: &str = "terminus.relay.callback_secret";
+pub const RELAY_CALLBACK_SECRET_ACCOUNT: &str = "TerminusRelayCallback";
+pub const RELAY_DEVICE_ID_SERVICE: &str = "terminus.relay.device_id";
+pub const RELAY_DEVICE_ID_ACCOUNT: &str = "TerminusRelayDevice";
 
 pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, ProviderError> {
     let service = provider_kind.keychain_service_name();
@@ -170,4 +174,28 @@ pub fn delete_relay_subscriber_token() -> Result<(), ProviderError> {
         RELAY_SUBSCRIBER_TOKEN_SERVICE,
         RELAY_SUBSCRIBER_TOKEN_ACCOUNT,
     )
+}
+
+pub fn get_relay_callback_secret() -> Result<Option<String>, ProviderError> {
+    get_secret(RELAY_CALLBACK_SECRET_SERVICE, RELAY_CALLBACK_SECRET_ACCOUNT)
+}
+
+pub fn set_relay_callback_secret(secret: &str) -> Result<(), ProviderError> {
+    set_secret(
+        RELAY_CALLBACK_SECRET_SERVICE,
+        RELAY_CALLBACK_SECRET_ACCOUNT,
+        secret,
+    )
+}
+
+pub fn delete_relay_callback_secret() -> Result<(), ProviderError> {
+    delete_secret(RELAY_CALLBACK_SECRET_SERVICE, RELAY_CALLBACK_SECRET_ACCOUNT)
+}
+
+pub fn get_relay_device_id() -> Result<Option<String>, ProviderError> {
+    get_secret(RELAY_DEVICE_ID_SERVICE, RELAY_DEVICE_ID_ACCOUNT)
+}
+
+pub fn set_relay_device_id(device_id: &str) -> Result<(), ProviderError> {
+    set_secret(RELAY_DEVICE_ID_SERVICE, RELAY_DEVICE_ID_ACCOUNT, device_id)
 }

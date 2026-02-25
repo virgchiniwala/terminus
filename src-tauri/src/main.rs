@@ -12,6 +12,7 @@ mod schema;
 mod transport;
 mod web;
 
+use base64::Engine as _;
 use guidance_utils::{
     classify_guidance, compute_missed_cycles, normalize_guidance_instruction, sanitize_log_message,
     GuidanceMode,
@@ -24,6 +25,7 @@ use runner::{ApprovalRecord, ClarificationRecord, RunReceipt, RunRecord, RunnerE
 use rusqlite::OptionalExtension;
 use schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -142,6 +144,37 @@ struct ApprovalResolutionContextInput {
     reason: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayApprovalCallbackInput {
+    request_id: String,
+    approval_id: String,
+    decision: String, // approve|reject
+    callback_secret: String,
+    actor_label: Option<String>,
+    channel: Option<String>,
+    reason: Option<String>,
+    issued_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteApprovalReadinessResponse {
+    transport_mode: String,
+    relay_configured: bool,
+    relay_url: String,
+    callback_ready: bool,
+    device_id: String,
+    pending_approvals: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayCallbackSecretIssuedResponse {
+    readiness: RemoteApprovalReadinessResponse,
+    callback_secret: String,
+}
+
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
     let db_path = state
         .db_path
@@ -184,6 +217,50 @@ fn list_primary_outcomes(
 ) -> Result<Vec<db::PrimaryOutcomeRecord>, String> {
     let connection = open_connection(&state)?;
     db::list_primary_outcomes(&connection, limit.unwrap_or(50))
+}
+
+#[tauri::command]
+fn get_remote_approval_readiness(
+    state: tauri::State<AppState>,
+) -> Result<RemoteApprovalReadinessResponse, String> {
+    let status = ProviderRuntime::default().transport_status();
+    let callback_ready = providers::keychain::get_relay_callback_secret()
+        .map_err(|e| e.to_string())?
+        .is_some_and(|v| !v.trim().is_empty());
+    let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
+    let connection = open_connection(&state)?;
+    let pending_approvals = RunnerEngine::list_pending_approvals(&connection)
+        .map_err(|e| e.to_string())?
+        .len();
+    Ok(RemoteApprovalReadinessResponse {
+        transport_mode: status.mode.as_str().to_string(),
+        relay_configured: status.relay_configured,
+        relay_url: status.relay_url,
+        callback_ready,
+        device_id,
+        pending_approvals,
+    })
+}
+
+#[tauri::command]
+fn issue_relay_callback_secret(
+    state: tauri::State<AppState>,
+) -> Result<RelayCallbackSecretIssuedResponse, String> {
+    let secret = generate_secret_token("relaycb");
+    providers::keychain::set_relay_callback_secret(&secret).map_err(|e| e.to_string())?;
+    let readiness = get_remote_approval_readiness(state)?;
+    Ok(RelayCallbackSecretIssuedResponse {
+        readiness,
+        callback_secret: secret,
+    })
+}
+
+#[tauri::command]
+fn clear_relay_callback_secret(
+    state: tauri::State<AppState>,
+) -> Result<RemoteApprovalReadinessResponse, String> {
+    providers::keychain::delete_relay_callback_secret().map_err(|e| e.to_string())?;
+    get_remote_approval_readiness(state)
 }
 
 #[tauri::command]
@@ -393,6 +470,51 @@ fn reject_run_approval_remote(
         input.channel.as_deref().or(Some("relay")),
         input.actor_label.as_deref(),
     )
+}
+
+#[tauri::command]
+fn resolve_relay_approval_callback(
+    state: tauri::State<AppState>,
+    input: RelayApprovalCallbackInput,
+) -> Result<RunRecord, String> {
+    let mut connection = open_connection(&state)?;
+    validate_relay_callback_auth(&input)?;
+    if let Some(existing) = get_relay_callback_existing_run(&connection, &input.request_id)? {
+        return Ok(existing);
+    }
+    let channel = input.channel.as_deref().or(Some("relay_callback"));
+    let actor = input.actor_label.as_deref();
+    if let Err(err) = reserve_relay_callback_event(
+        &connection,
+        &input.request_id,
+        &input.approval_id,
+        &input.decision,
+        channel,
+        actor,
+    ) {
+        if err.contains("already processed") {
+            if let Some(existing) = get_relay_callback_existing_run(&connection, &input.request_id)?
+            {
+                return Ok(existing);
+            }
+        }
+        return Err(err);
+    }
+    let run = match input.decision.trim().to_ascii_lowercase().as_str() {
+        "approve" | "approved" => {
+            approve_run_approval_with_context(&mut connection, &input.approval_id, channel, actor)?
+        }
+        "reject" | "rejected" => reject_run_approval_with_context(
+            &mut connection,
+            &input.approval_id,
+            input.reason.clone(),
+            channel,
+            actor,
+        )?,
+        _ => return Err("Unknown approval decision. Use approve or reject.".to_string()),
+    };
+    update_relay_callback_event_status(&connection, &input.request_id, "applied")?;
+    Ok(run)
 }
 
 #[tauri::command]
@@ -962,6 +1084,134 @@ fn compact_learning_data(
         dry_run.unwrap_or(false),
     )
     .map_err(|e| e.to_string())
+}
+
+fn generate_secret_token(prefix: &str) -> String {
+    let raw = format!(
+        "{}:{}:{}:{}",
+        prefix,
+        now_ms(),
+        make_main_id("tok"),
+        std::process::id()
+    );
+    let digest = Sha256::digest(raw.as_bytes());
+    format!(
+        "{}_{}",
+        prefix,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    )
+}
+
+fn ensure_relay_device_id() -> Result<String, providers::types::ProviderError> {
+    if let Some(existing) =
+        providers::keychain::get_relay_device_id()?.filter(|v| !v.trim().is_empty())
+    {
+        return Ok(existing);
+    }
+    let device_id = generate_secret_token("device");
+    providers::keychain::set_relay_device_id(&device_id)?;
+    Ok(device_id)
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn validate_relay_callback_auth(input: &RelayApprovalCallbackInput) -> Result<(), String> {
+    let request_id = input.request_id.trim();
+    if request_id.is_empty() || request_id.len() > 120 {
+        return Err("Relay callback request id is invalid.".to_string());
+    }
+    let expected = providers::keychain::get_relay_callback_secret()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "Remote approvals are not ready yet. Generate a callback secret first.".to_string()
+        })?;
+    if !constant_time_eq(expected.trim(), input.callback_secret.trim()) {
+        return Err("Relay callback authentication failed.".to_string());
+    }
+    let now = now_ms();
+    if input.issued_at_ms <= 0 || (now - input.issued_at_ms).abs() > 15 * 60 * 1000 {
+        return Err("Relay callback request expired. Retry from Terminus relay.".to_string());
+    }
+    Ok(())
+}
+
+fn get_relay_callback_existing_run(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+) -> Result<Option<RunRecord>, String> {
+    let approval_id: Option<String> = connection
+        .query_row(
+            "SELECT approval_id FROM relay_callback_events WHERE request_id = ?1 LIMIT 1",
+            rusqlite::params![request_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read relay callback history: {e}"))?;
+    let Some(approval_id) = approval_id else {
+        return Ok(None);
+    };
+    let approval = RunnerEngine::get_approval_for_external(connection, &approval_id)
+        .map_err(|e| e.to_string())?;
+    let run = RunnerEngine::get_run_for_external(connection, &approval.run_id)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(run))
+}
+
+fn reserve_relay_callback_event(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    approval_id: &str,
+    decision: &str,
+    channel: Option<&str>,
+    actor_label: Option<&str>,
+) -> Result<(), String> {
+    let id = make_main_id("relay_cb");
+    let inserted = connection
+        .execute(
+            "INSERT OR IGNORE INTO relay_callback_events
+             (id, request_id, approval_id, decision, status, channel, actor_label, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                id,
+                request_id.trim(),
+                approval_id,
+                decision.trim().to_ascii_lowercase(),
+                "received",
+                sanitize_approval_resolution_field(channel, 32),
+                sanitize_approval_resolution_field(actor_label, 80),
+                now_ms()
+            ],
+        )
+        .map_err(|e| format!("Could not record relay callback event: {e}"))?;
+    if inserted == 0 {
+        return Err("Relay callback request was already processed.".to_string());
+    }
+    Ok(())
+}
+
+fn update_relay_callback_event_status(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE relay_callback_events SET status = ?1 WHERE request_id = ?2",
+            rusqlite::params![status, request_id.trim()],
+        )
+        .map_err(|e| format!("Could not update relay callback status: {e}"))?;
+    Ok(())
 }
 
 fn sanitize_approval_resolution_field(value: Option<&str>, max_len: usize) -> Option<String> {
@@ -1688,6 +1938,9 @@ fn main() {
             get_home_snapshot,
             list_primary_outcomes,
             get_transport_status,
+            get_remote_approval_readiness,
+            issue_relay_callback_secret,
+            clear_relay_callback_secret,
             set_subscriber_token,
             remove_subscriber_token,
             draft_intent,
@@ -1703,6 +1956,7 @@ fn main() {
             approve_run_approval_remote,
             reject_run_approval,
             reject_run_approval_remote,
+            resolve_relay_approval_callback,
             list_pending_approvals,
             list_pending_clarifications,
             list_run_diagnostics,

@@ -4,6 +4,7 @@ import type {
   AutopilotSendPolicyRecord,
   EmailConnectionRecord,
   OAuthStartResponse,
+  RemoteApprovalReadinessRecord,
   RunnerControlRecord,
   TransportStatusRecord,
 } from "../types";
@@ -19,6 +20,10 @@ type Props = {
   setOauthRedirectUri: Dispatch<SetStateAction<string>>;
   saveOauthSetup: () => void;
   transportStatus: TransportStatusRecord | null;
+  remoteApprovalReadiness: RemoteApprovalReadinessRecord | null;
+  relayCallbackSecretPreview: string | null;
+  issueRelayCallbackSecret: () => void;
+  clearRelayCallbackSecret: () => void;
   relaySubscriberTokenInput: string;
   setRelaySubscriberTokenInput: Dispatch<SetStateAction<string>>;
   saveRelaySubscriberToken: () => void;
@@ -66,6 +71,10 @@ export function ConnectionPanel(props: Props) {
     setOauthRedirectUri,
     saveOauthSetup,
     transportStatus,
+    remoteApprovalReadiness,
+    relayCallbackSecretPreview,
+    issueRelayCallbackSecret,
+    clearRelayCallbackSecret,
     relaySubscriberTokenInput,
     setRelaySubscriberTokenInput,
     saveRelaySubscriberToken,
@@ -144,6 +153,39 @@ export function ConnectionPanel(props: Props) {
         <p className="transport-status-note">
           Relay endpoint: {transportStatus.relayUrl} {transportStatus.relayConfigured ? "• token saved" : "• no token saved"}
         </p>
+      )}
+      {remoteApprovalReadiness && (
+        <>
+          <div className="watcher-controls">
+            <label>
+              <span>Remote approvals</span>
+              <input
+                readOnly
+                value={remoteApprovalReadiness.callbackReady ? "Ready" : "Not ready"}
+              />
+            </label>
+            <label>
+              <span>Relay device ID</span>
+              <input readOnly value={remoteApprovalReadiness.deviceId} />
+            </label>
+            <label>
+              <span>Pending approvals</span>
+              <input readOnly value={String(remoteApprovalReadiness.pendingApprovals)} />
+            </label>
+            <label>
+              <span>&nbsp;</span>
+              <div className="transport-token-actions">
+                <button type="button" onClick={issueRelayCallbackSecret}>Issue Callback Secret</button>
+                <button type="button" onClick={clearRelayCallbackSecret}>Clear Secret</button>
+              </div>
+            </label>
+          </div>
+          {relayCallbackSecretPreview && (
+            <p className="transport-status-note">
+              New callback secret (copy once into relay): {relayCallbackSecretPreview}
+            </p>
+          )}
+        </>
       )}
       <div className="connection-setup-grid">
         <label>

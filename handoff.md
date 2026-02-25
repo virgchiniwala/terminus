@@ -167,6 +167,12 @@ Last updated: 2026-02-26
   - local and remote approval commands now use shared wrappers around canonical `RunnerEngine::approve/reject`
   - approval decision provenance persisted on `approvals` (`decided_channel`, `decided_by`)
   - terminal receipts now include `approval_resolutions[]` (approval id, step id, status, timestamp, channel, actor)
+- Relay callback auth + readiness (desktop-side):
+  - `resolve_relay_approval_callback` command validates callback secret and bounded request age, then resolves approvals via canonical codepath
+  - relay callback replay/idempotency table: `relay_callback_events` (`request_id` unique)
+  - Keychain stores relay callback secret + stable relay device id (for relay registration/readiness)
+  - Connections panel shows remote approval readiness, device id, callback secret status, and pending approval count
+  - callback secret can be issued/cleared from UI via Tauri commands (`issue_relay_callback_secret`, `clear_relay_callback_secret`)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -192,7 +198,7 @@ Last updated: 2026-02-26
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P1 relay push channel + Slack/mobile approval routing (WebSocket/SSE + relay callback auth)
+  1. P1 relay push channel + Slack/mobile approval routing (WebSocket/SSE + relay server integration to desktop callback contract)
   2. P2 interview-driven onboarding (agent-guided first result before configuration)
   3. P0.11/P0.12 Voice object + rule extraction approval flow
 
