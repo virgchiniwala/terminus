@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-24
+Last updated: 2026-02-26
 
 ## Fresh Session Note
 - For the agentic-orchestration plan, implemented supervisor diagnostics slice, and latest cross-session context summary, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
@@ -150,10 +150,23 @@ Last updated: 2026-02-24
     - no child in `needs_approval` / `needs_clarification` / `blocked`
     - aggregation summary present before `succeeded`
   - minimal Home Missions panel added (list + detail + tick + demo mission create button)
+- Dynamic Plan Generation (Custom Recipe):
+  - `RecipeKind::Custom` added to shared plan schema
+  - `draft_intent` can generate LLM-backed custom plans using existing primitive catalog vocabulary
+  - server-side validation enforces step bounds + primitive restrictions + approval/risk overrides
+  - `start_recipe_run` accepts `plan_json` for pre-generated custom plans and re-validates before execution
+  - runner `ReadWeb` path now supports `custom` recipe plans
+- Relay transport client plumbing (desktop-side):
+  - new `RelayTransport` implementing `ExecutionTransport`
+  - subscriber token stored in macOS Keychain (no SQLite) via `set_subscriber_token` / `remove_subscriber_token`
+  - `get_transport_status` exposes Hosted/BYOK/Mock mode + relay endpoint for UI visibility
+  - provider runtime chooses transport dynamically (Hosted Relay when token exists; BYOK local or Mock fallback)
+  - Connections panel shows execution mode and hosted token controls (minimal, no billing UI)
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
+- `cd src-tauri && cargo test` passes (77 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
@@ -174,9 +187,9 @@ Last updated: 2026-02-24
   - `docs/TERMINUS_PRODUCT_STRATEGY_v3.md`
   - `tasks/TERMINUS_TASKLIST_v3.md`
 - Active track (top-down):
-  1. P0.11/P0.12 Voice object + rule extraction approval flow
-  2. P1 provider routing/caching and structural hardening cleanup
-  3. UX and copy cleanup for calm language and trust clarity
+  1. P1 relay remote approval path + Slack/mobile approval routing hooks
+  2. P2 interview-driven onboarding (agent-guided first result before configuration)
+  3. P0.11/P0.12 Voice object + rule extraction approval flow
 
 ## Learning Storage and Privacy Guardrails
 - Learning stores bounded metadata only (hashes, counts, latencies, reason codes).

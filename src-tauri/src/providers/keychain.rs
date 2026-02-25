@@ -2,6 +2,9 @@ use crate::providers::types::{ProviderError, ProviderKind};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+pub const RELAY_SUBSCRIBER_TOKEN_SERVICE: &str = "terminus.relay.subscriber_token";
+pub const RELAY_SUBSCRIBER_TOKEN_ACCOUNT: &str = "TerminusRelay";
+
 pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, ProviderError> {
     let service = provider_kind.keychain_service_name();
     let output = Command::new("security")
@@ -145,4 +148,26 @@ pub fn delete_secret(service: &str, account: &str) -> Result<(), ProviderError> 
     Err(ProviderError::non_retryable(
         "Could not delete secret from Keychain.",
     ))
+}
+
+pub fn get_relay_subscriber_token() -> Result<Option<String>, ProviderError> {
+    get_secret(
+        RELAY_SUBSCRIBER_TOKEN_SERVICE,
+        RELAY_SUBSCRIBER_TOKEN_ACCOUNT,
+    )
+}
+
+pub fn set_relay_subscriber_token(token: &str) -> Result<(), ProviderError> {
+    set_secret(
+        RELAY_SUBSCRIBER_TOKEN_SERVICE,
+        RELAY_SUBSCRIBER_TOKEN_ACCOUNT,
+        token,
+    )
+}
+
+pub fn delete_relay_subscriber_token() -> Result<(), ProviderError> {
+    delete_secret(
+        RELAY_SUBSCRIBER_TOKEN_SERVICE,
+        RELAY_SUBSCRIBER_TOKEN_ACCOUNT,
+    )
 }

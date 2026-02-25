@@ -1,8 +1,10 @@
 mod local_http;
 mod mock;
+mod relay;
 
 pub use local_http::LocalHttpTransport;
 pub use mock::MockTransport;
+pub use relay::RelayTransport;
 
 use crate::providers::types::{ProviderError, ProviderRequest, ProviderResponse};
 

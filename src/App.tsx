@@ -15,6 +15,7 @@ import type {
   RecipeKind,
   RunDiagnosticRecord,
   RunnerControlRecord,
+  TransportStatusRecord,
   AutopilotSendPolicyRecord,
   ClarificationRecord,
   IntentDraftKind,
@@ -97,6 +98,8 @@ export function App() {
   const [runDraftLoading, setRunDraftLoading] = useState(false);
   const [connections, setConnections] = useState<EmailConnectionRecord[]>([]);
   const [connectionsMessage, setConnectionsMessage] = useState<string | null>(null);
+  const [transportStatus, setTransportStatus] = useState<TransportStatusRecord | null>(null);
+  const [relaySubscriberTokenInput, setRelaySubscriberTokenInput] = useState("");
   const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
   const [oauthClientId, setOauthClientId] = useState("");
   const [oauthRedirectUri, setOauthRedirectUri] = useState("");
@@ -322,6 +325,17 @@ export function App() {
       });
   }, []);
 
+  const loadTransportStatus = useCallback(() => {
+    invoke<TransportStatusRecord>("get_transport_status")
+      .then((payload) => {
+        setTransportStatus(payload);
+      })
+      .catch((err) => {
+        console.error("Failed to load transport status:", err);
+        setConnectionsMessage((prev) => prev ?? "Could not load execution mode.");
+      });
+  }, []);
+
   const loadRunnerControl = useCallback(() => {
     invoke<RunnerControlRecord>("get_runner_control")
       .then((payload: any) => {
@@ -455,11 +469,12 @@ export function App() {
   useEffect(() => {
     loadSnapshot();
     loadConnections();
+    loadTransportStatus();
     loadRunnerControl();
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
-  }, [loadSnapshot, loadConnections, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+  }, [loadSnapshot, loadConnections, loadTransportStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -605,6 +620,39 @@ export function App() {
       .catch((err) => {
         console.error("Failed to save oauth config:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not save setup.");
+      });
+  };
+
+  const saveRelaySubscriberToken = () => {
+    const token = relaySubscriberTokenInput.trim();
+    if (!token) {
+      setConnectionsMessage("Paste a hosted plan token first.");
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<TransportStatusRecord>("set_subscriber_token", { input: { token } })
+      .then((payload) => {
+        setTransportStatus(payload);
+        setRelaySubscriberTokenInput("");
+        setConnectionsMessage("Hosted plan token saved to Keychain.");
+      })
+      .catch((err) => {
+        console.error("Failed to save relay token:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not save hosted plan token.");
+      });
+  };
+
+  const removeRelaySubscriberToken = () => {
+    setConnectionsMessage(null);
+    invoke<TransportStatusRecord>("remove_subscriber_token")
+      .then((payload) => {
+        setTransportStatus(payload);
+        setRelaySubscriberTokenInput("");
+        setConnectionsMessage("Hosted plan token removed.");
+      })
+      .catch((err) => {
+        console.error("Failed to remove relay token:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not remove hosted plan token.");
       });
   };
 
@@ -1119,6 +1167,11 @@ export function App() {
           oauthRedirectUri={oauthRedirectUri}
           setOauthRedirectUri={setOauthRedirectUri}
           saveOauthSetup={saveOauthSetup}
+          transportStatus={transportStatus}
+          relaySubscriberTokenInput={relaySubscriberTokenInput}
+          setRelaySubscriberTokenInput={setRelaySubscriberTokenInput}
+          saveRelaySubscriberToken={saveRelaySubscriberToken}
+          removeRelaySubscriberToken={removeRelaySubscriberToken}
           watcherAutopilotId={watcherAutopilotId}
           setWatcherAutopilotId={setWatcherAutopilotId}
           watcherMaxItems={watcherMaxItems}
