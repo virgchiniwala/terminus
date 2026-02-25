@@ -3,6 +3,8 @@ import type {
   HomeSnapshot,
   IntentDraftResponse,
   OnboardingStateRecord,
+  VoiceConfigRecord,
+  AutopilotVoiceConfigRecord,
 } from "./types";
 
 export const fallbackSnapshot: HomeSnapshot = {
@@ -126,6 +128,27 @@ export function normalizeOnboardingStateRecord(row: unknown): OnboardingStateRec
       (value.firstSuccessfulRunAtMs as number | null) ??
       (value.first_successful_run_at_ms as number | null) ??
       null,
+  };
+}
+
+export function normalizeVoiceConfigRecord(row: unknown): VoiceConfigRecord {
+  const value = row as Record<string, unknown>;
+  return {
+    tone: ((value.tone as string) ?? "professional").toLowerCase(),
+    length: ((value.length as string) ?? "normal").toLowerCase(),
+    humor: ((value.humor as string) ?? "off").toLowerCase(),
+    notes: (value.notes as string) ?? "",
+    updatedAtMs: (value.updatedAtMs as number) ?? (value.updated_at_ms as number) ?? Date.now(),
+  };
+}
+
+export function normalizeAutopilotVoiceConfigRecord(row: unknown): AutopilotVoiceConfigRecord {
+  const value = row as Record<string, unknown>;
+  const base = normalizeVoiceConfigRecord(row);
+  return {
+    ...base,
+    autopilotId: (value.autopilotId as string) ?? (value.autopilot_id as string) ?? "",
+    enabled: (value.enabled as boolean) ?? false,
   };
 }
 

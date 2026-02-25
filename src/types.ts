@@ -88,6 +88,19 @@ export interface OnboardingStateRecord {
   firstSuccessfulRunAtMs: number | null;
 }
 
+export interface VoiceConfigRecord {
+  tone: "professional" | "neutral" | "warm" | string;
+  length: "concise" | "normal" | "detailed" | string;
+  humor: "off" | "light" | string;
+  notes: string;
+  updatedAtMs: number;
+}
+
+export interface AutopilotVoiceConfigRecord extends VoiceConfigRecord {
+  autopilotId: string;
+  enabled: boolean;
+}
+
 export interface TransportStatusRecord {
   mode: "hosted_relay" | "byok_local" | "mock" | string;
   relayConfigured: boolean;

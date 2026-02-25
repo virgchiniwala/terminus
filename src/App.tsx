@@ -24,6 +24,8 @@ import type {
   AutopilotSendPolicyRecord,
   ClarificationRecord,
   IntentDraftKind,
+  VoiceConfigRecord,
+  AutopilotVoiceConfigRecord,
 } from "./types";
 import {
   canStartDraftRun,
@@ -32,6 +34,8 @@ import {
   homeLoadErrorMessage,
   normalizeEmailConnectionRecord,
   normalizeOnboardingStateRecord,
+  normalizeVoiceConfigRecord,
+  normalizeAutopilotVoiceConfigRecord,
   normalizeSnapshot,
   replaceDebouncedTimer,
 } from "./uiLogic";
@@ -141,6 +145,11 @@ export function App() {
   const [onboardingPain, setOnboardingPain] = useState("");
   const [onboardingMessage, setOnboardingMessage] = useState<string | null>(null);
   const [onboardingLoading, setOnboardingLoading] = useState(false);
+  const [globalVoice, setGlobalVoice] = useState<VoiceConfigRecord | null>(null);
+  const [voiceMessage, setVoiceMessage] = useState<string | null>(null);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceAutopilotId, setVoiceAutopilotId] = useState("auto_inbox_watch_gmail");
+  const [autopilotVoice, setAutopilotVoice] = useState<AutopilotVoiceConfigRecord | null>(null);
   const [transportStatus, setTransportStatus] = useState<TransportStatusRecord | null>(null);
   const [remoteApprovalReadiness, setRemoteApprovalReadiness] = useState<RemoteApprovalReadinessRecord | null>(null);
   const [relaySyncStatus, setRelaySyncStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
@@ -386,6 +395,28 @@ export function App() {
       });
   }, []);
 
+  const loadGlobalVoice = useCallback(() => {
+    invoke<VoiceConfigRecord>("get_global_voice_config")
+      .then((payload) => setGlobalVoice(normalizeVoiceConfigRecord(payload)))
+      .catch((err) => {
+        console.error("Failed to load voice config:", err);
+        setVoiceMessage((prev) => prev ?? "Could not load voice settings.");
+      });
+  }, []);
+
+  const loadAutopilotVoice = useCallback((autopilotId?: string) => {
+    const target = (autopilotId ?? voiceAutopilotId).trim();
+    if (!target) {
+      return;
+    }
+    invoke<AutopilotVoiceConfigRecord>("get_autopilot_voice_config", { autopilotId: target })
+      .then((payload) => setAutopilotVoice(normalizeAutopilotVoiceConfigRecord(payload)))
+      .catch((err) => {
+        console.error("Failed to load Autopilot voice config:", err);
+        setVoiceMessage((prev) => prev ?? "Could not load Autopilot voice override.");
+      });
+  }, [voiceAutopilotId]);
+
   const loadTransportStatus = useCallback(() => {
     invoke<TransportStatusRecord>("get_transport_status")
       .then((payload) => {
@@ -558,6 +589,7 @@ export function App() {
     loadSnapshot();
     loadConnections();
     loadOnboardingState();
+    loadGlobalVoice();
     loadTransportStatus();
     loadRemoteApprovalReadiness();
     loadRelaySyncStatus();
@@ -566,7 +598,7 @@ export function App() {
     loadClarifications();
     loadRunDiagnostics();
     loadMissions();
-  }, [loadSnapshot, loadConnections, loadOnboardingState, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
+  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -887,6 +919,71 @@ export function App() {
         setOnboardingMessage(typeof err === "string" ? err : "Could not dismiss onboarding.");
       })
       .finally(() => setOnboardingLoading(false));
+  };
+
+  const saveGlobalVoice = () => {
+    if (!globalVoice) return;
+    setVoiceLoading(true);
+    setVoiceMessage(null);
+    invoke<VoiceConfigRecord>("update_global_voice_config", {
+      input: {
+        tone: globalVoice.tone,
+        length: globalVoice.length,
+        humor: globalVoice.humor,
+        notes: globalVoice.notes,
+      },
+    })
+      .then((payload) => {
+        setGlobalVoice(normalizeVoiceConfigRecord(payload));
+        setVoiceMessage("Default voice updated.");
+      })
+      .catch((err) => {
+        console.error("Failed to save voice config:", err);
+        setVoiceMessage(typeof err === "string" ? err : "Could not save voice settings.");
+      })
+      .finally(() => setVoiceLoading(false));
+  };
+
+  const saveAutopilotVoice = () => {
+    if (!autopilotVoice) return;
+    setVoiceLoading(true);
+    setVoiceMessage(null);
+    invoke<AutopilotVoiceConfigRecord>("update_autopilot_voice_config", {
+      input: {
+        autopilotId: autopilotVoice.autopilotId || voiceAutopilotId,
+        enabled: autopilotVoice.enabled,
+        tone: autopilotVoice.tone,
+        length: autopilotVoice.length,
+        humor: autopilotVoice.humor,
+        notes: autopilotVoice.notes,
+      },
+    })
+      .then((payload) => {
+        setAutopilotVoice(normalizeAutopilotVoiceConfigRecord(payload));
+        setVoiceMessage("Autopilot voice override updated.");
+      })
+      .catch((err) => {
+        console.error("Failed to save Autopilot voice config:", err);
+        setVoiceMessage(typeof err === "string" ? err : "Could not save Autopilot voice override.");
+      })
+      .finally(() => setVoiceLoading(false));
+  };
+
+  const clearAutopilotVoice = () => {
+    const id = voiceAutopilotId.trim();
+    if (!id) return;
+    setVoiceLoading(true);
+    setVoiceMessage(null);
+    invoke<AutopilotVoiceConfigRecord>("clear_autopilot_voice_config", { autopilotId: id })
+      .then((payload) => {
+        setAutopilotVoice(normalizeAutopilotVoiceConfigRecord(payload));
+        setVoiceMessage("Autopilot voice override cleared.");
+      })
+      .catch((err) => {
+        console.error("Failed to clear Autopilot voice config:", err);
+        setVoiceMessage(typeof err === "string" ? err : "Could not clear Autopilot voice override.");
+      })
+      .finally(() => setVoiceLoading(false));
   };
 
   const generateOnboardingDraft = () => {
@@ -1223,6 +1320,149 @@ export function App() {
             </p>
           </section>
         )}
+
+        <section className="connection-panel" aria-label="Voice settings">
+          <div className="connection-panel-header">
+            <h2>Voice</h2>
+            <p>Set how Terminus sounds in summaries, replies, and approvals. Voice changes wording only, not permissions or actions.</p>
+          </div>
+          {globalVoice && (
+            <>
+              <div className="watcher-controls">
+                <label>
+                  <span>Default tone</span>
+                  <select
+                    value={globalVoice.tone}
+                    onChange={(event) => setGlobalVoice({ ...globalVoice, tone: event.target.value })}
+                  >
+                    <option value="professional">Professional</option>
+                    <option value="neutral">Neutral</option>
+                    <option value="warm">Warm</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Default length</span>
+                  <select
+                    value={globalVoice.length}
+                    onChange={(event) => setGlobalVoice({ ...globalVoice, length: event.target.value })}
+                  >
+                    <option value="concise">Concise</option>
+                    <option value="normal">Normal</option>
+                    <option value="detailed">Detailed</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Humor</span>
+                  <select
+                    value={globalVoice.humor}
+                    onChange={(event) => setGlobalVoice({ ...globalVoice, humor: event.target.value })}
+                  >
+                    <option value="off">Off</option>
+                    <option value="light">Light</option>
+                  </select>
+                </label>
+              </div>
+              <label>
+                Voice Notes (optional)
+                <textarea
+                  className="intent-input"
+                  value={globalVoice.notes}
+                  onChange={(event) => setGlobalVoice({ ...globalVoice, notes: event.target.value })}
+                  placeholder="Example: Prefer direct summaries with short openings and no hype."
+                  rows={3}
+                />
+              </label>
+              <div className="connection-actions">
+                <button type="button" className="intent-primary" onClick={saveGlobalVoice} disabled={voiceLoading}>
+                  {voiceLoading ? "Saving..." : "Save Default Voice"}
+                </button>
+              </div>
+            </>
+          )}
+
+          <div className="connection-cards">
+            <article className="connection-card">
+              <h3>Autopilot Override</h3>
+              <label>
+                Autopilot ID
+                <input
+                  value={voiceAutopilotId}
+                  onChange={(event) => setVoiceAutopilotId(event.target.value)}
+                  placeholder="auto_inbox_watch_gmail"
+                />
+              </label>
+              <div className="connection-actions">
+                <button type="button" onClick={() => loadAutopilotVoice()}>Load Override</button>
+              </div>
+              {autopilotVoice && (
+                <>
+                  <label>
+                    <span>Use override for this Autopilot</span>
+                    <select
+                      value={autopilotVoice.enabled ? "on" : "off"}
+                      onChange={(event) =>
+                        setAutopilotVoice({ ...autopilotVoice, enabled: event.target.value === "on" })
+                      }
+                    >
+                      <option value="off">Off (use default voice)</option>
+                      <option value="on">On</option>
+                    </select>
+                  </label>
+                  <label>
+                    Tone
+                    <select
+                      value={autopilotVoice.tone}
+                      onChange={(event) => setAutopilotVoice({ ...autopilotVoice, tone: event.target.value })}
+                    >
+                      <option value="professional">Professional</option>
+                      <option value="neutral">Neutral</option>
+                      <option value="warm">Warm</option>
+                    </select>
+                  </label>
+                  <label>
+                    Length
+                    <select
+                      value={autopilotVoice.length}
+                      onChange={(event) => setAutopilotVoice({ ...autopilotVoice, length: event.target.value })}
+                    >
+                      <option value="concise">Concise</option>
+                      <option value="normal">Normal</option>
+                      <option value="detailed">Detailed</option>
+                    </select>
+                  </label>
+                  <label>
+                    Humor
+                    <select
+                      value={autopilotVoice.humor}
+                      onChange={(event) => setAutopilotVoice({ ...autopilotVoice, humor: event.target.value })}
+                    >
+                      <option value="off">Off</option>
+                      <option value="light">Light</option>
+                    </select>
+                  </label>
+                  <label>
+                    Voice Notes (optional)
+                    <textarea
+                      className="intent-input"
+                      value={autopilotVoice.notes}
+                      onChange={(event) => setAutopilotVoice({ ...autopilotVoice, notes: event.target.value })}
+                      rows={3}
+                    />
+                  </label>
+                  <div className="connection-actions">
+                    <button type="button" className="intent-primary" onClick={saveAutopilotVoice} disabled={voiceLoading}>
+                      {voiceLoading ? "Saving..." : "Save Override"}
+                    </button>
+                    <button type="button" onClick={clearAutopilotVoice} disabled={voiceLoading}>
+                      Clear Override
+                    </button>
+                  </div>
+                </>
+              )}
+            </article>
+          </div>
+          {voiceMessage && <p className="connection-message">{voiceMessage}</p>}
+        </section>
 
         <header className="hero">
           <p className="kicker">Terminus</p>

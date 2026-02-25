@@ -75,6 +75,28 @@ pub struct AutopilotSendPolicyRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VoiceConfigRecord {
+    pub tone: String,
+    pub length: String,
+    pub humor: String,
+    pub notes: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutopilotVoiceConfigRecord {
+    pub autopilot_id: String,
+    pub enabled: bool,
+    pub tone: String,
+    pub length: String,
+    pub humor: String,
+    pub notes: String,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OnboardingStateRecord {
     pub onboarding_complete: bool,
     pub dismissed: bool,
@@ -612,6 +634,26 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
               dismissed_at_ms INTEGER
             );
 
+            CREATE TABLE IF NOT EXISTS voice_config (
+              singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+              tone TEXT NOT NULL DEFAULT 'professional',
+              length TEXT NOT NULL DEFAULT 'normal',
+              humor TEXT NOT NULL DEFAULT 'off',
+              notes TEXT NOT NULL DEFAULT '',
+              updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS autopilot_voice_config (
+              autopilot_id TEXT PRIMARY KEY,
+              enabled INTEGER NOT NULL DEFAULT 0,
+              tone TEXT NOT NULL DEFAULT 'professional',
+              length TEXT NOT NULL DEFAULT 'normal',
+              humor TEXT NOT NULL DEFAULT 'off',
+              notes TEXT NOT NULL DEFAULT '',
+              updated_at_ms INTEGER NOT NULL,
+              FOREIGN KEY (autopilot_id) REFERENCES autopilots(id)
+            );
+
             CREATE TABLE IF NOT EXISTS autopilot_send_policy (
               autopilot_id TEXT PRIMARY KEY,
               allow_sending INTEGER NOT NULL DEFAULT 0,
@@ -746,6 +788,18 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
     ensure_column(connection, "relay_callback_events", "channel", "TEXT")?;
     ensure_column(connection, "relay_callback_events", "actor_label", "TEXT")?;
     ensure_column(connection, "onboarding_state", "recommended_intent", "TEXT")?;
+    ensure_column(
+        connection,
+        "voice_config",
+        "notes",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "autopilot_voice_config",
+        "enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(
         connection,
         "relay_sync_state",
@@ -964,6 +1018,14 @@ pub fn bootstrap_schema(connection: &mut Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("Failed to seed onboarding state: {e}"))?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO voice_config (
+               singleton_id, tone, length, humor, notes, updated_at_ms
+             ) VALUES (1, 'professional', 'normal', 'off', '', strftime('%s','now') * 1000)",
+            [],
+        )
+        .map_err(|e| format!("Failed to seed voice config: {e}"))?;
 
     Ok(())
 }
@@ -1657,6 +1719,156 @@ pub fn get_autopilot_send_policy(
         allow_outside_quiet_hours: allow_outside == 1,
         updated_at_ms,
     })
+}
+
+pub fn get_global_voice_config(connection: &Connection) -> Result<VoiceConfigRecord, String> {
+    connection
+        .query_row(
+            "SELECT tone, length, humor, notes, updated_at_ms FROM voice_config WHERE singleton_id = 1",
+            [],
+            |row| {
+                Ok(VoiceConfigRecord {
+                    tone: row.get(0)?,
+                    length: row.get(1)?,
+                    humor: row.get(2)?,
+                    notes: row.get(3)?,
+                    updated_at_ms: row.get(4)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Failed to read voice config: {e}"))
+}
+
+pub fn upsert_global_voice_config(
+    connection: &Connection,
+    payload: &VoiceConfigRecord,
+) -> Result<VoiceConfigRecord, String> {
+    connection
+        .execute(
+            "UPDATE voice_config
+             SET tone = ?1, length = ?2, humor = ?3, notes = ?4, updated_at_ms = strftime('%s','now') * 1000
+             WHERE singleton_id = 1",
+            params![payload.tone, payload.length, payload.humor, payload.notes],
+        )
+        .map_err(|e| format!("Failed to update voice config: {e}"))?;
+    get_global_voice_config(connection)
+}
+
+pub fn get_autopilot_voice_config(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<AutopilotVoiceConfigRecord, String> {
+    let row = connection
+        .query_row(
+            "SELECT enabled, tone, length, humor, notes, updated_at_ms
+             FROM autopilot_voice_config WHERE autopilot_id = ?1",
+            params![autopilot_id],
+            |row| {
+                Ok(AutopilotVoiceConfigRecord {
+                    autopilot_id: autopilot_id.to_string(),
+                    enabled: row.get::<_, i64>(0)? == 1,
+                    tone: row.get(1)?,
+                    length: row.get(2)?,
+                    humor: row.get(3)?,
+                    notes: row.get(4)?,
+                    updated_at_ms: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read Autopilot voice config: {e}"))?;
+    if let Some(row) = row {
+        return Ok(row);
+    }
+    let global = get_global_voice_config(connection)?;
+    Ok(AutopilotVoiceConfigRecord {
+        autopilot_id: autopilot_id.to_string(),
+        enabled: false,
+        tone: global.tone,
+        length: global.length,
+        humor: global.humor,
+        notes: global.notes,
+        updated_at_ms: global.updated_at_ms,
+    })
+}
+
+pub fn upsert_autopilot_voice_config(
+    connection: &Connection,
+    payload: &AutopilotVoiceConfigRecord,
+) -> Result<AutopilotVoiceConfigRecord, String> {
+    connection
+        .execute(
+            "INSERT INTO autopilot_voice_config (
+               autopilot_id, enabled, tone, length, humor, notes, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now') * 1000)
+             ON CONFLICT(autopilot_id) DO UPDATE SET
+               enabled = excluded.enabled,
+               tone = excluded.tone,
+               length = excluded.length,
+               humor = excluded.humor,
+               notes = excluded.notes,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                payload.autopilot_id,
+                if payload.enabled { 1 } else { 0 },
+                payload.tone,
+                payload.length,
+                payload.humor,
+                payload.notes
+            ],
+        )
+        .map_err(|e| format!("Failed to update Autopilot voice config: {e}"))?;
+    get_autopilot_voice_config(connection, &payload.autopilot_id)
+}
+
+pub fn clear_autopilot_voice_config(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM autopilot_voice_config WHERE autopilot_id = ?1",
+            params![autopilot_id],
+        )
+        .map_err(|e| format!("Failed to clear Autopilot voice config: {e}"))?;
+    Ok(())
+}
+
+pub fn get_effective_voice_config(
+    connection: &Connection,
+    autopilot_id: &str,
+) -> Result<VoiceConfigRecord, String> {
+    let global = get_global_voice_config(connection)?;
+    let override_row: Option<(i64, String, String, String, String, i64)> = connection
+        .query_row(
+            "SELECT enabled, tone, length, humor, notes, updated_at_ms
+             FROM autopilot_voice_config WHERE autopilot_id = ?1",
+            params![autopilot_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read effective voice config: {e}"))?;
+    if let Some((enabled, tone, length, humor, notes, updated_at_ms)) = override_row {
+        if enabled == 1 {
+            return Ok(VoiceConfigRecord {
+                tone,
+                length,
+                humor,
+                notes,
+                updated_at_ms,
+            });
+        }
+    }
+    Ok(global)
 }
 
 pub fn upsert_autopilot_send_policy(
