@@ -1,32 +1,40 @@
 # Mission Control — Terminus
-Last updated: 2026-02-24
+Last updated: 2026-02-25
 
 ## Fresh Session Note
-- For the agentic-orchestration plan and cross-session context, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
+Read these in order before starting work:
+1. `docs/Terminus_CONTEXT.md` — what Terminus is + key strategic directions
+2. `docs/TERMINUS_AUDIT_AND_PLAN.md` — comprehensive audit + current P0-P8 priority order
+3. `docs/TERMINUS_PRODUCT_STRATEGY_v3.md` — complete product vision
+4. `docs/WORKFLOW_FOR_FRESH_SESSIONS.md` — session checklist
 
 ## Current State
 - Mode: Day
-- Branch: `codex/mission-orchestration-mvp`
-- Product shape: local-first, object-first Personal AI OS
+- Branch: `main`
+- Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
 - Home remains object-first (`Autopilots / Outcomes / Approvals / Activity`)
-- No chat-first or harness-first product drift
-- Deny-by-default primitives
-- Completed outcomes over draft-only workflows
+- No chat-first drift, harness-first drift, or marketplace drift
+- Deny-by-default primitives (PrimitiveGuard)
+- Outputs must have real side effects; draft-only runs are failure cases
 - Compose-first outbound behavior with gated sending
-- Secrets only in OS keychain
-- Shared runtime for all three MVP presets
-- Intent Bar may be conversational input, but outputs must always resolve to executable objects
+- Secrets only in OS Keychain (never SQLite, never logs)
+- Shared runtime for all recipes (Website Monitor, Inbox Triage, Daily Brief, Custom)
+- Intent Bar outputs must always resolve to executable objects, never free-text responses
+- Relay is the primary transport; BYOK is advanced-only
+- The agent onboards users; no pre-configuration required before first result
 
 ## Provider Policy
 - Supported: OpenAI, Anthropic
-- Experimental: Gemini
+- Experimental: Gemini (disabled in BYOK lane)
+- Primary transport: RelayTransport (P1 in development); BYOK via LocalHttpTransport (advanced)
 
-## MVP Presets (Shared Runtime)
+## Recipes (Shared Runtime)
 1. Website Monitor
-2. Inbox Triage (moving to real always-on inbox watching)
+2. Inbox Triage (paste/forward + always-on watching)
 3. Daily Brief
+4. Custom (Dynamic Plan Generation — P0, current work)
 
 ## Runtime Baseline (Shipped)
 - Persisted run state machine with tick execution
@@ -34,39 +42,73 @@ Last updated: 2026-02-24
 - Retry/backoff with due-run resumption
 - Spend rails in cents with pre-side-effect hard stops
 - Terminal receipts with redaction
-- Provider/transport seam + local BYOK lane
-- Learning Layer: Evaluate -> Adapt -> Memory
+- Provider/transport seam (LocalHttpTransport BYOK + MockTransport tests)
+- Learning Layer: Evaluate → Adapt → Memory
 - OAuth provider connections + inbox watcher cadence controls
 - Safe send policy gates + typed approval payload columns
+- Mission orchestration: tables + commands + 3 tests (fan-out, contract blocking, aggregation)
+- Supervisor diagnostics: 11 run-health states + intervention commands
 
-## Now
-### Mission Orchestration MVP — Iteration 2
-Owner: Friday
-Status: In progress
+## Test Coverage Baseline
+| Category | Status |
+|----------|--------|
+| Backend Rust (`cargo test`) | 73/73 passing |
+| Mission tests | 3/3 passing |
+| Frontend component tests | 2 (ConnectionHealthSummary only) |
+| Integration tests | 0 |
+| **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
+
+## Now (P0)
+### Dynamic Plan Generation — Custom Recipe
+Owner: active session
+Status: Implemented on branch `codex/dynamic-plan-generation-mvp` (next PR to merge)
 Scope:
-- add mission persistence tables (`missions`, `mission_runs`, `mission_events`)
-- add mission orchestration module (`missions.rs`) with one template: `daily_brief_multi_source`
-- add mission Tauri commands (`create_mission_draft`, `start_mission`, `get_mission`, `list_missions`, `run_mission_tick`)
-- add minimal Missions panel (list/detail/tick) in Home for visibility
+- Add `RecipeKind::Custom` to `src-tauri/src/schema.rs`
+- Add `generate_custom_plan()` + `validate_and_build_custom_plan()` / `validate_custom_execution_plan()` to `src-tauri/src/main.rs`
+- Update runner ReadWeb gate to allow Custom recipe (~2 lines in `runner.rs`)
+- Update `start_recipe_run` to accept `plan_json` parameter for pre-generated Custom plans
+- Update frontend `runDraft()` to pass `planJson` for Custom recipes
+- Add validation/classification regression tests and keep full existing suite green
 Acceptance:
-- child runs fan out with unique idempotency keys
-- mission waits on child terminal states and blocks on blocked/pending child runs
-- aggregation summary persists only after child success
+- User types any professional workflow → Custom recipe detected → LLM-generated plan shown in Draft Plan Card
+- SendEmail in Custom plan always has `requires_approval: true` regardless of LLM output
+- Unknown primitives rejected by validation
+- Existing 3 recipes work unchanged (classification regression tests)
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
-- `cd src-tauri && cargo fmt --check`
-- `cd src-tauri && cargo test`
-- `npm test`
-- `npm run lint`
-- `npm run build`
+```bash
+cd src-tauri && cargo fmt --check
+cd src-tauri && cargo test
+npm test
+npm run lint
+npm run build
+```
 
 ## Next
-1. Mission outcomes integration: first-class mission receipts/outcomes on object surfaces
-2. Add second mission template (`website_monitor_batch`) once mission contract behavior is validated
-3. Voice object + rule extraction approval flow (P0.11/P0.12)
+1. **P1: Relay Transport + Remote Approval + Slack Bot**
+   - `RelayTransport` in `src-tauri/src/transport/relay.rs`
+   - Subscriber token in Keychain
+   - Push channel (WebSocket/SSE) for approval routing
+   - Onboarding: "Sign in to Terminus" flow
+   - Slack bot via Vercel Chat SDK pattern (approve from Slack)
+
+2. **P2: Interview-Driven Onboarding**
+   - Blank canvas first-launch experience
+   - Agent interview flow using Intent Bar
+   - `onboarding_state` flag + first-run detection
+
+3. **P3: Voice / Soul.md Object (P0.11)**
+   - Voice object (tone/length/humor presets + Voice Notes freeform)
+   - Global default + per-autopilot override
+   - Injection into emails/summaries/approvals/system messages
+
+4. **P4: Rule Extraction / "Make This a Rule" (P0.12)**
+   - Rule object + rule_applications table
+   - "Make this a rule" CTA on Outcome + Approval cards
 
 ## Non-goals (MVP)
-- arbitrary end-user code execution
-- plugin marketplace
-- OpenClaw compatibility
-- hosted always-on runner
+- Arbitrary end-user code execution
+- Plugin marketplace
+- OpenClaw compatibility layer
+- Cloud-side run execution (relay is transport, not runner)
+- MCP as primitive source (long-term direction; keep PrimitiveId extensible)

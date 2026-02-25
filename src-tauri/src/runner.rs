@@ -1583,7 +1583,9 @@ impl RunnerEngine {
                 })
             }
             PrimitiveId::ReadWeb => {
-                if run.plan.recipe != RecipeKind::WebsiteMonitor {
+                if run.plan.recipe != RecipeKind::WebsiteMonitor
+                    && run.plan.recipe != RecipeKind::Custom
+                {
                     return Ok(StepExecutionResult {
                         user_message: "Step completed.".to_string(),
                         actual_spend_usd_cents: 0,

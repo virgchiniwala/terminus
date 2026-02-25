@@ -16,10 +16,14 @@ use guidance_utils::{
     classify_guidance, compute_missed_cycles, normalize_guidance_instruction, sanitize_log_message,
     GuidanceMode,
 };
+use providers::runtime::ProviderRuntime;
+use providers::types::{
+    ProviderKind as ApiProviderKind, ProviderRequest, ProviderTier as ApiProviderTier,
+};
 use runner::{ApprovalRecord, ClarificationRecord, RunReceipt, RunRecord, RunnerEngine};
 use rusqlite::OptionalExtension;
-use schema::{AutopilotPlan, PrimitiveId, ProviderId, RecipeKind};
-use serde::Serialize;
+use schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -170,11 +174,25 @@ fn start_recipe_run(
     provider: String,
     idempotency_key: String,
     max_retries: Option<i64>,
+    plan_json: Option<String>,
 ) -> Result<RunRecord, String> {
     let mut connection = open_connection(&state)?;
     let recipe_kind = parse_recipe(&recipe)?;
     let provider_id = parse_provider(&provider)?;
-    let mut plan = AutopilotPlan::from_intent(recipe_kind, intent, provider_id);
+    let mut plan = match (recipe_kind, plan_json.as_deref()) {
+        (RecipeKind::Custom, Some(json)) => {
+            let parsed = serde_json::from_str::<AutopilotPlan>(json)
+                .map_err(|e| format!("Custom plan is invalid JSON: {e}"))?;
+            validate_custom_execution_plan(parsed, provider_id)?
+        }
+        (RecipeKind::Custom, None) => {
+            return Err(
+                "Custom runs require a generated plan. Draft the intent again and retry."
+                    .to_string(),
+            );
+        }
+        (_, _) => AutopilotPlan::from_intent(recipe_kind, intent, provider_id),
+    };
     if let Some(text) = pasted_text {
         if !text.trim().is_empty() {
             plan.inbox_source_text = Some(text);
@@ -863,6 +881,7 @@ fn parse_recipe(value: &str) -> Result<RecipeKind, String> {
         "website_monitor" => Ok(RecipeKind::WebsiteMonitor),
         "inbox_triage" => Ok(RecipeKind::InboxTriage),
         "daily_brief" => Ok(RecipeKind::DailyBrief),
+        "custom" => Ok(RecipeKind::Custom),
         _ => Err(format!("Unknown recipe: {value}")),
     }
 }
@@ -924,13 +943,359 @@ fn classify_recipe(intent: &str) -> RecipeKind {
     if normalized.contains("monitor")
         || normalized.contains("website")
         || normalized.contains("web page")
-        || normalized.contains("http://")
-        || normalized.contains("https://")
         || normalized.contains("url")
+        || ((normalized.contains("http://") || normalized.contains("https://"))
+            && !normalized.contains("email"))
     {
         return RecipeKind::WebsiteMonitor;
     }
+    if normalized.contains("brief")
+        || normalized.contains("summary")
+        || normalized.contains("digest")
+    {
+        return RecipeKind::DailyBrief;
+    }
+    let custom_signals = [
+        "chase",
+        "follow up",
+        "follow-up",
+        "remind",
+        "coordinate",
+        "parse",
+        "categorize",
+        "extract",
+        "prepare",
+        "compile",
+        "collect updates",
+        "generate report",
+        "proposal",
+        "contract",
+        "invoice",
+        "receipt",
+        "every friday",
+        "every monday",
+        "every week",
+        "spreadsheet",
+        "excel",
+        "automate",
+    ];
+    if custom_signals
+        .iter()
+        .any(|signal| normalized.contains(signal))
+    {
+        return RecipeKind::Custom;
+    }
     RecipeKind::DailyBrief
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedCustomPlan {
+    steps: Vec<GeneratedCustomStep>,
+    #[serde(default)]
+    web_allowed_domains: Vec<String>,
+    #[serde(default)]
+    recipient_hints: Vec<String>,
+    #[serde(default)]
+    allowed_primitives: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedCustomStep {
+    id: String,
+    label: String,
+    primitive: String,
+    requires_approval: bool,
+    risk_tier: String,
+}
+
+fn provider_kind_for_schema(provider_id: ProviderId) -> ApiProviderKind {
+    match provider_id {
+        ProviderId::OpenAi => ApiProviderKind::OpenAi,
+        ProviderId::Anthropic => ApiProviderKind::Anthropic,
+        ProviderId::Gemini => ApiProviderKind::Gemini,
+    }
+}
+
+fn provider_tier_for_schema(provider_id: ProviderId) -> ApiProviderTier {
+    match provider_id {
+        ProviderId::OpenAi | ProviderId::Anthropic => ApiProviderTier::Supported,
+        ProviderId::Gemini => ApiProviderTier::Experimental,
+    }
+}
+
+fn parse_generated_primitive_id(raw: &str) -> Result<PrimitiveId, String> {
+    let normalized = raw.trim().to_ascii_lowercase().replace(['.', '-'], "_");
+    match normalized.as_str() {
+        "readweb" | "read_web" => Ok(PrimitiveId::ReadWeb),
+        "readsources" | "read_sources" => Ok(PrimitiveId::ReadSources),
+        "readforwardedemail" | "read_forwarded_email" => Ok(PrimitiveId::ReadForwardedEmail),
+        "triageemail" | "triage_email" => Ok(PrimitiveId::TriageEmail),
+        "aggregatedailysummary" | "aggregate_daily_summary" => {
+            Ok(PrimitiveId::AggregateDailySummary)
+        }
+        "readvaultfile" | "read_vault_file" => Ok(PrimitiveId::ReadVaultFile),
+        "writeoutcomedraft" | "write_outcome_draft" => Ok(PrimitiveId::WriteOutcomeDraft),
+        "writeemaildraft" | "write_email_draft" => Ok(PrimitiveId::WriteEmailDraft),
+        "sendemail" | "send_email" => Ok(PrimitiveId::SendEmail),
+        "schedulerun" | "schedule_run" => Ok(PrimitiveId::ScheduleRun),
+        "notifyuser" | "notify_user" => Ok(PrimitiveId::NotifyUser),
+        _ => Err(format!("Unknown primitive in generated plan: {raw}")),
+    }
+}
+
+fn parse_generated_risk_tier(raw: &str) -> Result<RiskTier, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "low" => Ok(RiskTier::Low),
+        "medium" => Ok(RiskTier::Medium),
+        "high" => Ok(RiskTier::High),
+        _ => Err(format!("Unknown risk tier in generated plan: {raw}")),
+    }
+}
+
+fn validate_custom_execution_plan(
+    mut plan: AutopilotPlan,
+    provider_id: ProviderId,
+) -> Result<AutopilotPlan, String> {
+    if plan.recipe != RecipeKind::Custom {
+        return Err("Custom plan payload must use recipe=custom.".to_string());
+    }
+    if plan.steps.is_empty() {
+        return Err("Custom plan must include at least one step.".to_string());
+    }
+    if plan.steps.len() > 10 {
+        return Err("Custom plan exceeds the maximum of 10 steps.".to_string());
+    }
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.id.trim().is_empty() || s.label.trim().is_empty())
+    {
+        return Err("Every custom plan step needs an id and label.".to_string());
+    }
+
+    let mut used = Vec::<PrimitiveId>::new();
+    for step in &mut plan.steps {
+        match step.primitive {
+            PrimitiveId::SendEmail => {
+                step.requires_approval = true;
+                step.risk_tier = RiskTier::High;
+            }
+            PrimitiveId::WriteOutcomeDraft
+            | PrimitiveId::WriteEmailDraft
+            | PrimitiveId::TriageEmail => {
+                step.requires_approval = true;
+                if step.risk_tier == RiskTier::Low {
+                    step.risk_tier = RiskTier::Medium;
+                }
+            }
+            PrimitiveId::ScheduleRun | PrimitiveId::ReadVaultFile => {
+                return Err(format!(
+                    "This action isn't allowed in Terminus yet: {}.",
+                    step.label
+                ));
+            }
+            _ => {}
+        }
+        if !used.contains(&step.primitive) {
+            used.push(step.primitive);
+        }
+    }
+    plan.allowed_primitives = used;
+
+    plan.provider = schema::ProviderMetadata::from_provider_id(provider_id);
+    plan.web_allowed_domains = plan
+        .web_allowed_domains
+        .into_iter()
+        .map(|d| d.trim().trim_matches('.').to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect();
+    if let Some(url) = plan.web_source_url.clone() {
+        if let Some((_, host)) = crate::web::parse_scheme_host(&url) {
+            if !plan
+                .web_allowed_domains
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&host))
+            {
+                plan.web_allowed_domains.push(host);
+            }
+        }
+    }
+    for source in &plan.daily_sources {
+        if let Some((_, host)) = crate::web::parse_scheme_host(source) {
+            if !plan
+                .web_allowed_domains
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&host))
+            {
+                plan.web_allowed_domains.push(host);
+            }
+        }
+    }
+    plan.recipient_hints = plan
+        .recipient_hints
+        .into_iter()
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| e.contains('@'))
+        .collect();
+
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.primitive == PrimitiveId::ReadWeb)
+        && (plan.web_source_url.as_deref().unwrap_or("").is_empty()
+            || plan.web_allowed_domains.is_empty())
+    {
+        return Err(
+            "Custom plan reads a website but has no allowed domains. Add a website domain and retry."
+                .to_string(),
+        );
+    }
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.primitive == PrimitiveId::ReadSources)
+        && plan.daily_sources.is_empty()
+    {
+        return Err(
+            "Custom plan reads sources but no source URLs were detected. Add source URLs and retry."
+                .to_string(),
+        );
+    }
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.primitive == PrimitiveId::SendEmail)
+        && plan.recipient_hints.is_empty()
+    {
+        return Err(
+            "Custom plan sends email but has no recipient hints. Add at least one email recipient and retry."
+                .to_string(),
+        );
+    }
+    Ok(plan)
+}
+
+fn validate_and_build_custom_plan(
+    intent: &str,
+    provider_id: ProviderId,
+    generated: GeneratedCustomPlan,
+) -> Result<AutopilotPlan, String> {
+    if generated.steps.is_empty() {
+        return Err("Generated plan had no steps. Try a more specific request.".to_string());
+    }
+    if generated.steps.len() > 10 {
+        return Err("Generated plan exceeded the maximum of 10 steps.".to_string());
+    }
+
+    let mut used_primitives = Vec::<PrimitiveId>::new();
+    let mut steps = Vec::<PlanStep>::new();
+    for (index, generated_step) in generated.steps.iter().enumerate() {
+        let primitive = parse_generated_primitive_id(&generated_step.primitive)?;
+        let mut risk_tier = parse_generated_risk_tier(&generated_step.risk_tier)?;
+        let mut requires_approval = generated_step.requires_approval;
+        match primitive {
+            PrimitiveId::SendEmail => {
+                requires_approval = true;
+                risk_tier = RiskTier::High;
+            }
+            PrimitiveId::WriteOutcomeDraft
+            | PrimitiveId::WriteEmailDraft
+            | PrimitiveId::TriageEmail => {
+                requires_approval = true;
+                if risk_tier == RiskTier::Low {
+                    risk_tier = RiskTier::Medium;
+                }
+            }
+            PrimitiveId::ScheduleRun | PrimitiveId::ReadVaultFile => {
+                return Err("This action isn't allowed in Terminus yet.".to_string())
+            }
+            _ => {}
+        }
+        if !used_primitives.contains(&primitive) {
+            used_primitives.push(primitive);
+        }
+        steps.push(PlanStep {
+            id: if generated_step.id.trim().is_empty() {
+                format!("step_{}", index + 1)
+            } else {
+                generated_step.id.trim().to_string()
+            },
+            label: generated_step.label.trim().to_string(),
+            primitive,
+            requires_approval,
+            risk_tier,
+        });
+    }
+
+    let inferred_urls = intent
+        .split_whitespace()
+        .filter_map(|token| {
+            let normalized = token.trim_matches(|c: char| ",.;:!?()[]{}<>\"'".contains(c));
+            if normalized.starts_with("http://") || normalized.starts_with("https://") {
+                Some(normalized.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<String>>();
+    let web_source_url = inferred_urls.first().cloned();
+    let daily_sources = inferred_urls
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<String>>();
+
+    let plan = AutopilotPlan {
+        schema_version: "1.0".to_string(),
+        recipe: RecipeKind::Custom,
+        intent: intent.to_string(),
+        provider: schema::ProviderMetadata::from_provider_id(provider_id),
+        web_source_url,
+        web_allowed_domains: generated.web_allowed_domains,
+        inbox_source_text: None,
+        daily_sources,
+        recipient_hints: generated.recipient_hints,
+        allowed_primitives: if generated.allowed_primitives.is_empty() {
+            used_primitives
+        } else {
+            used_primitives
+        },
+        steps,
+    };
+    validate_custom_execution_plan(plan, provider_id)
+}
+
+fn generate_custom_plan(intent: &str, provider_id: ProviderId) -> Result<AutopilotPlan, String> {
+    let prompt = format!(
+        concat!(
+            "Generate a Terminus execution plan as JSON only.\n",
+            "Intent: {intent}\n\n",
+            "Use only these primitive ids (snake_case): read_web, read_sources, read_forwarded_email, triage_email, aggregate_daily_summary, write_outcome_draft, write_email_draft, send_email, notify_user.\n",
+            "Do not use schedule_run or read_vault_file.\n",
+            "Required JSON shape:\n",
+            "{{\"steps\":[{{\"id\":\"step_1\",\"label\":\"...\",\"primitive\":\"read_web\",\"requires_approval\":false,\"risk_tier\":\"low\"}}],\"web_allowed_domains\":[\"example.com\"],\"recipient_hints\":[\"person@example.com\"],\"allowed_primitives\":[\"read_web\"]}}\n",
+            "Rules:\n",
+            "- send_email must be high risk and approval-gated\n",
+            "- write_outcome_draft and write_email_draft should be approval-gated\n",
+            "- Keep step count between 1 and 10\n",
+            "- Output JSON only, no markdown"
+        ),
+        intent = intent
+    );
+    let request = ProviderRequest {
+        provider_kind: provider_kind_for_schema(provider_id),
+        provider_tier: provider_tier_for_schema(provider_id),
+        model: schema::ProviderMetadata::from_provider_id(provider_id).default_model,
+        input: prompt,
+        max_output_tokens: Some(900),
+        correlation_id: Some(format!("plan_gen:{}", make_main_id("req"))),
+    };
+    let response = ProviderRuntime::default()
+        .dispatch(&request)
+        .map_err(|e| format!("Could not generate a custom plan yet: {e}"))?;
+    let generated: GeneratedCustomPlan = serde_json::from_str(response.text.trim())
+        .map_err(|e| format!("Plan generation returned invalid JSON: {e}"))?;
+    validate_and_build_custom_plan(intent, provider_id, generated)
 }
 
 fn describe_primitive_read(primitive: PrimitiveId) -> Option<String> {
@@ -1022,7 +1387,11 @@ fn draft_intent(
         None => (auto_kind, auto_reason),
     };
     let recipe = classify_recipe(cleaned);
-    let plan = AutopilotPlan::from_intent(recipe, cleaned.to_string(), provider_id);
+    let plan = if recipe == RecipeKind::Custom {
+        generate_custom_plan(cleaned, provider_id)?
+    } else {
+        AutopilotPlan::from_intent(recipe, cleaned.to_string(), provider_id)
+    };
     let preview = preview_for_plan(&kind, &plan);
 
     Ok(IntentDraftResponse {
@@ -1031,6 +1400,106 @@ fn draft_intent(
         plan,
         preview,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_recipe_preserves_existing_signals_and_detects_custom() {
+        assert_eq!(
+            classify_recipe("Monitor https://example.com for changes"),
+            RecipeKind::WebsiteMonitor
+        );
+        assert_eq!(classify_recipe("Handle my inbox"), RecipeKind::InboxTriage);
+        assert_eq!(
+            classify_recipe("Prepare a daily digest from these links"),
+            RecipeKind::DailyBrief
+        );
+        assert_eq!(
+            classify_recipe("Parse this invoice and categorize expenses every Friday"),
+            RecipeKind::Custom
+        );
+    }
+
+    #[test]
+    fn validate_and_build_custom_plan_forces_send_approval_and_rejects_disallowed_primitives() {
+        let generated = GeneratedCustomPlan {
+            steps: vec![
+                GeneratedCustomStep {
+                    id: "step_1".to_string(),
+                    label: "Read page".to_string(),
+                    primitive: "read_web".to_string(),
+                    requires_approval: false,
+                    risk_tier: "low".to_string(),
+                },
+                GeneratedCustomStep {
+                    id: "step_2".to_string(),
+                    label: "Send update".to_string(),
+                    primitive: "SendEmail".to_string(),
+                    requires_approval: false,
+                    risk_tier: "low".to_string(),
+                },
+            ],
+            web_allowed_domains: vec!["Example.com".to_string()],
+            recipient_hints: vec!["team@example.com".to_string()],
+            allowed_primitives: vec!["send_email".to_string()],
+        };
+        let plan = validate_and_build_custom_plan(
+            "Send updates for https://example.com",
+            ProviderId::OpenAi,
+            generated,
+        )
+        .expect("valid custom plan");
+        let send_step = plan
+            .steps
+            .iter()
+            .find(|s| s.primitive == PrimitiveId::SendEmail)
+            .expect("send step");
+        assert!(send_step.requires_approval);
+        assert_eq!(send_step.risk_tier, RiskTier::High);
+        assert!(plan.allowed_primitives.contains(&PrimitiveId::SendEmail));
+
+        let disallowed = GeneratedCustomPlan {
+            steps: vec![GeneratedCustomStep {
+                id: "step_1".to_string(),
+                label: "Schedule".to_string(),
+                primitive: "schedule_run".to_string(),
+                requires_approval: false,
+                risk_tier: "low".to_string(),
+            }],
+            web_allowed_domains: vec![],
+            recipient_hints: vec![],
+            allowed_primitives: vec![],
+        };
+        let err = validate_and_build_custom_plan("Schedule this", ProviderId::OpenAi, disallowed)
+            .expect_err("schedule_run must be rejected");
+        assert!(err.contains("isn't allowed"));
+    }
+
+    #[test]
+    fn validate_custom_execution_plan_enforces_bounds_and_required_metadata() {
+        let mut plan =
+            AutopilotPlan::from_intent(RecipeKind::Custom, "x".to_string(), ProviderId::OpenAi);
+        assert!(validate_custom_execution_plan(plan.clone(), ProviderId::OpenAi).is_err());
+
+        plan.steps = vec![PlanStep {
+            id: "step_1".to_string(),
+            label: "Read".to_string(),
+            primitive: PrimitiveId::ReadWeb,
+            requires_approval: false,
+            risk_tier: RiskTier::Low,
+        }];
+        let err = validate_custom_execution_plan(plan.clone(), ProviderId::OpenAi)
+            .expect_err("read_web requires allowlist");
+        assert!(err.contains("allowed domains"));
+
+        plan.web_source_url = Some("https://example.com".to_string());
+        plan.web_allowed_domains = vec!["example.com".to_string()];
+        let ok = validate_custom_execution_plan(plan, ProviderId::OpenAi).expect("valid");
+        assert_eq!(ok.provider.id, ProviderId::OpenAi);
+    }
 }
 
 fn main() {

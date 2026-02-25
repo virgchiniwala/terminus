@@ -6,6 +6,7 @@ pub enum RecipeKind {
     WebsiteMonitor,
     InboxTriage,
     DailyBrief,
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +253,7 @@ impl AutopilotPlan {
                     risk_tier: RiskTier::Medium,
                 },
             ],
+            RecipeKind::Custom => Vec::new(),
         };
 
         Self {
@@ -360,6 +362,11 @@ mod tests {
             "Prepare a concise daily brief from saved sources".to_string(),
             ProviderId::Gemini,
         );
+        let custom = AutopilotPlan::from_intent(
+            RecipeKind::Custom,
+            "Parse invoices and prepare weekly categories".to_string(),
+            ProviderId::OpenAi,
+        );
 
         assert_eq!(website.schema_version, triage.schema_version);
         assert_eq!(triage.schema_version, brief.schema_version);
@@ -372,6 +379,7 @@ mod tests {
             .allowed_primitives
             .contains(&super::PrimitiveId::ReadVaultFile));
         assert_eq!(brief.provider.tier, ProviderTier::Experimental);
+        assert_eq!(custom.steps.len(), 0);
         assert_eq!(website.steps.len(), 3);
         assert_eq!(triage.steps.len(), 4);
         assert_eq!(brief.steps.len(), 3);

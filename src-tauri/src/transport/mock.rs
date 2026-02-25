@@ -47,6 +47,29 @@ impl ExecutionTransport for MockTransport {
         _keychain_api_key: Option<&str>,
     ) -> Result<ProviderResponse, ProviderError> {
         if request
+            .correlation_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("plan_gen:"))
+        {
+            let lower = request.input.to_ascii_lowercase();
+            let text = if lower.contains("invoice") || lower.contains("receipt") {
+                r#"{"steps":[{"id":"step_1","label":"Read forwarded invoice text","primitive":"read_forwarded_email","requires_approval":false,"risk_tier":"low"},{"id":"step_2","label":"Summarize extracted categories into an outcome","primitive":"write_outcome_draft","requires_approval":true,"risk_tier":"medium"}],"web_allowed_domains":[],"recipient_hints":[],"allowed_primitives":["read_forwarded_email","write_outcome_draft"]}"#
+                    .to_string()
+            } else {
+                r#"{"steps":[{"id":"step_1","label":"Read configured sources","primitive":"read_sources","requires_approval":false,"risk_tier":"low"},{"id":"step_2","label":"Aggregate summary","primitive":"aggregate_daily_summary","requires_approval":false,"risk_tier":"medium"},{"id":"step_3","label":"Prepare outcome","primitive":"write_outcome_draft","requires_approval":true,"risk_tier":"medium"}],"web_allowed_domains":[],"recipient_hints":[],"allowed_primitives":["read_sources","aggregate_daily_summary","write_outcome_draft"]}"#
+                    .to_string()
+            };
+
+            return Ok(ProviderResponse {
+                provider_kind: request.provider_kind,
+                provider_tier: request.provider_tier,
+                model: request.model.clone(),
+                text,
+                usage: Self::usage_for(request),
+            });
+        }
+
+        if request
             .input
             .contains("simulate_provider_non_retryable_failure")
         {
