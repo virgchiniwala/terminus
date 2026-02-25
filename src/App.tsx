@@ -13,6 +13,7 @@ import type {
   MissionTickResult,
   OnboardingStateRecord,
   OAuthStartResponse,
+  ApiKeyRefStatusRecord,
   RemoteApprovalReadinessRecord,
   RelayApprovalSyncStatusRecord,
   RelayApprovalSyncTickRecord,
@@ -79,6 +80,7 @@ function normalizeDraft(raw: unknown): IntentDraftResponse {
       webAllowedDomains: plan.webAllowedDomains ?? plan.web_allowed_domains ?? [],
       inboxSourceText: plan.inboxSourceText ?? plan.inbox_source_text ?? null,
       recipientHints: plan.recipientHints ?? plan.recipient_hints ?? [],
+      apiCallRequest: plan.apiCallRequest ?? plan.api_call_request ?? null,
     },
     preview: {
       reads: value.preview?.reads ?? [],
@@ -162,6 +164,9 @@ export function App() {
   const [relayPushStatus, setRelayPushStatus] = useState<RelayApprovalSyncStatusRecord | null>(null);
   const [relayCallbackSecretPreview, setRelayCallbackSecretPreview] = useState<string | null>(null);
   const [relaySubscriberTokenInput, setRelaySubscriberTokenInput] = useState("");
+  const [apiKeyRefName, setApiKeyRefName] = useState("crm_prod");
+  const [apiKeyRefSecret, setApiKeyRefSecret] = useState("");
+  const [apiKeyRefStatus, setApiKeyRefStatus] = useState<ApiKeyRefStatusRecord | null>(null);
   const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
   const [oauthClientId, setOauthClientId] = useState("");
   const [oauthRedirectUri, setOauthRedirectUri] = useState("");
@@ -934,6 +939,81 @@ export function App() {
       .catch((err) => {
         console.error("Failed to remove relay token:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not remove hosted plan token.");
+      });
+  };
+
+  const saveApiKeyRef = () => {
+    const refName = apiKeyRefName.trim();
+    const secret = apiKeyRefSecret.trim();
+    if (!refName) {
+      setConnectionsMessage("Add an API key ref name first.");
+      return;
+    }
+    if (!secret) {
+      setConnectionsMessage("Paste an API key first.");
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<ApiKeyRefStatusRecord>("set_api_key_ref", {
+      input: { refName, secret },
+    })
+      .then((payload: any) => {
+        setApiKeyRefStatus({
+          refName: payload.refName ?? payload.ref_name ?? refName,
+          configured: payload.configured ?? true,
+        });
+        setApiKeyRefSecret("");
+        setConnectionsMessage("API key ref saved to Keychain.");
+      })
+      .catch((err) => {
+        console.error("Failed to save API key ref:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not save API key ref.");
+      });
+  };
+
+  const removeApiKeyRef = () => {
+    const refName = apiKeyRefName.trim();
+    if (!refName) {
+      setConnectionsMessage("Add an API key ref name first.");
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<ApiKeyRefStatusRecord>("remove_api_key_ref", { input: { refName } })
+      .then((payload: any) => {
+        setApiKeyRefStatus({
+          refName: payload.refName ?? payload.ref_name ?? refName,
+          configured: payload.configured ?? false,
+        });
+        setConnectionsMessage("API key ref removed.");
+      })
+      .catch((err) => {
+        console.error("Failed to remove API key ref:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not remove API key ref.");
+      });
+  };
+
+  const checkApiKeyRefStatus = () => {
+    const refName = apiKeyRefName.trim();
+    if (!refName) {
+      setConnectionsMessage("Add an API key ref name first.");
+      return;
+    }
+    setConnectionsMessage(null);
+    invoke<ApiKeyRefStatusRecord>("get_api_key_ref_status", { refName })
+      .then((payload: any) => {
+        setApiKeyRefStatus({
+          refName: payload.refName ?? payload.ref_name ?? refName,
+          configured: payload.configured ?? false,
+        });
+        setConnectionsMessage(
+          (payload.configured ?? false)
+            ? "API key ref is configured."
+            : "API key ref is not configured yet."
+        );
+      })
+      .catch((err) => {
+        console.error("Failed to check API key ref:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not check API key ref.");
       });
   };
 
@@ -2075,6 +2155,14 @@ export function App() {
           setRelaySubscriberTokenInput={setRelaySubscriberTokenInput}
           saveRelaySubscriberToken={saveRelaySubscriberToken}
           removeRelaySubscriberToken={removeRelaySubscriberToken}
+          apiKeyRefName={apiKeyRefName}
+          setApiKeyRefName={setApiKeyRefName}
+          apiKeyRefSecret={apiKeyRefSecret}
+          setApiKeyRefSecret={setApiKeyRefSecret}
+          apiKeyRefStatus={apiKeyRefStatus}
+          saveApiKeyRef={saveApiKeyRef}
+          removeApiKeyRef={removeApiKeyRef}
+          checkApiKeyRefStatus={checkApiKeyRefStatus}
           watcherAutopilotId={watcherAutopilotId}
           setWatcherAutopilotId={setWatcherAutopilotId}
           watcherMaxItems={watcherMaxItems}

@@ -26,7 +26,9 @@ use providers::types::{
 };
 use runner::{ApprovalRecord, ClarificationRecord, RunReceipt, RunRecord, RunnerEngine};
 use rusqlite::OptionalExtension;
-use schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
+use schema::{
+    ApiCallRequest, AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -172,6 +174,26 @@ struct TransportStatusResponse {
 #[serde(rename_all = "camelCase")]
 struct RelaySubscriberTokenInput {
     token: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyRefInput {
+    ref_name: String,
+    secret: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyRefDeleteInput {
+    ref_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyRefStatus {
+    ref_name: String,
+    configured: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -718,6 +740,39 @@ fn set_subscriber_token(
 fn remove_subscriber_token() -> Result<TransportStatusResponse, String> {
     providers::keychain::delete_relay_subscriber_token().map_err(|e| e.to_string())?;
     get_transport_status()
+}
+
+#[tauri::command]
+fn set_api_key_ref(input: ApiKeyRefInput) -> Result<ApiKeyRefStatus, String> {
+    let ref_name = sanitize_api_key_ref_name(&input.ref_name)?;
+    providers::keychain::set_api_key_ref_secret(&ref_name, input.secret.trim())
+        .map_err(|e| e.to_string())?;
+    Ok(ApiKeyRefStatus {
+        ref_name,
+        configured: true,
+    })
+}
+
+#[tauri::command]
+fn remove_api_key_ref(input: ApiKeyRefDeleteInput) -> Result<ApiKeyRefStatus, String> {
+    let ref_name = sanitize_api_key_ref_name(&input.ref_name)?;
+    providers::keychain::delete_api_key_ref_secret(&ref_name).map_err(|e| e.to_string())?;
+    Ok(ApiKeyRefStatus {
+        ref_name,
+        configured: false,
+    })
+}
+
+#[tauri::command]
+fn get_api_key_ref_status(ref_name: String) -> Result<ApiKeyRefStatus, String> {
+    let ref_name = sanitize_api_key_ref_name(&ref_name)?;
+    let configured = providers::keychain::get_api_key_ref_secret(&ref_name)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|v| !v.trim().is_empty());
+    Ok(ApiKeyRefStatus {
+        ref_name,
+        configured,
+    })
 }
 
 #[tauri::command]
@@ -2739,6 +2794,8 @@ struct GeneratedCustomPlan {
     recipient_hints: Vec<String>,
     #[serde(default)]
     allowed_primitives: Vec<String>,
+    #[serde(default)]
+    api_call_request: Option<GeneratedApiCallRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2748,6 +2805,20 @@ struct GeneratedCustomStep {
     primitive: String,
     requires_approval: bool,
     risk_tier: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedApiCallRequest {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    header_key_ref: String,
+    #[serde(default)]
+    auth_header_name: Option<String>,
+    #[serde(default)]
+    auth_scheme: Option<String>,
+    #[serde(default)]
+    body_json: Option<String>,
 }
 
 fn provider_kind_for_schema(provider_id: ProviderId) -> ApiProviderKind {
@@ -2771,6 +2842,7 @@ fn parse_generated_primitive_id(raw: &str) -> Result<PrimitiveId, String> {
         "readweb" | "read_web" => Ok(PrimitiveId::ReadWeb),
         "readsources" | "read_sources" => Ok(PrimitiveId::ReadSources),
         "readforwardedemail" | "read_forwarded_email" => Ok(PrimitiveId::ReadForwardedEmail),
+        "callapi" | "call_api" => Ok(PrimitiveId::CallApi),
         "triageemail" | "triage_email" => Ok(PrimitiveId::TriageEmail),
         "aggregatedailysummary" | "aggregate_daily_summary" => {
             Ok(PrimitiveId::AggregateDailySummary)
@@ -2792,6 +2864,116 @@ fn parse_generated_risk_tier(raw: &str) -> Result<RiskTier, String> {
         "high" => Ok(RiskTier::High),
         _ => Err(format!("Unknown risk tier in generated plan: {raw}")),
     }
+}
+
+fn sanitize_api_key_ref_name(raw: &str) -> Result<String, String> {
+    let cleaned = raw
+        .trim()
+        .chars()
+        .take(64)
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .collect::<String>();
+    if cleaned.is_empty() {
+        return Err("API key reference name is required.".to_string());
+    }
+    Ok(cleaned)
+}
+
+fn normalize_api_call_method(raw: &str) -> Result<String, String> {
+    let method = raw.trim().to_ascii_uppercase();
+    match method.as_str() {
+        "GET" | "POST" => Ok(method),
+        _ => Err("CallApi method must be GET or POST in MVP.".to_string()),
+    }
+}
+
+fn normalize_auth_header_name(raw: &str) -> Result<String, String> {
+    let cleaned = raw
+        .trim()
+        .chars()
+        .take(48)
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>();
+    if cleaned.is_empty() {
+        return Err("CallApi auth header name is invalid.".to_string());
+    }
+    Ok(cleaned)
+}
+
+fn normalize_auth_scheme(raw: &str) -> Result<String, String> {
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "bearer" | "raw" => Ok(value),
+        _ => Err("CallApi auth scheme must be bearer or raw in MVP.".to_string()),
+    }
+}
+
+fn validate_api_call_request_config(
+    config: ApiCallRequest,
+    allowlisted_domains: &mut Vec<String>,
+) -> Result<ApiCallRequest, String> {
+    let url = config.url.trim().to_string();
+    let (scheme, host) = crate::web::parse_scheme_host(&url)
+        .ok_or_else(|| "CallApi URL must be a valid HTTP/HTTPS URL.".to_string())?;
+    if scheme != "http" && scheme != "https" {
+        return Err("CallApi URL must use HTTP or HTTPS.".to_string());
+    }
+    if !allowlisted_domains
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(&host))
+    {
+        allowlisted_domains.push(host.to_ascii_lowercase());
+    }
+    let method = normalize_api_call_method(&config.method)?;
+    let header_key_ref = sanitize_api_key_ref_name(&config.header_key_ref)?;
+    let auth_header_name = normalize_auth_header_name(&config.auth_header_name)?;
+    let auth_scheme = normalize_auth_scheme(&config.auth_scheme)?;
+    let body_json = config
+        .body_json
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.len() > 8_000 {
+                return Err("CallApi request body is too large for MVP.".to_string());
+            }
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|_| "CallApi request body must be valid JSON.".to_string())?;
+            Ok(s.to_string())
+        })
+        .transpose()?;
+    if method == "GET" && body_json.is_some() {
+        return Err("CallApi GET requests cannot include a JSON body in MVP.".to_string());
+    }
+    Ok(ApiCallRequest {
+        url,
+        method,
+        header_key_ref,
+        auth_header_name,
+        auth_scheme,
+        body_json,
+    })
+}
+
+fn generated_api_call_to_schema(
+    generated: GeneratedApiCallRequest,
+    allowlisted_domains: &mut Vec<String>,
+) -> Result<ApiCallRequest, String> {
+    validate_api_call_request_config(
+        ApiCallRequest {
+            url: generated.url,
+            method: generated.method.unwrap_or_else(|| "GET".to_string()),
+            header_key_ref: generated.header_key_ref,
+            auth_header_name: generated
+                .auth_header_name
+                .unwrap_or_else(|| "Authorization".to_string()),
+            auth_scheme: generated
+                .auth_scheme
+                .unwrap_or_else(|| "bearer".to_string()),
+            body_json: generated.body_json,
+        },
+        allowlisted_domains,
+    )
 }
 
 fn validate_custom_execution_plan(
@@ -2818,6 +3000,10 @@ fn validate_custom_execution_plan(
     let mut used = Vec::<PrimitiveId>::new();
     for step in &mut plan.steps {
         match step.primitive {
+            PrimitiveId::CallApi => {
+                step.requires_approval = true;
+                step.risk_tier = RiskTier::High;
+            }
             PrimitiveId::SendEmail => {
                 step.requires_approval = true;
                 step.risk_tier = RiskTier::High;
@@ -2873,6 +3059,12 @@ fn validate_custom_execution_plan(
             }
         }
     }
+    if let Some(config) = plan.api_call_request.clone() {
+        plan.api_call_request = Some(validate_api_call_request_config(
+            config,
+            &mut plan.web_allowed_domains,
+        )?);
+    }
     plan.recipient_hints = plan
         .recipient_hints
         .into_iter()
@@ -2900,6 +3092,17 @@ fn validate_custom_execution_plan(
     {
         return Err(
             "Custom plan reads sources but no source URLs were detected. Add source URLs and retry."
+                .to_string(),
+        );
+    }
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.primitive == PrimitiveId::CallApi)
+        && plan.api_call_request.is_none()
+    {
+        return Err(
+            "Custom plan calls an API but has no API request configuration. Add URL and key ref and retry."
                 .to_string(),
         );
     }
@@ -2936,6 +3139,10 @@ fn validate_and_build_custom_plan(
         let mut risk_tier = parse_generated_risk_tier(&generated_step.risk_tier)?;
         let mut requires_approval = generated_step.requires_approval;
         match primitive {
+            PrimitiveId::CallApi => {
+                requires_approval = true;
+                risk_tier = RiskTier::High;
+            }
             PrimitiveId::SendEmail => {
                 requires_approval = true;
                 risk_tier = RiskTier::High;
@@ -2987,15 +3194,22 @@ fn validate_and_build_custom_plan(
         .cloned()
         .collect::<Vec<String>>();
 
+    let mut web_allowed_domains = generated.web_allowed_domains;
+    let api_call_request = generated
+        .api_call_request
+        .map(|cfg| generated_api_call_to_schema(cfg, &mut web_allowed_domains))
+        .transpose()?;
+
     let plan = AutopilotPlan {
         schema_version: "1.0".to_string(),
         recipe: RecipeKind::Custom,
         intent: intent.to_string(),
         provider: schema::ProviderMetadata::from_provider_id(provider_id),
         web_source_url,
-        web_allowed_domains: generated.web_allowed_domains,
+        web_allowed_domains,
         inbox_source_text: None,
         daily_sources,
+        api_call_request,
         recipient_hints: generated.recipient_hints,
         allowed_primitives: if generated.allowed_primitives.is_empty() {
             used_primitives
@@ -3013,10 +3227,13 @@ fn generate_custom_plan(intent: &str, provider_id: ProviderId) -> Result<Autopil
             "Generate a Terminus execution plan as JSON only.\n",
             "Intent: {intent}\n\n",
             "Use only these primitive ids (snake_case): read_web, read_sources, read_forwarded_email, triage_email, aggregate_daily_summary, write_outcome_draft, write_email_draft, send_email, notify_user.\n",
+            "You may also use: call_api (approval-gated, bounded HTTP GET/POST to allowlisted domain with Keychain ref).\n",
             "Do not use schedule_run or read_vault_file.\n",
             "Required JSON shape:\n",
-            "{{\"steps\":[{{\"id\":\"step_1\",\"label\":\"...\",\"primitive\":\"read_web\",\"requires_approval\":false,\"risk_tier\":\"low\"}}],\"web_allowed_domains\":[\"example.com\"],\"recipient_hints\":[\"person@example.com\"],\"allowed_primitives\":[\"read_web\"]}}\n",
+            "{{\"steps\":[{{\"id\":\"step_1\",\"label\":\"...\",\"primitive\":\"read_web\",\"requires_approval\":false,\"risk_tier\":\"low\"}}],\"web_allowed_domains\":[\"example.com\"],\"recipient_hints\":[\"person@example.com\"],\"allowed_primitives\":[\"read_web\"],\"api_call_request\":null}}\n",
+            "If using call_api include api_call_request: {{\"url\":\"https://api.example.com/v1/items\",\"method\":\"GET|POST\",\"header_key_ref\":\"crm_prod\",\"auth_header_name\":\"Authorization\",\"auth_scheme\":\"bearer|raw\",\"body_json\":\"{{...}}\"}}\n",
             "Rules:\n",
+            "- call_api must be approval-gated and high risk\n",
             "- send_email must be high risk and approval-gated\n",
             "- write_outcome_draft and write_email_draft should be approval-gated\n",
             "- Keep step count between 1 and 10\n",
@@ -3047,6 +3264,7 @@ fn describe_primitive_read(primitive: PrimitiveId) -> Option<String> {
         PrimitiveId::ReadForwardedEmail => {
             Some("Read forwarded or pasted inbox content".to_string())
         }
+        PrimitiveId::CallApi => Some("Read or write a bounded external API endpoint".to_string()),
         PrimitiveId::ReadVaultFile => Some("Read connected vault files".to_string()),
         _ => None,
     }
@@ -3060,6 +3278,7 @@ fn describe_primitive_write(primitive: PrimitiveId) -> Option<String> {
         PrimitiveId::SendEmail => Some("Send an email".to_string()),
         PrimitiveId::ScheduleRun => Some("Schedule this autopilot".to_string()),
         PrimitiveId::NotifyUser => Some("Send a notification".to_string()),
+        PrimitiveId::CallApi => Some("Call an external API (approval-gated)".to_string()),
         _ => None,
     }
 }
@@ -3187,6 +3406,7 @@ mod tests {
             web_allowed_domains: vec!["Example.com".to_string()],
             recipient_hints: vec!["team@example.com".to_string()],
             allowed_primitives: vec!["send_email".to_string()],
+            api_call_request: None,
         };
         let plan = validate_and_build_custom_plan(
             "Send updates for https://example.com",
@@ -3214,6 +3434,7 @@ mod tests {
             web_allowed_domains: vec![],
             recipient_hints: vec![],
             allowed_primitives: vec![],
+            api_call_request: None,
         };
         let err = validate_and_build_custom_plan("Schedule this", ProviderId::OpenAi, disallowed)
             .expect_err("schedule_run must be rejected");
@@ -3241,6 +3462,51 @@ mod tests {
         plan.web_allowed_domains = vec!["example.com".to_string()];
         let ok = validate_custom_execution_plan(plan, ProviderId::OpenAi).expect("valid");
         assert_eq!(ok.provider.id, ProviderId::OpenAi);
+    }
+
+    #[test]
+    fn validate_custom_plan_call_api_requires_config_and_forces_approval() {
+        let generated = GeneratedCustomPlan {
+            steps: vec![GeneratedCustomStep {
+                id: "step_1".to_string(),
+                label: "Call CRM".to_string(),
+                primitive: "call_api".to_string(),
+                requires_approval: false,
+                risk_tier: "low".to_string(),
+            }],
+            web_allowed_domains: vec![],
+            recipient_hints: vec![],
+            allowed_primitives: vec![],
+            api_call_request: Some(GeneratedApiCallRequest {
+                url: "https://api.example.com/v1/items".to_string(),
+                method: Some("get".to_string()),
+                header_key_ref: "crm_prod".to_string(),
+                auth_header_name: Some("Authorization".to_string()),
+                auth_scheme: Some("bearer".to_string()),
+                body_json: None,
+            }),
+        };
+        let plan = validate_and_build_custom_plan(
+            "Call the CRM API and summarize results",
+            ProviderId::OpenAi,
+            generated,
+        )
+        .expect("valid call api custom plan");
+        assert!(plan.api_call_request.is_some());
+        let step = &plan.steps[0];
+        assert_eq!(step.primitive, PrimitiveId::CallApi);
+        assert!(step.requires_approval);
+        assert_eq!(step.risk_tier, RiskTier::High);
+        assert!(plan
+            .web_allowed_domains
+            .iter()
+            .any(|d| d == "api.example.com"));
+
+        let mut missing_cfg = plan.clone();
+        missing_cfg.api_call_request = None;
+        let err = validate_custom_execution_plan(missing_cfg, ProviderId::OpenAi)
+            .expect_err("call_api should require config");
+        assert!(err.contains("API request configuration"));
     }
 
     #[test]
@@ -3318,6 +3584,9 @@ fn main() {
             clear_relay_callback_secret,
             set_subscriber_token,
             remove_subscriber_token,
+            set_api_key_ref,
+            remove_api_key_ref,
+            get_api_key_ref_status,
             list_webhook_triggers,
             create_webhook_trigger,
             rotate_webhook_trigger_secret,

@@ -6,15 +6,19 @@ use crate::learning::{
 };
 use crate::primitives::PrimitiveGuard;
 use crate::providers::{
-    ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime, ProviderTier,
+    keychain, ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderRuntime,
+    ProviderTier,
 };
 use crate::schema::{
-    AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
+    ApiCallRequest, AutopilotPlan, PlanStep, PrimitiveId, ProviderId as SchemaProviderId,
     ProviderTier as SchemaProviderTier, RecipeKind,
 };
 use crate::web::{fetch_allowlisted_text, WebFetchError, WebFetchResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,6 +34,8 @@ const DAILY_HARD_CAP_USD_CENTS: i64 = 500;
 const SOFT_CAP_APPROVAL_STEP_ID: &str = "__soft_cap__";
 const INBOX_TEXT_MAX_CHARS: usize = 20_000;
 const DAILY_SOURCE_MAX_ITEMS: usize = 10;
+const CALL_API_MAX_RESPONSE_BYTES: usize = 200_000;
+const CALL_API_DEFAULT_TIMEOUT_SECS: i64 = 15;
 
 // Retry backoff constants
 const RETRY_BACKOFF_BASE_MS: u32 = 200; // Initial backoff: 200ms
@@ -276,6 +282,12 @@ struct StepExecutionError {
 }
 
 #[derive(Debug)]
+struct CallApiExecutionError {
+    retryable: bool,
+    user_reason: String,
+}
+
+#[derive(Debug)]
 struct StepExecutionResult {
     user_message: String,
     actual_spend_usd_cents: i64,
@@ -351,6 +363,17 @@ struct DailySummaryArtifact {
     summary_text: String,
     sources_hash: String,
     content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiCallResultArtifact {
+    url: String,
+    method: String,
+    status_code: u16,
+    content_type: String,
+    response_excerpt: String,
+    response_hash: String,
+    called_at_ms: i64,
 }
 
 enum CapDecision {
@@ -1886,6 +1909,42 @@ impl RunnerEngine {
                     failure_reason_override: None,
                 })
             }
+            PrimitiveId::CallApi => {
+                let config = run
+                    .plan
+                    .api_call_request
+                    .clone()
+                    .ok_or_else(|| StepExecutionError {
+                        retryable: false,
+                        user_reason:
+                            "This API call step is missing configuration. Re-draft the Autopilot and try again."
+                                .to_string(),
+                    })?;
+                let artifact =
+                    Self::execute_call_api(connection, run, step, &config).map_err(|err| {
+                        StepExecutionError {
+                            retryable: err.retryable,
+                            user_reason: err.user_reason,
+                        }
+                    })?;
+                Self::persist_api_call_result_artifact(connection, run, step, &artifact).map_err(
+                    |e| StepExecutionError {
+                        retryable: false,
+                        user_reason: e.to_string(),
+                    },
+                )?;
+                Ok(StepExecutionResult {
+                    user_message: format!(
+                        "API call completed ({} {}).",
+                        artifact.method, artifact.status_code
+                    ),
+                    actual_spend_usd_cents: estimate_step_cost_usd_cents(run, step),
+                    next_step_index_override: None,
+                    terminal_state_override: None,
+                    terminal_summary_override: None,
+                    failure_reason_override: None,
+                })
+            }
             PrimitiveId::TriageEmail => {
                 let context =
                     Self::get_ingest_context_for_run(connection, &run.id).map_err(|e| {
@@ -2326,6 +2385,69 @@ impl RunnerEngine {
                 user_reason: "Couldn't save website read artifact.".to_string(),
             })?;
         Ok(())
+    }
+
+    fn persist_api_call_result_artifact(
+        connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        artifact: &ApiCallResultArtifact,
+    ) -> Result<(), RunnerError> {
+        let payload =
+            serde_json::to_string(artifact).map_err(|e| RunnerError::Serde(e.to_string()))?;
+        connection
+            .execute(
+                "
+                INSERT INTO outcomes (
+                  id, run_id, step_id, kind, status, content, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, 'api_call_result', 'captured', ?4, ?5, ?5)
+                ON CONFLICT(run_id, step_id, kind)
+                DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at
+                ",
+                params![make_id("outcome"), run.id, step.id, payload, now_ms()],
+            )
+            .map_err(|e| RunnerError::Db(e.to_string()))?;
+        Ok(())
+    }
+
+    fn execute_call_api(
+        _connection: &Connection,
+        run: &RunRecord,
+        step: &PlanStep,
+        config: &ApiCallRequest,
+    ) -> Result<ApiCallResultArtifact, CallApiExecutionError> {
+        let (_, host) =
+            crate::web::parse_scheme_host(&config.url).ok_or_else(|| CallApiExecutionError {
+                retryable: false,
+                user_reason: "CallApi URL must be a valid HTTP/HTTPS URL.".to_string(),
+            })?;
+        if !run
+            .plan
+            .web_allowed_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(&host))
+        {
+            return Err(CallApiExecutionError {
+                retryable: false,
+                user_reason: "This API host is not in the allowlist for this Autopilot."
+                    .to_string(),
+            });
+        }
+        let secret = keychain::get_api_key_ref_secret(&config.header_key_ref)
+            .map_err(|_| CallApiExecutionError {
+                retryable: false,
+                user_reason: "Could not access Keychain for this API key ref.".to_string(),
+            })?
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| CallApiExecutionError {
+                retryable: false,
+                user_reason: format!(
+                    "API key ref '{}' is not configured yet. Add it in Connections.",
+                    config.header_key_ref
+                ),
+            })?;
+
+        execute_bounded_api_call(run, step, config, &secret)
     }
 
     fn get_web_read_artifact(
@@ -4055,6 +4177,168 @@ fn map_web_fetch_error(error: WebFetchError) -> StepExecutionError {
     }
 }
 
+fn execute_bounded_api_call(
+    run: &RunRecord,
+    step: &PlanStep,
+    config: &ApiCallRequest,
+    secret: &str,
+) -> Result<ApiCallResultArtifact, CallApiExecutionError> {
+    let sentinel = "__TERMINUS_HTTP_STATUS__:";
+    let mut curl_config = String::new();
+    curl_config.push_str("silent\nshow-error\nlocation\n");
+    curl_config.push_str(&format!(
+        "max-time = {}\n",
+        CALL_API_DEFAULT_TIMEOUT_SECS.clamp(5, 30)
+    ));
+    curl_config.push_str("proto = \"=http,https\"\n");
+    curl_config.push_str("proto-redir = \"=http,https\"\n");
+    curl_config.push_str(&format!("max-filesize = {}\n", CALL_API_MAX_RESPONSE_BYTES));
+    curl_config.push_str(&format!("request = \"{}\"\n", config.method));
+    curl_config.push_str(&format!("url = \"{}\"\n", config.url));
+    let auth_value = if config.auth_scheme == "raw" {
+        secret.to_string()
+    } else {
+        format!("Bearer {secret}")
+    };
+    curl_config.push_str(&format!(
+        "header = \"{}: {}\"\n",
+        config.auth_header_name, auth_value
+    ));
+    curl_config.push_str("header = \"Accept: application/json, text/plain;q=0.9, */*;q=0.5\"\n");
+    if let Some(body_json) = config.body_json.as_deref() {
+        curl_config.push_str("header = \"Content-Type: application/json\"\n");
+        curl_config.push_str(&format!(
+            "header = \"Idempotency-Key: terminus:{}:{}\"\n",
+            run.id, step.id
+        ));
+        curl_config.push_str(&format!("data = {}\n", body_json));
+    }
+    curl_config.push_str(&format!("write-out = \"\\n{sentinel}%{{http_code}}\"\n"));
+
+    let mut child = Command::new("curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| CallApiExecutionError {
+            retryable: true,
+            user_reason: "Could not start network client for API call.".to_string(),
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(curl_config.as_bytes())
+            .map_err(|_| CallApiExecutionError {
+                retryable: true,
+                user_reason: "Could not prepare API call request.".to_string(),
+            })?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|_| CallApiExecutionError {
+            retryable: true,
+            user_reason: "API call client failed before completing.".to_string(),
+        })?;
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(1);
+        let retryable = matches!(code, 5 | 6 | 7 | 28 | 52 | 56);
+        let user_reason = match code {
+            28 => "API call timed out. Try again.".to_string(),
+            63 => "API response was too large. Reduce scope.".to_string(),
+            _ if retryable => "API endpoint is temporarily unavailable. Try again.".to_string(),
+            _ => "API call failed before receiving a response.".to_string(),
+        };
+        return Err(CallApiExecutionError {
+            retryable: retryable && config.method == "GET",
+            user_reason,
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (body_text, status_str) =
+        stdout
+            .rsplit_once(sentinel)
+            .ok_or_else(|| CallApiExecutionError {
+                retryable: config.method == "GET",
+                user_reason: "API response could not be parsed.".to_string(),
+            })?;
+    let status_code: u16 = status_str.trim().parse().unwrap_or(0);
+    if status_code == 0 {
+        return Err(CallApiExecutionError {
+            retryable: config.method == "GET",
+            user_reason: "API response could not be parsed.".to_string(),
+        });
+    }
+    let body_compact = body_text.trim();
+    if body_compact.len() > CALL_API_MAX_RESPONSE_BYTES {
+        return Err(CallApiExecutionError {
+            retryable: false,
+            user_reason: "API response was too large. Reduce scope.".to_string(),
+        });
+    }
+    if matches!(status_code, 408 | 429 | 500..=599) {
+        return Err(CallApiExecutionError {
+            retryable: config.method == "GET",
+            user_reason: format!(
+                "API returned {}. {}",
+                status_code,
+                if status_code == 429 {
+                    "Rate limited. Try again shortly."
+                } else {
+                    "Try again shortly."
+                }
+            ),
+        });
+    }
+    if !(200..300).contains(&status_code) {
+        let excerpt = truncate_chars(&sanitize_response_excerpt(body_compact), 180);
+        return Err(CallApiExecutionError {
+            retryable: false,
+            user_reason: if excerpt.is_empty() {
+                format!(
+                    "API returned {}. Review endpoint settings and try again.",
+                    status_code
+                )
+            } else {
+                format!("API returned {}: {}", status_code, excerpt)
+            },
+        });
+    }
+
+    let content_type = infer_content_type_from_body(body_compact);
+    let excerpt = truncate_chars(&sanitize_response_excerpt(body_compact), 1200);
+    let response_hash = format!("{:x}", Sha256::digest(body_compact.as_bytes()));
+    Ok(ApiCallResultArtifact {
+        url: config.url.clone(),
+        method: config.method.clone(),
+        status_code,
+        content_type,
+        response_excerpt: excerpt,
+        response_hash,
+        called_at_ms: now_ms(),
+    })
+}
+
+fn infer_content_type_from_body(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        "application/json".to_string()
+    } else {
+        "text/plain".to_string()
+    }
+}
+
+fn sanitize_response_excerpt(body: &str) -> String {
+    let mut out = body.replace('\n', " ");
+    out = out.replace('\r', " ");
+    out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if out.contains("Bearer ") {
+        out = out.replace("Bearer ", "[REDACTED_BEARER] ");
+    }
+    out
+}
+
 fn provider_kind_from_plan(plan: &AutopilotPlan) -> ProviderKind {
     match plan.provider.id {
         SchemaProviderId::OpenAi => ProviderKind::OpenAi,
@@ -4380,6 +4664,7 @@ fn estimate_step_cost_usd_cents(run: &RunRecord, step: &PlanStep) -> i64 {
 
     match step.primitive {
         PrimitiveId::AggregateDailySummary => 16,
+        PrimitiveId::CallApi => 3,
         PrimitiveId::WriteOutcomeDraft => 12,
         PrimitiveId::WriteEmailDraft => 14,
         _ => 0,
@@ -4415,9 +4700,10 @@ fn compute_backoff_ms(retry_attempt: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunReceipt, RunState, RunnerEngine};
+    use super::{execute_bounded_api_call, RunReceipt, RunRecord, RunState, RunnerEngine};
     use crate::db::{bootstrap_schema, AutopilotProfileUpsert, AutopilotSendPolicyRecord};
     use crate::learning;
+    use crate::providers::{ProviderKind, ProviderTier};
     use crate::schema::{AutopilotPlan, PlanStep, PrimitiveId, ProviderId, RecipeKind, RiskTier};
     use rusqlite::{params, Connection};
     use std::io::{Read, Write};
@@ -4443,6 +4729,7 @@ mod tests {
             web_allowed_domains: Vec::new(),
             inbox_source_text: None,
             daily_sources: Vec::new(),
+            api_call_request: None,
             recipient_hints: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft],
             steps: vec![PlanStep {
@@ -4452,6 +4739,41 @@ mod tests {
                 requires_approval: false,
                 risk_tier: RiskTier::Low,
             }],
+        }
+    }
+
+    fn minimal_run_for_api(url: &str) -> RunRecord {
+        let mut plan = AutopilotPlan::from_intent(
+            RecipeKind::Custom,
+            "Call API test".to_string(),
+            ProviderId::OpenAi,
+        );
+        plan.web_allowed_domains = vec!["127.0.0.1".to_string()];
+        plan.api_call_request = Some(crate::schema::ApiCallRequest {
+            url: url.to_string(),
+            method: "GET".to_string(),
+            header_key_ref: "test_ref".to_string(),
+            auth_header_name: "Authorization".to_string(),
+            auth_scheme: "bearer".to_string(),
+            body_json: None,
+        });
+        RunRecord {
+            id: "run_api_test".to_string(),
+            autopilot_id: "auto_api_test".to_string(),
+            idempotency_key: "idem_api_test".to_string(),
+            provider_kind: ProviderKind::OpenAi,
+            provider_tier: ProviderTier::Supported,
+            state: RunState::Ready,
+            current_step_index: 0,
+            retry_count: 0,
+            max_retries: 1,
+            next_retry_backoff_ms: None,
+            next_retry_at_ms: None,
+            soft_cap_approved: false,
+            usd_cents_estimate: 0,
+            usd_cents_actual: 0,
+            failure_reason: None,
+            plan,
         }
     }
 
@@ -5062,6 +5384,7 @@ mod tests {
             web_allowed_domains: Vec::new(),
             inbox_source_text: Some("Subject: hi\nCan we meet tomorrow?".to_string()),
             daily_sources: Vec::new(),
+            api_call_request: None,
             recipient_hints: Vec::new(),
             allowed_primitives: vec![PrimitiveId::WriteOutcomeDraft, PrimitiveId::WriteEmailDraft],
             steps: vec![PlanStep {
@@ -5078,6 +5401,39 @@ mod tests {
         assert_eq!(failed.state, RunState::Failed);
         let reason = failed.failure_reason.expect("reason");
         assert_eq!(reason, "This action isn't allowed in Terminus yet.");
+    }
+
+    #[test]
+    fn call_api_executes_bounded_get_and_returns_artifact() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"ok":true,"items":[1,2,3]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let run = minimal_run_for_api(&format!("http://{}/v1/items", addr));
+        let step = PlanStep {
+            id: "step_1".to_string(),
+            label: "Call API".to_string(),
+            primitive: PrimitiveId::CallApi,
+            requires_approval: true,
+            risk_tier: RiskTier::High,
+        };
+        let cfg = run.plan.api_call_request.clone().expect("config");
+        let artifact = execute_bounded_api_call(&run, &step, &cfg, "secret").expect("api call");
+        assert_eq!(artifact.status_code, 200);
+        assert_eq!(artifact.method, "GET");
+        assert!(artifact.response_excerpt.contains("\"ok\":true"));
     }
 
     #[test]

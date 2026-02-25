@@ -1,11 +1,11 @@
 # Agentic Best-Practices Plan + Status (Fresh Session Handoff)
-Last updated: 2026-03-02
+Last updated: 2026-02-25
 
 ## Why This File Exists
 This file captures:
 - the agentic-orchestration plan discussed from external article research
 - what was actually implemented in Terminus from that plan
-- the current repo/project state from the latest PR28 worktree docs
+- the current repo/project state from the latest `main` docs
 
 Use this as the fast-start context for a fresh Codex session before proposing new work.
 
@@ -137,23 +137,21 @@ Note:
 - memory provenance read APIs shipped
 - memory suppress/unsuppress controls shipped (autopilot-scoped, bounded)
 
-## Current Workstream Status (as of 2026-03-02)
+## Current Workstream Status (as of 2026-02-25)
 - Workstream A (Supervisor Loop): **Implemented**
 - Workstream B (Mission Orchestration MVP): **Implemented**
 - Workstream C (Context + Memory Provenance MVP): **Implemented**
-- New active follow-on: **Relay-backed Webhook Trigger MVP** (bounded external event ingress)
+- New active follow-on: **Rule Cards ("Teach Once") + BYOK auth improvements** (bounded operator teaching + reduced setup friction)
 
-## Current Project State (from latest PR28 worktree docs)
+## Current Project State (from latest `main` docs)
 Source inspected:
-- `/Users/vir.c/terminus-pr28/mission_control.md`
-- `/Users/vir.c/terminus-pr28/handoff.md`
+- `/Users/vir.c/terminus/mission_control.md`
+- `/Users/vir.c/terminus/handoff.md`
 
-### `mission_control.md` (PR28 snapshot)
-- Last updated: 2026-02-24
-- Branch: `codex/pr28-refactor-prep`
-- Active work in that snapshot: **PR28 structural refactor/prep (no behavior change)**
-- PR28 scope:
-  - extract `ConnectionPanel` from `App.tsx`
+### `mission_control.md` (current snapshot)
+- Tracks current/next work on live `main`, not a PR worktree snapshot
+- Current baseline includes dynamic plans, relay transport/approvals, onboarding, voice, webhook triggers, and `CallApi` MVP
+- Next priorities now center on Codex OAuth BYOK + Rule Cards ("Teach Once")
   - extract `main.rs` helper logic into `guidance_utils.rs`
   - reduce file size / improve seams
 - Next priorities in that snapshot:
@@ -187,14 +185,13 @@ Current documented priorities have moved beyond Workstreams A/B/C into:
 - hosted relay packaging + onboarding polish
 
 ## Recommended Next-Step Focus (Current)
-1. **Relay-backed Webhook Trigger MVP**
-   - bounded inbound external events -> run enqueue
-   - reuse relay callback auth/replay protections
-   - preserve approvals/receipts/spend rails
+1. **Codex OAuth BYOK support (advanced mode)**
+   - ChatGPT sign-in path for OpenAI/Codex with Keychain-only token storage
+   - preserve relay-primary packaging while reducing BYOK friction
 2. **Rule extraction / "Teach Once"**
    - explicit, approval-gated reusable behavior changes
-3. **Outbound HTTP API primitive (`CallApi`)**
-   - only after webhook ingress proves demand and policy model is ready
+3. **Outbound API expansion after `CallApi` MVP**
+   - broader HTTP/API policy model, templates, and safer reusable API actions
 
 ## If Continuing the Agentic Plan, Start Here (Implementation Order)
 1. **Mission Orchestration MVP (smallest vertical slice)**
@@ -222,5 +219,5 @@ Current documented priorities have moved beyond Workstreams A/B/C into:
 - SQLite schema/bootstrap: `src-tauri/src/db.rs`
 - Learning layer: `src-tauri/src/learning/mod.rs`
 - Home UI shell: `src/App.tsx`
-- Latest mission control snapshot (PR28 worktree): `/Users/vir.c/terminus-pr28/mission_control.md`
-- Latest handoff snapshot (PR28 worktree): `/Users/vir.c/terminus-pr28/handoff.md`
+- Latest mission control snapshot: `/Users/vir.c/terminus/mission_control.md`
+- Latest handoff snapshot: `/Users/vir.c/terminus/handoff.md`

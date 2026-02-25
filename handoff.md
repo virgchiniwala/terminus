@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-03-02
+Last updated: 2026-02-25
 
 ## Fresh Session Note
 - For the agentic-orchestration plan, implemented supervisor diagnostics slice, and latest cross-session context summary, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
@@ -215,11 +215,19 @@ Last updated: 2026-03-02
     - duplicate delivery dedupe via `(trigger_id, event_idempotency_key)`
   - Webhook deliveries enqueue runs via the existing runner + approvals/spend rails/receipts
   - Home Webhook panel (MVP) supports trigger creation, pause/resume, secret rotate, and delivery list
+- `CallApi` primitive MVP (bounded outbound HTTP, approval-gated):
+  - `PrimitiveId::CallApi` + shared schema `api_call_request` (`url`, `method`, `header_key_ref`, auth header/scheme, optional JSON body)
+  - custom-plan validation forces `CallApi` to `requires_approval = true` and `risk_tier = high`
+  - `CallApi` is not default-allowlisted in preset recipes; only custom plans can opt in via validated steps
+  - API key refs stored in Keychain only (`terminus.api_key_ref.{ref_name}`); no secrets in SQLite/logs/receipts
+  - bounded runtime execution enforces http/https + GET/POST, domain allowlist, timeout, response-size cap, and redacted excerpts
+  - `api_call_result` outcome artifact persisted for inspection/receipts
+  - Connections panel includes advanced API key-ref save/check/remove controls
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
-- `cd src-tauri && cargo test` passes (81 tests)
+- `cd src-tauri && cargo test` passes (85 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
@@ -295,6 +303,6 @@ Last updated: 2026-03-02
 - Legacy money/timestamp schema cleanup (float spend columns + timestamp normalization)
 
 ## Next Suggested Work
-1. Implement Rule object + approval-gated "Make this a rule" flow (bounded overlays only).
-2. Add UI tests for onboarding and Voice panels (save/load/dismiss/override flows).
-3. Surface applied Voice config in receipts/context provenance (titles/summary only, no raw notes if sensitive).
+1. Add Codex OAuth BYOK support (OpenAI/Codex sign-in path) with Keychain-only tokens + refresh/redaction handling.
+2. Implement Rule object + approval-gated "Make this a rule" flow (bounded overlays only).
+3. Add UI tests for onboarding and Voice panels (save/load/dismiss/override flows).

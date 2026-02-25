@@ -107,6 +107,11 @@ export interface TransportStatusRecord {
   relayUrl: string;
 }
 
+export interface ApiKeyRefStatusRecord {
+  refName: string;
+  configured: boolean;
+}
+
 export interface RemoteApprovalReadinessRecord {
   transportMode: string;
   relayConfigured: boolean;
@@ -351,6 +356,7 @@ export type RiskTier = "low" | "medium" | "high";
 export type PrimitiveId =
   | "read_web"
   | "read_forwarded_email"
+  | "call_api"
   | "read_sources"
   | "aggregate_daily_summary"
   | "triage_email"
@@ -386,6 +392,14 @@ export interface AutopilotPlan {
   webAllowedDomains?: string[];
   inboxSourceText?: string | null;
   dailySources?: string[];
+  apiCallRequest?: {
+    url: string;
+    method: string;
+    headerKeyRef: string;
+    authHeaderName: string;
+    authScheme: string;
+    bodyJson?: string | null;
+  } | null;
   recipientHints?: string[];
   allowedPrimitives: PrimitiveId[];
   steps: PlanStep[];

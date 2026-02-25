@@ -1,5 +1,5 @@
 # DIFFERENTIATION.md
-Last updated: 2026-03-02
+Last updated: 2026-02-25
 
 ## Why Terminus Exists
 
@@ -93,7 +93,7 @@ Generic automation tools (Zapier, Make, n8n) require technical setup and often p
 Do not ship changes that move Terminus toward:
 - Chat as primary home screen
 - Harness controls as primary product surface
-- Unconstrained tool execution (anything not in the 11-primitive catalog)
+- Unconstrained tool execution (anything not in the bounded primitive catalog)
 - Capability growth hidden from users
 - Relay-as-middleware drift (relay routes, doesn't rewrite plan logic)
 - MCP-as-marketplace drift (MCP servers are primitive providers, not plugins)
@@ -119,3 +119,5 @@ Do not ship changes that move Terminus toward:
 8. **Calm, premium UX** — object-first, minimal cognitive load, clear always-on truth, no technical jargon
 
 9. **Relay-backed webhook triggers (bounded integration path)** — real inbound integrations now, without jumping to unrestricted external API execution
+
+10. **Bounded `CallApi` primitive (custom integrations without connector sprawl)** — allowlisted outbound HTTP with approval gating and Keychain key refs unlocks CRM/PM/custom APIs while preserving receipts and safety boundaries

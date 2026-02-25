@@ -52,7 +52,7 @@ See `docs/PRINCIPLES_AND_CONSTRAINTS.md`.
 1. Website Monitor
 2. Inbox Triage (paste/forward and always-on watching)
 3. Daily Brief
-4. **Custom (Dynamic Plan Generation)** — LLM generates `AutopilotPlan` from natural language using existing 11 primitives as vocabulary; server-side validation enforces safety invariants
+4. **Custom (Dynamic Plan Generation)** — LLM generates `AutopilotPlan` from natural language using the bounded primitive catalog as vocabulary; server-side validation enforces safety invariants
 
 All recipes run on one plan schema, one primitive set, one runner model.
 
@@ -84,7 +84,7 @@ All recipes run on one plan schema, one primitive set, one runner model.
 
 4. **Interview-driven onboarding:** blank canvas → agent interview → first autopilot. The agent onboards you. No pre-configuration before first result.
 
-5. **Dynamic Plan Generation (P0, current):** Custom recipe = infinite user-described workflows. LLM generates plans using 11 primitives as vocabulary; validation enforces safety. Turns 3 templates into any described professional workflow.
+5. **Dynamic Plan Generation (P0, current):** Custom recipe = infinite user-described workflows. LLM generates plans using the bounded primitive catalog as vocabulary; validation enforces safety. Turns 3 templates into any described professional workflow.
 
 6. **MCP direction (long-term):** PrimitiveId should eventually map to MCP tool calls. Box MCP, Slack MCP as primitive sources without hardcoding. Keep PrimitiveId extensible.
 
