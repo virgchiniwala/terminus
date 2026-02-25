@@ -1,5 +1,5 @@
 # PRIMITIVES.md
-Last updated: 2026-03-02
+Last updated: 2026-02-25
 
 ## Purpose
 Primitives are Terminus runtime actions. They are constrained by design and deny-by-default.
@@ -30,6 +30,7 @@ Webhook Trigger MVP is a relay-backed trigger surface, not a new primitive. Webh
 
 **Restricted / High Risk (always approval required):**
 - `SendEmail` — send an approved email; all 5 Safe Effector gates must pass; **always requires approval regardless of plan or LLM output**
+- `CallApi` — bounded outbound HTTP API call (HTTP/HTTPS, GET/POST MVP), Keychain secret refs only, allowlisted domains, **approval-gated by default**
 - `ScheduleRun` — schedule a future run; manual-first policy; not auto-allowlisted
 - `NotifyUser` — send a system notification (low risk)
 
@@ -59,7 +60,7 @@ Webhook Trigger MVP is a relay-backed trigger surface, not a new primitive. Webh
 3. `WriteOutcomeDraft` → daily brief card (approval)
 
 **Custom (Dynamic Plan Generation):**
-Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `AggregateDailySummary`, `WriteOutcomeDraft`, `WriteEmailDraft`, `SendEmail`, `NotifyUser`} as determined by LLM plan generation + server-side validation. The `allowed_primitives` field is computed from actual steps, not from LLM-declared list. Safety invariants apply regardless of what the LLM outputs.
+Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `AggregateDailySummary`, `WriteOutcomeDraft`, `WriteEmailDraft`, `SendEmail`, `NotifyUser`, `CallApi`} as determined by LLM plan generation + server-side validation. The `allowed_primitives` field is computed from actual steps, not from LLM-declared list. Safety invariants apply regardless of what the LLM outputs.
 
 ## What Primitives Cannot Do
 - Expand permissions at runtime
@@ -71,7 +72,8 @@ Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `A
 
 ## Integration Boundary (Current)
 - **Shipped:** relay-backed inbound webhook triggers (bounded JSON event ingress -> run enqueue)
-- **Planned next:** `CallApi` primitive (approval-gated, allowlisted outbound HTTP) after webhook demand is validated
+- **Shipped:** `CallApi` primitive MVP (approval-gated, allowlisted outbound HTTP using Keychain key refs)
+- **Planned next:** Codex OAuth BYOK auth mode (OpenAI/Codex sign-in path) and broader rule-driven operator teaching loops
 
 ## PrimitiveGuard Enforcement
 `PrimitiveGuard` in `src-tauri/src/primitives.rs` is the deny-by-default enforcement layer:
@@ -82,7 +84,7 @@ Any subset of {`ReadWeb`, `ReadSources`, `ReadForwardedEmail`, `TriageEmail`, `A
 
 ## MCP Direction (Long-term Architectural Note)
 
-The current primitive catalog is hardcoded (11 `PrimitiveId` enum variants). The long-term direction is to make primitives MCP-consumable:
+The current primitive catalog is hardcoded (12 `PrimitiveId` enum variants). The long-term direction is to make primitives MCP-consumable:
 - `terminus load-mcp box` → BoxRead/BoxWrite primitives
 - `terminus load-mcp slack` → SlackRead/SlackSend primitives
 - `terminus load-mcp calendar` → CalendarRead primitive

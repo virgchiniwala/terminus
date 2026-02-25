@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { ConnectionHealthSummary } from "./ConnectionHealthSummary";
 import type {
   AutopilotSendPolicyRecord,
+  ApiKeyRefStatusRecord,
   EmailConnectionRecord,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
@@ -33,6 +34,14 @@ type Props = {
   setRelaySubscriberTokenInput: Dispatch<SetStateAction<string>>;
   saveRelaySubscriberToken: () => void;
   removeRelaySubscriberToken: () => void;
+  apiKeyRefName: string;
+  setApiKeyRefName: Dispatch<SetStateAction<string>>;
+  apiKeyRefSecret: string;
+  setApiKeyRefSecret: Dispatch<SetStateAction<string>>;
+  apiKeyRefStatus: ApiKeyRefStatusRecord | null;
+  saveApiKeyRef: () => void;
+  removeApiKeyRef: () => void;
+  checkApiKeyRefStatus: () => void;
   watcherAutopilotId: string;
   setWatcherAutopilotId: Dispatch<SetStateAction<string>>;
   watcherMaxItems: number;
@@ -88,6 +97,14 @@ export function ConnectionPanel(props: Props) {
     setRelaySubscriberTokenInput,
     saveRelaySubscriberToken,
     removeRelaySubscriberToken,
+    apiKeyRefName,
+    setApiKeyRefName,
+    apiKeyRefSecret,
+    setApiKeyRefSecret,
+    apiKeyRefStatus,
+    saveApiKeyRef,
+    removeApiKeyRef,
+    checkApiKeyRefStatus,
     watcherAutopilotId,
     setWatcherAutopilotId,
     watcherMaxItems,
@@ -161,6 +178,38 @@ export function ConnectionPanel(props: Props) {
       {transportStatus && (
         <p className="transport-status-note">
           Relay endpoint: {transportStatus.relayUrl} {transportStatus.relayConfigured ? "• token saved" : "• no token saved"}
+        </p>
+      )}
+      <div className="watcher-controls">
+        <label>
+          <span>API key ref name</span>
+          <input
+            value={apiKeyRefName}
+            onChange={(event) => setApiKeyRefName(event.target.value)}
+            placeholder="crm_prod"
+          />
+        </label>
+        <label>
+          <span>API key (Keychain)</span>
+          <input
+            type="password"
+            value={apiKeyRefSecret}
+            onChange={(event) => setApiKeyRefSecret(event.target.value)}
+            placeholder="Paste API key to store in Keychain"
+          />
+        </label>
+        <label>
+          <span>&nbsp;</span>
+          <div className="transport-token-actions">
+            <button type="button" onClick={saveApiKeyRef}>Save API Key Ref</button>
+            <button type="button" onClick={removeApiKeyRef}>Remove Ref</button>
+            <button type="button" onClick={checkApiKeyRefStatus}>Check Ref</button>
+          </div>
+        </label>
+      </div>
+      {apiKeyRefStatus && (
+        <p className="transport-status-note">
+          API key ref <code>{apiKeyRefStatus.refName}</code>: {apiKeyRefStatus.configured ? "saved in Keychain" : "not configured"}
         </p>
       )}
       {remoteApprovalReadiness && (

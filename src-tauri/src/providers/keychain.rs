@@ -8,6 +8,8 @@ pub const RELAY_CALLBACK_SECRET_SERVICE: &str = "terminus.relay.callback_secret"
 pub const RELAY_CALLBACK_SECRET_ACCOUNT: &str = "TerminusRelayCallback";
 pub const RELAY_DEVICE_ID_SERVICE: &str = "terminus.relay.device_id";
 pub const RELAY_DEVICE_ID_ACCOUNT: &str = "TerminusRelayDevice";
+pub const API_KEY_REF_SERVICE_PREFIX: &str = "terminus.api_key_ref.";
+pub const API_KEY_REF_ACCOUNT: &str = "TerminusApiKeyRef";
 pub const WEBHOOK_TRIGGER_SECRET_SERVICE_PREFIX: &str = "terminus.webhook_trigger_secret";
 
 pub fn get_api_key(provider_kind: ProviderKind) -> Result<Option<String>, ProviderError> {
@@ -199,6 +201,22 @@ pub fn get_relay_device_id() -> Result<Option<String>, ProviderError> {
 
 pub fn set_relay_device_id(device_id: &str) -> Result<(), ProviderError> {
     set_secret(RELAY_DEVICE_ID_SERVICE, RELAY_DEVICE_ID_ACCOUNT, device_id)
+}
+
+fn api_key_ref_service(ref_name: &str) -> String {
+    format!("{}{}", API_KEY_REF_SERVICE_PREFIX, ref_name.trim())
+}
+
+pub fn get_api_key_ref_secret(ref_name: &str) -> Result<Option<String>, ProviderError> {
+    get_secret(&api_key_ref_service(ref_name), API_KEY_REF_ACCOUNT)
+}
+
+pub fn set_api_key_ref_secret(ref_name: &str, secret: &str) -> Result<(), ProviderError> {
+    set_secret(&api_key_ref_service(ref_name), API_KEY_REF_ACCOUNT, secret)
+}
+
+pub fn delete_api_key_ref_secret(ref_name: &str) -> Result<(), ProviderError> {
+    delete_secret(&api_key_ref_service(ref_name), API_KEY_REF_ACCOUNT)
 }
 
 fn webhook_trigger_secret_service(trigger_id: &str) -> String {

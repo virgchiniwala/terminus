@@ -38,6 +38,7 @@ pub enum PrimitiveId {
     ReadWeb,
     ReadSources,
     ReadForwardedEmail,
+    CallApi,
     TriageEmail,
     AggregateDailySummary,
     ReadVaultFile,
@@ -46,6 +47,16 @@ pub enum PrimitiveId {
     SendEmail,
     ScheduleRun,
     NotifyUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiCallRequest {
+    pub url: String,
+    pub method: String,
+    pub header_key_ref: String,
+    pub auth_header_name: String,
+    pub auth_scheme: String,
+    pub body_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +85,7 @@ pub struct AutopilotPlan {
     pub web_allowed_domains: Vec<String>,
     pub inbox_source_text: Option<String>,
     pub daily_sources: Vec<String>,
+    pub api_call_request: Option<ApiCallRequest>,
     pub recipient_hints: Vec<String>,
     pub allowed_primitives: Vec<PrimitiveId>,
     pub steps: Vec<PlanStep>,
@@ -265,6 +277,7 @@ impl AutopilotPlan {
             web_allowed_domains,
             inbox_source_text,
             daily_sources,
+            api_call_request: None,
             recipient_hints,
             allowed_primitives,
             steps,

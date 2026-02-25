@@ -1,4 +1,4 @@
-Last updated: 2026-03-02
+Last updated: 2026-02-25
 
 # Terminus Product Strategy (v3 — Updated)
 
@@ -69,7 +69,7 @@ Users get OpenClaw-like magic through an **Intent Bar**:
 
 **Key rule:** The end state is never "a chat thread." The end state is always an object with **Run now**.
 
-**Dynamic Plan Generation:** For intents that don't match the 3 preset recipes, the LLM generates a valid execution plan from the user's description using the existing 11 primitives as vocabulary. Users see the generated plan (reads, writes, approvals) in the Draft Plan Card before committing. Safety invariants are enforced server-side regardless of LLM output. This turns 3 templates into any described workflow.
+**Dynamic Plan Generation:** For intents that don't match the 3 preset recipes, the LLM generates a valid execution plan from the user's description using the bounded primitive catalog as vocabulary. Users see the generated plan (reads, writes, approvals) in the Draft Plan Card before committing. Safety invariants are enforced server-side regardless of LLM output. This turns 3 templates into any described workflow.
 
 ---
 
@@ -242,7 +242,7 @@ All built on the **same** runner, approval, receipt, and primitive catalog.
 
 4) **Custom (Dynamic Plan Generation)**
    - User describes any professional workflow in natural language
-   - LLM generates `AutopilotPlan` using existing 11 primitives as vocabulary
+   - LLM generates `AutopilotPlan` using the bounded primitive catalog as vocabulary
    - Server-side validation enforces safety invariants
    - User sees and approves generated plan before committing
 
@@ -279,38 +279,30 @@ All built on the **same** runner, approval, receipt, and primitive catalog.
 
 ---
 
-## 16) Near-term roadmap (revised 2026-03-02)
+## 16) Near-term roadmap (revised 2026-02-25)
 
-### Phase 0 — Dynamic Plan Generation (CURRENT)
-- `RecipeKind::Custom` in schema
-- `generate_custom_plan()` + `validate_and_build_plan()` in main.rs
-- Runner ReadWeb gate update for Custom
-- Frontend planJson pass-through
-- 8 new tests
-
-### Phase 1 — Relay + Remote Access
-- `RelayTransport` in transport/relay.rs
-- Subscriber token in Keychain
-- Push channel for approval routing
+### Recently shipped foundations (current baseline)
+- Dynamic Plan Generation (`RecipeKind::Custom`) with server-side validation
+- Relay transport + remote approval callback/sync/push plumbing (desktop-side)
 - Relay-backed webhook triggers (inbound events -> bounded run enqueue)
-- Slack bot via Chat SDK pattern
-- Onboarding: "Sign in to Terminus" flow
+- Interview-driven onboarding MVP
+- Voice object MVP (global + per-autopilot override)
+- Bounded outbound HTTP primitive: `CallApi` (approval-gated, Keychain key refs)
 
-### Phase 2 — Interview-Driven Onboarding
-- Blank canvas first-launch experience
-- Agent interview flow using Intent Bar
-- onboarding_complete flag
+### Phase 1 — Trustworthy personalization (current priority)
+- Rule Cards / "Teach Once" (approval-gated reusable behavior changes)
+- Rule application provenance in receipts/context surfaces
+- Applied voice/rule visibility improvements
 
-### Phase 3 — Voice + Rules
-- Voice object (global default + per-autopilot override)
-- "Make this a rule" CTA
-- Rule injection at run start
+### Phase 2 — BYOK auth friction reduction (advanced mode)
+- Codex OAuth (ChatGPT sign-in) support for OpenAI/Codex in BYOK
+- Keychain token refresh/expiry handling + safe disconnect UX
 
-### Phase 4 — Professional Templates
+### Phase 3 — Professional templates
 - Comms + Coordination autopilot template
 - Additional back-office templates
 
-### Phase 5 — Hardening
+### Phase 4 — Hardening
 - App.tsx decomposition + frontend tests
 - CSP + permission tightening
 - Context Receipt (Workstream C)

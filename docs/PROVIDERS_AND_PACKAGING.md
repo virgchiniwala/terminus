@@ -21,7 +21,7 @@ Supported providers are required for CI reliability guarantees. Experimental pro
 
 Three transport implementations exist on the `ExecutionTransport` trait:
 
-1. **RelayTransport** (primary, P1 in active development):
+1. **RelayTransport** (primary, shipped desktop-side; relay service rollout continues):
    - Client sends `ProviderRequest` + subscriber token to Terminus relay
    - Relay validates token + tier, selects optimal provider, returns `ProviderResponse`
    - Relay enforces per-tier rate limits (50 runs/mo Free, 500 runs/mo Pro)
@@ -68,6 +68,11 @@ The relay enables the "OpenClaw on mobile" pattern: pending approvals route to S
 2. User signs up → subscriber token issued
 3. Token stored in Keychain → `RelayTransport` activated automatically
 4. No provider API key setup required
+
+## BYOK Authentication Modes (Advanced)
+- API keys (current): OpenAI / Anthropic provider keys stored in macOS Keychain
+- Arbitrary API key refs (current): used by the bounded `CallApi` primitive (`terminus.api_key_ref.<ref>`)
+- **Planned next:** Codex OAuth (ChatGPT sign-in) for OpenAI/Codex in BYOK advanced mode, stored in Keychain with refresh handling
 
 ## Cost and Currency Policy
 - User-facing budget policy defaults to SGD

@@ -1,7 +1,7 @@
 # Terminus: Comprehensive Audit + Execution Plan
 
 **Audit date:** 2026-02-24 | **Updated:** 2026-02-25
-**Audit branch:** `claude/angry-burnell` (post `mission-orchestration-mvp` merge, commit `c80fe2b`)
+**Audit branch:** `claude/angry-burnell` (historical snapshot; use `mission_control.md` + `handoff.md` for current merged state)
 **Produced by:** Claude Sonnet 4.6 via full codebase exploration + strategic review session + research synthesis
 
 ---
@@ -10,7 +10,7 @@
 
 **Terminus** is a local-first macOS desktop app (Tauri + React + Rust + SQLite) that is both a **Personal AI OS** and a **personal agent harness** for non-technical users. It turns a one-line intent into always-on automation that actually acts — not just drafts. The product is object-first (Home = Autopilots / Outcomes / Approvals / Activity). The Intent Bar (⌘K) is an input method; the product outputs are executable objects.
 
-**What "personal agent harness" means:** Terminus provides the same structural guarantees that the best engineering teams (Stripe, OpenAI, Anthropic) build internally for their coding agents — architecture as guardrails (PrimitiveGuard), bounded tool catalog (11 primitives), documented preferences (Voice / Rules / Soul.md), and planning before execution (classify → preview → approve → run). The difference: Terminus brings this to professional knowledge work for non-technical users.
+**What "personal agent harness" means:** Terminus provides the same structural guarantees that the best engineering teams (Stripe, OpenAI, Anthropic) build internally for their coding agents — architecture as guardrails (PrimitiveGuard), bounded tool catalog (currently 12 primitives), documented preferences (Voice / Rules / Soul.md), and planning before execution (classify → preview → approve → run). The difference: Terminus brings this to professional knowledge work for non-technical users.
 
 **Target quadrant:** Professional back-office automation — comms coordination, ops-lite, finance-adjacent, legal-adjacent. This is the sparse, high-demand quadrant where automation doesn't yet work for non-technical users. Current presets demonstrate the runtime; professional templates demonstrate the differentiation.
 
@@ -224,9 +224,9 @@ pub struct RelayTransport {
 
 ## Part 4: Prioritized Execution Plan
 
-### Priority 0 — Dynamic Plan Generation from Unstructured Input (IMPLEMENTED ON BRANCH / NEXT TO MERGE)
+### Priority 0 — Dynamic Plan Generation from Unstructured Input (MERGED)
 
-**Why first:** Turns 3 hardcoded templates into infinite user-described workflows. This IS the planning-before-execution pattern validated by every high-performing AI team. Users describe any professional workflow → LLM generates a valid `AutopilotPlan` using existing 11 primitives as vocabulary → user sees and approves the plan before committing → safety invariants enforced server-side regardless of LLM output.
+**Why first:** Turns 3 hardcoded templates into infinite user-described workflows. This IS the planning-before-execution pattern validated by every high-performing AI team. Users describe any professional workflow → LLM generates a valid `AutopilotPlan` using the bounded primitive catalog as vocabulary → user sees and approves the plan before committing → safety invariants enforced server-side regardless of LLM output.
 
 **What to build:**
 - New `RecipeKind::Custom` in `schema.rs`

@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-03-02
+Last updated: 2026-02-25
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,7 +10,7 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/webhook-trigger-mvp`
+- Branch: `codex/callapi-primitive-mvp`
 - Product shape: local-first, object-first Personal AI OS + personal agent harness
 
 ## Strategic Guardrails
@@ -28,7 +28,7 @@ Read these in order before starting work:
 ## Provider Policy
 - Supported: OpenAI, Anthropic
 - Experimental: Gemini (disabled in BYOK lane)
-- Primary transport: RelayTransport (P1 in development); BYOK via LocalHttpTransport (advanced)
+- Primary transport: RelayTransport (shipped desktop-side transport + remote approval path); BYOK via LocalHttpTransport (advanced)
 
 ## Recipes (Shared Runtime)
 1. Website Monitor
@@ -48,31 +48,37 @@ Read these in order before starting work:
 - Safe send policy gates + typed approval payload columns
 - Mission orchestration: tables + commands + 3 tests (fan-out, contract blocking, aggregation)
 - Supervisor diagnostics: 11 run-health states + intervention commands
+- Dynamic Plan Generation (Custom recipe) with server-side plan validation
+- Relay approval callback + sync polling + push channel consumer (desktop-side)
+- Interview-driven onboarding (first-run guided recommendation flow)
+- Voice object MVP (global + per-Autopilot overrides)
+- Relay-backed Webhook Trigger MVP (bounded inbound event -> run enqueue)
+- `CallApi` primitive MVP (bounded outbound HTTP, approval-gated, Keychain key refs)
 
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 79/79 passing |
+| Backend Rust (`cargo test`) | 85/85 passing |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now
-### Relay-Backed Webhook Trigger MVP + Positioning Sync
+### HTTP API Primitive (`CallApi`) MVP + Docs Sync
 Owner: active session
 Status: In progress
 Scope:
-- Add relay-backed inbound webhook triggers (desktop-side endpoint registration + secrets + bounded event log)
-- Reuse relay callback auth/replay primitives for webhook delivery callbacks
-- Queue webhook-originated runs through the existing runner + approvals + receipts
-- Add minimal Webhook Trigger panel (create, rotate, pause/resume, recent deliveries)
-- Update differentiation/product copy: “adaptive but predictable” vs brittle automation
+- Add bounded `CallApi` primitive for outbound HTTP execution via shared runner
+- Approval-gated by default; reuse domain allowlist pattern and receipts/redaction model
+- Store arbitrary API credentials as Keychain refs (never SQLite/logs)
+- Add minimal UI for Keychain API key-ref management (advanced/BYOK path)
+- Update primitives/strategy docs so current state and next priorities remain aligned
 Acceptance:
-- Webhook trigger secrets are Keychain-only (never SQLite/logs)
-- Valid webhook deliveries enqueue one run; duplicate deliveries do not enqueue another run
-- Invalid signature/content-type/payload size fail with human-readable event status
-- Webhook-triggered runs still use existing approvals/spend rails/receipts
+- `CallApi` is deny-by-default and never auto-allowlisted in presets
+- `CallApi` custom plans require `api_call_request` config and force approval/high risk
+- API key refs are Keychain-only and never appear in receipts/activities/logs
+- Bounded HTTP execution enforces scheme/method/allowlist/timeout/response-size checks
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -84,9 +90,9 @@ npm run build
 ```
 
 ## Next
-1. **HTTP API primitive (`CallApi`) phase**
-   - domain/method allowlists, timeouts, redaction, Keychain key refs
-   - approval-gated by default
+1. **Codex OAuth BYOK support**
+   - ChatGPT sign-in path for OpenAI/Codex in advanced mode
+   - Keychain-only token storage + refresh + redaction
 2. **Rule extraction / "Make This a Rule" (P0.12)**
    - rule object + rule applications + approval-gated creation
 3. **Interview onboarding polish + voice/rules UX**

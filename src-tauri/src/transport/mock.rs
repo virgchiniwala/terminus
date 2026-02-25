@@ -52,7 +52,13 @@ impl ExecutionTransport for MockTransport {
             .is_some_and(|id| id.starts_with("plan_gen:"))
         {
             let lower = request.input.to_ascii_lowercase();
-            let text = if lower.contains("invoice") || lower.contains("receipt") {
+            let text = if lower.contains("api ")
+                || lower.contains("http api")
+                || lower.contains("crm")
+            {
+                r#"{"steps":[{"id":"step_1","label":"Call CRM API","primitive":"call_api","requires_approval":true,"risk_tier":"high"},{"id":"step_2","label":"Prepare outcome","primitive":"write_outcome_draft","requires_approval":true,"risk_tier":"medium"}],"web_allowed_domains":["api.example.com"],"recipient_hints":[],"allowed_primitives":["call_api","write_outcome_draft"],"api_call_request":{"url":"https://api.example.com/v1/items","method":"GET","header_key_ref":"crm_prod","auth_header_name":"Authorization","auth_scheme":"bearer","body_json":null}}"#
+                    .to_string()
+            } else if lower.contains("invoice") || lower.contains("receipt") {
                 r#"{"steps":[{"id":"step_1","label":"Read forwarded invoice text","primitive":"read_forwarded_email","requires_approval":false,"risk_tier":"low"},{"id":"step_2","label":"Summarize extracted categories into an outcome","primitive":"write_outcome_draft","requires_approval":true,"risk_tier":"medium"}],"web_allowed_domains":[],"recipient_hints":[],"allowed_primitives":["read_forwarded_email","write_outcome_draft"]}"#
                     .to_string()
             } else {
