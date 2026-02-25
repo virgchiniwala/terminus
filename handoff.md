@@ -1,5 +1,5 @@
 # Handoff
-Last updated: 2026-02-26
+Last updated: 2026-03-02
 
 ## Fresh Session Note
 - For the agentic-orchestration plan, implemented supervisor diagnostics slice, and latest cross-session context summary, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
@@ -196,13 +196,30 @@ Last updated: 2026-02-26
   - Home Voice panel supports global defaults and per-Autopilot override (tone/length/humor/notes)
   - Runner injects effective Voice config at the shared provider dispatch gateway (wording-only guidance)
   - Voice validation is allowlisted and bounded; notes are capped/sanitized
+- Relay-backed Webhook Trigger MVP:
+  - SQLite tables: `webhook_triggers`, `webhook_trigger_events`, `relay_webhook_callback_events`
+  - Keychain-only per-trigger signing secrets (`terminus.webhook_trigger_secret.{trigger_id}`)
+  - Tauri commands:
+    - `list_webhook_triggers`
+    - `create_webhook_trigger`
+    - `rotate_webhook_trigger_secret`
+    - `enable_webhook_trigger` / `disable_webhook_trigger`
+    - `get_webhook_trigger_events`
+    - `resolve_relay_webhook_callback`
+    - `ingest_webhook_event_local_debug` (dev-only)
+  - Inbound webhook validation:
+    - relay callback auth + request freshness
+    - webhook HMAC SHA256 signature + timestamp freshness
+    - JSON-only content type
+    - payload size cap (default 32 KB)
+    - duplicate delivery dedupe via `(trigger_id, event_idempotency_key)`
+  - Webhook deliveries enqueue runs via the existing runner + approvals/spend rails/receipts
+  - Home Webhook panel (MVP) supports trigger creation, pause/resume, secret rotate, and delivery list
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
-- `cd src-tauri && cargo test` passes (79 tests)
-- `cd src-tauri && cargo test` passes (79 tests)
-- `cd src-tauri && cargo test` passes (79 tests)
+- `cd src-tauri && cargo test` passes (81 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
@@ -250,6 +267,12 @@ Last updated: 2026-02-26
 5. Watcher health payload check:
    - `list_email_connections()`
    - confirm each provider row includes watcher fields and non-zero `watcher_consecutive_failures` / future `watcher_backoff_until_ms` after simulated rate-limit failures
+6. Webhook trigger create + simulated delivery (MVP):
+   - `create_webhook_trigger({ input: { autopilotId: "auto_inbox_watch_gmail", description: "Webhook test" } })`
+   - copy `signingSecretPreview` (shown once)
+   - `ingest_webhook_event_local_debug({ input: { triggerId, deliveryId: "demo_1", bodyJson: "{\"event\":\"ping\"}" } })`
+   - `get_webhook_trigger_events({ triggerId, limit: 10 })` and verify `queued` + `runId`
+   - repeat same `deliveryId/body` and verify `duplicate`
 
 ## Operational Truths
 - Local-first runtime

@@ -142,6 +142,58 @@ export interface RelayApprovalSyncTickRecord {
   appliedCount: number;
 }
 
+export interface WebhookTriggerRecord {
+  id: string;
+  autopilotId: string;
+  status: "active" | "paused" | "error" | string;
+  endpointPath: string;
+  endpointUrl: string;
+  signatureMode: "terminus_hmac_sha256" | string;
+  description: string;
+  maxPayloadBytes: number;
+  allowedContentTypes: string[];
+  providerKind: string;
+  lastEventAtMs: number | null;
+  lastError: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  secretConfigured: boolean;
+}
+
+export interface WebhookTriggerEventRecord {
+  id: string;
+  triggerId: string;
+  deliveryId: string;
+  eventIdempotencyKey: string;
+  receivedAtMs: number;
+  status: "accepted" | "rejected" | "duplicate" | "queued" | "failed_validation" | string;
+  httpStatus: number | null;
+  headersRedactedJson: string;
+  payloadExcerpt: string;
+  payloadHash: string;
+  failureReason: string | null;
+  runId: string | null;
+}
+
+export interface WebhookTriggerCreateInput {
+  autopilotId: string;
+  description?: string;
+  maxPayloadBytes?: number;
+}
+
+export interface WebhookTriggerCreateResponse {
+  trigger: WebhookTriggerRecord;
+  signingSecretPreview: string;
+}
+
+export interface WebhookIngestResult {
+  status: string;
+  triggerId: string;
+  deliveryId: string;
+  runId: string | null;
+  message: string;
+}
+
 export interface AutopilotSendPolicyRecord {
   autopilotId: string;
   allowSending: boolean;
