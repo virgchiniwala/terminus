@@ -3,6 +3,7 @@ import { ConnectionHealthSummary } from "./ConnectionHealthSummary";
 import type {
   AutopilotSendPolicyRecord,
   ApiKeyRefStatusRecord,
+  CodexOauthStatusRecord,
   EmailConnectionRecord,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
@@ -42,6 +43,9 @@ type Props = {
   saveApiKeyRef: () => void;
   removeApiKeyRef: () => void;
   checkApiKeyRefStatus: () => void;
+  codexOauthStatus: CodexOauthStatusRecord | null;
+  importCodexOauthFromLocalAuth: () => void;
+  removeCodexOauth: () => void;
   watcherAutopilotId: string;
   setWatcherAutopilotId: Dispatch<SetStateAction<string>>;
   watcherMaxItems: number;
@@ -105,6 +109,9 @@ export function ConnectionPanel(props: Props) {
     saveApiKeyRef,
     removeApiKeyRef,
     checkApiKeyRefStatus,
+    codexOauthStatus,
+    importCodexOauthFromLocalAuth,
+    removeCodexOauth,
     watcherAutopilotId,
     setWatcherAutopilotId,
     watcherMaxItems,
@@ -210,6 +217,39 @@ export function ConnectionPanel(props: Props) {
       {apiKeyRefStatus && (
         <p className="transport-status-note">
           API key ref <code>{apiKeyRefStatus.refName}</code>: {apiKeyRefStatus.configured ? "saved in Keychain" : "not configured"}
+        </p>
+      )}
+      <div className="watcher-controls">
+        <label>
+          <span>Codex OAuth (BYOK)</span>
+          <input
+            readOnly
+            value={codexOauthStatus?.configured ? "Imported" : "Not imported"}
+          />
+        </label>
+        <label>
+          <span>Local Codex auth file</span>
+          <input
+            readOnly
+            value={codexOauthStatus?.localAuthFound ? "Found (~/.codex/auth.json)" : "Not found"}
+          />
+        </label>
+        <label>
+          <span>&nbsp;</span>
+          <div className="transport-token-actions">
+            <button type="button" onClick={importCodexOauthFromLocalAuth}>Import Codex OAuth</button>
+            <button type="button" onClick={removeCodexOauth}>Remove Codex OAuth</button>
+          </div>
+        </label>
+      </div>
+      {codexOauthStatus && (
+        <p className="transport-status-note">
+          {codexOauthStatus.localAuthPath}
+          {codexOauthStatus.importedAuthMode ? ` • mode ${codexOauthStatus.importedAuthMode}` : ""}
+          {codexOauthStatus.hasRefreshToken ? " • refresh token present" : ""}
+          {codexOauthStatus.importedAtMs
+            ? ` • imported ${new Date(codexOauthStatus.importedAtMs).toLocaleString()}`
+            : ""}
         </p>
       )}
       {remoteApprovalReadiness && (

@@ -72,7 +72,8 @@ The relay enables the "OpenClaw on mobile" pattern: pending approvals route to S
 ## BYOK Authentication Modes (Advanced)
 - API keys (current): OpenAI / Anthropic provider keys stored in macOS Keychain
 - Arbitrary API key refs (current): used by the bounded `CallApi` primitive (`terminus.api_key_ref.<ref>`)
-- **Planned next:** Codex OAuth (ChatGPT sign-in) for OpenAI/Codex in BYOK advanced mode, stored in Keychain with refresh handling
+- **Current (advanced BYOK):** Codex OAuth import from local Codex CLI login (`~/.codex/auth.json`) with Keychain token storage in Terminus
+- **Planned follow-up:** in-app Codex OAuth browser flow (optional), plus richer refresh/expiry UX
 
 ## Cost and Currency Policy
 - User-facing budget policy defaults to SGD

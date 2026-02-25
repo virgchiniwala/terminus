@@ -65,20 +65,20 @@ Read these in order before starting work:
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now
-### HTTP API Primitive (`CallApi`) MVP + Docs Sync
+### Codex OAuth BYOK Support (OpenAI/Codex sign-in import)
 Owner: active session
 Status: In progress
 Scope:
-- Add bounded `CallApi` primitive for outbound HTTP execution via shared runner
-- Approval-gated by default; reuse domain allowlist pattern and receipts/redaction model
-- Store arbitrary API credentials as Keychain refs (never SQLite/logs)
-- Add minimal UI for Keychain API key-ref management (advanced/BYOK path)
-- Update primitives/strategy docs so current state and next priorities remain aligned
+- Add Codex OAuth BYOK auth mode by importing local Codex CLI OAuth session (`~/.codex/auth.json`)
+- Store imported Codex OAuth tokens in Keychain only (never SQLite/logs/receipts)
+- Let Local BYOK OpenAI requests use Codex OAuth access token when no manual API key is set
+- Add minimal Connections UI for import/remove/status (advanced mode)
+- Update packaging/strategy docs so Codex OAuth is marked shipped in BYOK lane
 Acceptance:
-- `CallApi` is deny-by-default and never auto-allowlisted in presets
-- `CallApi` custom plans require `api_call_request` config and force approval/high risk
-- API key refs are Keychain-only and never appear in receipts/activities/logs
-- Bounded HTTP execution enforces scheme/method/allowlist/timeout/response-size checks
+- Codex OAuth import reads only local `~/.codex/auth.json` and stores credentials in Keychain
+- No token values appear in logs/receipts/UI status payloads
+- OpenAI BYOK requests work with imported Codex OAuth credentials when API key is absent
+- Removing Codex OAuth credentials cleanly disables that auth path
 - `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
 Verification:
 ```bash
@@ -90,13 +90,12 @@ npm run build
 ```
 
 ## Next
-1. **Codex OAuth BYOK support**
-   - ChatGPT sign-in path for OpenAI/Codex in advanced mode
-   - Keychain-only token storage + refresh + redaction
-2. **Rule extraction / "Make This a Rule" (P0.12)**
+1. **Rule extraction / "Make This a Rule" (P0.12)**
    - rule object + rule applications + approval-gated creation
-3. **Interview onboarding polish + voice/rules UX**
+2. **Interview onboarding polish + voice/rules UX**
    - first-result path polish, stronger tests, clearer defaults
+3. **CallApi follow-up hardening**
+   - response parsing presets, method/domain policy expansion, reusable API action templates
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution

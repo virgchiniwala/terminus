@@ -223,6 +223,12 @@ Last updated: 2026-02-25
   - bounded runtime execution enforces http/https + GET/POST, domain allowlist, timeout, response-size cap, and redacted excerpts
   - `api_call_result` outcome artifact persisted for inspection/receipts
   - Connections panel includes advanced API key-ref save/check/remove controls
+- Codex OAuth BYOK support (OpenAI/Codex, advanced mode):
+  - imports local Codex CLI OAuth session from `~/.codex/auth.json` (ChatGPT/Codex auth mode)
+  - stores imported tokens in Keychain (`terminus.openai.codex_oauth_bundle`), never SQLite/logs/receipts
+  - Local BYOK OpenAI requests fall back to Codex OAuth access token when no manual API key is set
+  - Connections panel includes Codex OAuth import/remove/status controls (advanced)
+  - parser tests validate local auth file shape handling and missing-token failure behavior
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
@@ -303,6 +309,6 @@ Last updated: 2026-02-25
 - Legacy money/timestamp schema cleanup (float spend columns + timestamp normalization)
 
 ## Next Suggested Work
-1. Add Codex OAuth BYOK support (OpenAI/Codex sign-in path) with Keychain-only tokens + refresh/redaction handling.
-2. Implement Rule object + approval-gated "Make this a rule" flow (bounded overlays only).
-3. Add UI tests for onboarding and Voice panels (save/load/dismiss/override flows).
+1. Implement Rule object + approval-gated "Make this a rule" flow (bounded overlays only).
+2. Add UI tests for onboarding and Voice panels (save/load/dismiss/override flows).
+3. Surface applied Voice/Rule config in receipts/context provenance (titles/summary only, no raw notes if sensitive).

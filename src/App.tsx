@@ -14,6 +14,7 @@ import type {
   OnboardingStateRecord,
   OAuthStartResponse,
   ApiKeyRefStatusRecord,
+  CodexOauthStatusRecord,
   RemoteApprovalReadinessRecord,
   RelayApprovalSyncStatusRecord,
   RelayApprovalSyncTickRecord,
@@ -167,6 +168,7 @@ export function App() {
   const [apiKeyRefName, setApiKeyRefName] = useState("crm_prod");
   const [apiKeyRefSecret, setApiKeyRefSecret] = useState("");
   const [apiKeyRefStatus, setApiKeyRefStatus] = useState<ApiKeyRefStatusRecord | null>(null);
+  const [codexOauthStatus, setCodexOauthStatus] = useState<CodexOauthStatusRecord | null>(null);
   const [oauthProvider, setOauthProvider] = useState<"gmail" | "microsoft365">("gmail");
   const [oauthClientId, setOauthClientId] = useState("");
   const [oauthRedirectUri, setOauthRedirectUri] = useState("");
@@ -570,6 +572,15 @@ export function App() {
       });
   }, []);
 
+  const loadCodexOauthStatus = useCallback(() => {
+    invoke<CodexOauthStatusRecord>("get_codex_oauth_status")
+      .then((payload) => setCodexOauthStatus(payload))
+      .catch((err) => {
+        console.error("Failed to load Codex OAuth status:", err);
+        setConnectionsMessage((prev) => prev ?? "Could not load Codex OAuth status.");
+      });
+  }, []);
+
   const loadRemoteApprovalReadiness = useCallback(() => {
     invoke<RemoteApprovalReadinessRecord>("get_remote_approval_readiness")
       .then((payload) => setRemoteApprovalReadiness(payload))
@@ -733,6 +744,7 @@ export function App() {
     loadOnboardingState();
     loadGlobalVoice();
     loadTransportStatus();
+    loadCodexOauthStatus();
     loadRemoteApprovalReadiness();
     loadRelaySyncStatus();
     loadRelayPushStatus();
@@ -741,7 +753,7 @@ export function App() {
     loadRunDiagnostics();
     loadMissions();
     loadWebhookTriggers();
-  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
+  }, [loadSnapshot, loadConnections, loadOnboardingState, loadGlobalVoice, loadTransportStatus, loadCodexOauthStatus, loadRemoteApprovalReadiness, loadRelaySyncStatus, loadRelayPushStatus, loadRunnerControl, loadClarifications, loadRunDiagnostics, loadMissions, loadWebhookTriggers]);
 
   useEffect(() => {
     if (!selectedMissionId) {
@@ -1014,6 +1026,32 @@ export function App() {
       .catch((err) => {
         console.error("Failed to check API key ref:", err);
         setConnectionsMessage(typeof err === "string" ? err : "Could not check API key ref.");
+      });
+  };
+
+  const importCodexOauthFromLocalAuth = () => {
+    setConnectionsMessage(null);
+    invoke<CodexOauthStatusRecord>("import_codex_oauth_from_local_auth")
+      .then((payload) => {
+        setCodexOauthStatus(payload);
+        setConnectionsMessage("Codex OAuth imported from ~/.codex/auth.json and saved to Keychain.");
+      })
+      .catch((err) => {
+        console.error("Failed to import Codex OAuth:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not import Codex OAuth.");
+      });
+  };
+
+  const removeCodexOauth = () => {
+    setConnectionsMessage(null);
+    invoke<CodexOauthStatusRecord>("remove_codex_oauth")
+      .then((payload) => {
+        setCodexOauthStatus(payload);
+        setConnectionsMessage("Codex OAuth credentials removed.");
+      })
+      .catch((err) => {
+        console.error("Failed to remove Codex OAuth:", err);
+        setConnectionsMessage(typeof err === "string" ? err : "Could not remove Codex OAuth.");
       });
   };
 
@@ -2163,6 +2201,9 @@ export function App() {
           saveApiKeyRef={saveApiKeyRef}
           removeApiKeyRef={removeApiKeyRef}
           checkApiKeyRefStatus={checkApiKeyRefStatus}
+          codexOauthStatus={codexOauthStatus}
+          importCodexOauthFromLocalAuth={importCodexOauthFromLocalAuth}
+          removeCodexOauth={removeCodexOauth}
           watcherAutopilotId={watcherAutopilotId}
           setWatcherAutopilotId={setWatcherAutopilotId}
           watcherMaxItems={watcherMaxItems}

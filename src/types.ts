@@ -112,6 +112,17 @@ export interface ApiKeyRefStatusRecord {
   configured: boolean;
 }
 
+export interface CodexOauthStatusRecord {
+  configured: boolean;
+  localAuthFound: boolean;
+  localAuthPath: string;
+  localAuthMode?: string | null;
+  importedAuthMode?: string | null;
+  importedAtMs?: number | null;
+  lastRefresh?: string | null;
+  hasRefreshToken: boolean;
+}
+
 export interface RemoteApprovalReadinessRecord {
   transportMode: string;
   relayConfigured: boolean;

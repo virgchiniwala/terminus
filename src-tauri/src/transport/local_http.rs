@@ -1,3 +1,4 @@
+use crate::providers::keychain;
 use crate::providers::types::{
     ProviderError, ProviderKind, ProviderRequest, ProviderResponse, ProviderUsage,
 };
@@ -23,6 +24,20 @@ impl LocalHttpTransport {
             })
     }
 
+    fn require_openai_auth(keychain_api_key: Option<&str>) -> Result<String, ProviderError> {
+        if let Some(key) = keychain_api_key.filter(|v| !v.trim().is_empty()) {
+            return Ok(key.to_string());
+        }
+        if let Some(token) =
+            keychain::get_codex_oauth_access_token()?.filter(|v| !v.trim().is_empty())
+        {
+            return Ok(token);
+        }
+        Err(ProviderError::non_retryable(
+            "OpenAI credentials are not set. Add an API key or import Codex OAuth in BYOK settings.",
+        ))
+    }
+
     fn classify_curl_failure(provider: &str, status: i32, stderr: &str) -> ProviderError {
         // Curl exit codes: https://curl.se/docs/manpage.html#EXIT-CODES
         // We avoid echoing stderr (it may include network details); only use it for classification.
@@ -45,7 +60,7 @@ impl LocalHttpTransport {
     fn classify_http_status(provider: &str, http_status: u16) -> ProviderError {
         match http_status {
             401 | 403 => ProviderError::non_retryable(format!(
-                "{provider} rejected the request. Check your API key and try again."
+                "{provider} rejected the request. Check your API key or reconnect Codex OAuth and try again."
             )),
             408 | 429 => ProviderError::retryable(format!(
                 "{provider} is rate limiting or temporarily unavailable. Try again shortly."
@@ -141,7 +156,7 @@ impl LocalHttpTransport {
         request: &ProviderRequest,
         keychain_api_key: Option<&str>,
     ) -> Result<ProviderResponse, ProviderError> {
-        let key = Self::require_key(keychain_api_key)?;
+        let key = Self::require_openai_auth(keychain_api_key)?;
 
         let body = serde_json::json!({
           "model": request.model,

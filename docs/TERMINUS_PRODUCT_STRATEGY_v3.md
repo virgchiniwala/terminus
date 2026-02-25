@@ -295,8 +295,8 @@ All built on the **same** runner, approval, receipt, and primitive catalog.
 - Applied voice/rule visibility improvements
 
 ### Phase 2 — BYOK auth friction reduction (advanced mode)
-- Codex OAuth (ChatGPT sign-in) support for OpenAI/Codex in BYOK
-- Keychain token refresh/expiry handling + safe disconnect UX
+- Codex OAuth (ChatGPT sign-in) support for OpenAI/Codex in BYOK ✅ (via local Codex CLI auth import + Keychain storage)
+- Follow-up: in-app OAuth browser flow + richer refresh/expiry UX
 
 ### Phase 3 — Professional templates
 - Comms + Coordination autopilot template
