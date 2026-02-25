@@ -229,11 +229,18 @@ Last updated: 2026-02-25
   - Local BYOK OpenAI requests fall back to Codex OAuth access token when no manual API key is set
   - Connections panel includes Codex OAuth import/remove/status controls (advanced)
   - parser tests validate local auth file shape handling and missing-token failure behavior
+- Gmail PubSub trigger path (Gmail-only, polling fallback):
+  - new `gmail_pubsub_state` + `gmail_pubsub_events` tables and relay callback replay table
+  - relay callback command `resolve_relay_gmail_pubsub_callback` + debug helper for local simulation
+  - PubSub callbacks parse/validate bounded PubSub envelope, dedupe events, then invoke existing Gmail watcher fetch/queue path
+  - trigger mode support (`polling`, `gmail_pubsub`, `auto`) with fallback to polling when PubSub is inactive/expired/error
+  - Connections panel shows Gmail PubSub mode, watch health, config fields, and recent PubSub events
+  - backend tests cover envelope parsing, event dedupe, duplicate callback dedupe, and fetch failure recording
 
 ## Current Verification Baseline
 - `cd src-tauri && cargo fmt --check` passes
 - `cd src-tauri && cargo test` passes
-- `cd src-tauri && cargo test` passes (85 tests)
+- `cd src-tauri && cargo test` passes (91 tests)
 - `npm test` passes
 - `npm run lint` passes
 - `npm run build` passes
@@ -310,5 +317,5 @@ Last updated: 2026-02-25
 
 ## Next Suggested Work
 1. Implement Rule object + approval-gated "Make this a rule" flow (bounded overlays only).
-2. Add UI tests for onboarding and Voice panels (save/load/dismiss/override flows).
-3. Surface applied Voice/Rule config in receipts/context provenance (titles/summary only, no raw notes if sensitive).
+2. Add relay multi-device routing + device targeting foundations (preferred target + queue/fallback policy).
+3. Add runtime ownership leases + doctor surfaces (relay push / trigger consumers / operator diagnostics).

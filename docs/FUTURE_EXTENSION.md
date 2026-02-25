@@ -16,7 +16,7 @@ The relay transport was previously listed here as "future." It is now in **activ
 
 ## MCP as Primitive Source (Long-term)
 
-Currently Terminus has 11 hardcoded `PrimitiveId` enum variants. The long-term direction is to make primitives MCP-consumable:
+Currently Terminus has a bounded hardcoded primitive catalog (including `CallApi`). The long-term direction is to make primitives MCP-consumable:
 
 - `terminus load-mcp box` → BoxRead/BoxWrite primitives
 - `terminus load-mcp slack` → SlackRead/SlackSend primitives
@@ -33,8 +33,12 @@ This eliminates the need to hardcode integrations: any MCP server becomes Termin
 
 ## Slack / Teams Bot Integration (Medium-term)
 
-Once relay transport (P1) is built:
-- Slack bot using Vercel Chat SDK pattern (write once, deploy to Slack, Teams, Discord)
+Relay transport + remote approvals are now partially shipped desktop-side. Next channel expansion should stay professional and focused:
+- Slack first, Teams second
+- Do not expand to consumer messaging channels in MVP+1
+
+Target shape:
+- Slack bot using Vercel Chat SDK pattern (write once, deploy to Slack, Teams)
 - Users receive daily brief as Slack message
 - Users approve pending email drafts inline in Slack with one-click buttons
 - Blocked-run alerts delivered to Slack with link to Mac app for complex interventions
@@ -42,7 +46,17 @@ Once relay transport (P1) is built:
 
 This is the OpenClaw "message your agent" experience on existing professional platforms — without requiring a native mobile app. The relay's push channel (WebSocket/SSE) is the communication layer.
 
-**Dependencies:** Relay transport with push channel (P1). Voice/Soul.md (P3) for Slack messages to have personality.
+**Dependencies:** relay service rollout completion, Voice/Rules quality, multi-device routing semantics, and ownership leases for push consumers.
+
+---
+
+## Trigger & Relay Operations (Near-term extensions)
+
+These are likely next after Gmail PubSub trigger MVP:
+- Relay multi-device routing + preferred target policy (queue-until-online default)
+- Runtime ownership leases for runner / relay push / trigger consumers (single active owner semantics)
+- Doctor/system-health surfaces + operator runbooks for relay and trigger troubleshooting
+- Gmail push parity follow-up for Microsoft (Graph subscriptions), after Gmail PubSub stabilizes
 
 ---
 

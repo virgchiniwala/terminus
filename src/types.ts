@@ -66,12 +66,42 @@ export interface OAuthStartResponse {
 export interface RunnerControlRecord {
   backgroundEnabled: boolean;
   watcherEnabled: boolean;
+  gmailTriggerMode: "polling" | "gmail_pubsub" | "auto" | string;
   watcherPollSeconds: number;
   watcherMaxItems: number;
   gmailAutopilotId: string;
   microsoftAutopilotId: string;
   watcherLastTickMs: number | null;
   missedRunsCount: number;
+}
+
+export interface GmailPubSubStatusRecord {
+  provider: "gmail" | string;
+  status: "active" | "expired" | "error" | "disabled" | "pending_setup" | string;
+  triggerMode: "polling" | "gmail_pubsub" | "auto" | string;
+  watchExpirationMs: number | null;
+  historyId: string | null;
+  topicName: string | null;
+  subscriptionName: string | null;
+  callbackMode: "relay" | "local_debug" | string;
+  lastEventAtMs: number | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  updatedAtMs: number;
+}
+
+export interface GmailPubSubEventRecord {
+  id: string;
+  provider: string;
+  messageId: string | null;
+  eventDedupeKey: string;
+  historyId: string | null;
+  publishedAtMs: number | null;
+  receivedAtMs: number;
+  status: string;
+  failureReason: string | null;
+  createdRunCount: number;
+  createdAtMs: number;
 }
 
 export interface OnboardingStateRecord {
