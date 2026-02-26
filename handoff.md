@@ -1,8 +1,16 @@
 # Handoff
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
 ## Fresh Session Note
 - For the agentic-orchestration plan, implemented supervisor diagnostics slice, and latest cross-session context summary, read `docs/AGENTIC_BEST_PRACTICES_PLAN_AND_STATUS_2026-02-24.md` first.
+- For the document-workflow pivot (Controlled Context Mode, PE-first wedge), read `/Users/vir.c/.claude/plans/new_terminus_plan_26Feb26.md` before planning new feature work.
+
+## Current Work (Phase 0 Spike)
+- Vault extraction viability spike for the revised document-workflow wedge
+  - new `probe_vault_extraction` Tauri command (PDF/XLSX/TXT/MD implemented; DOCX dependency wired and marked for manual parser/fidelity validation)
+  - added extraction crates + Tauri dialog plugin wiring
+  - added `docs/VAULT_EXTRACTION_SPIKE.md` checklist and Go/No-Go gate
+  - no runner/vault product behavior changes yet
 
 ## Current Work (PR45)
 - Relay multi-device routing + device targeting foundations (in progress)

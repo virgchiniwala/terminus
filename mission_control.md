@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,8 +10,8 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/relay-multi-device-routing`
-- Product shape: local-first, object-first Personal AI OS + personal agent harness
+- Branch: `codex/vault-viability-spike`
+- Product shape: local-first, object-first Personal AI workspace / agent harness (pivoting wedge to confidential document workflows)
 
 ## Strategic Guardrails
 - Home remains object-first (`Autopilots / Outcomes / Approvals / Activity`)
@@ -34,7 +34,7 @@ Read these in order before starting work:
 1. Website Monitor
 2. Inbox Triage (paste/forward + always-on watching)
 3. Daily Brief
-4. Custom (Dynamic Plan Generation — P0, current work)
+4. Custom (Dynamic Plan Generation — shipped; used for wedge workflows)
 
 ## Runtime Baseline (Shipped)
 - Persisted run state machine with tick execution
@@ -58,43 +58,39 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 93/93 passing |
+| Backend Rust (`cargo test`) | 91+/91+ passing (baseline before spike crate additions) |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now
-### Relay Multi-Device Routing + Device Targeting Foundations
+### Phase 0 — Vault Extraction Viability Spike (document workflow wedge)
 Owner: active session
 Status: In progress
 Scope:
-- Add relay device registry + routing policy tables (preferred target / standby / queue-until-online)
-- Add device and policy CRUD/status commands with migration-safe bootstrap
-- Register local desktop device automatically and surface relay device routing in Connections UI
-- Gate relay approval sync/push pulls when this device is not the active target (human-readable status)
-- Update docs/handoff so relay operations and next phases stay aligned
+- Add extraction spike module and dev probe command for PDF/DOCX/XLSX/MD/TXT
+- Verify dependency compatibility for `pdf-extract`, `docx-rs`, `calamine`, `tauri-plugin-dialog`
+- Validate Tauri v2 capability/plugin wiring (`dialog:allow-open`)
+- Record fidelity checklist/results for real professional docs before Vault implementation
 Acceptance:
-- Relay devices/policy persist and can be updated from UI
-- Preferred-device vs standby/manual-target routing blocks local relay sync/push pulls with clear messages
-- Existing relay callback/sync/push flows remain idempotent and safe
-- `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
+- `cargo check` passes with new extraction crates + dialog plugin
+- Tauri capability uses correct v2 permission (`dialog:allow-open`)
+- `probe_vault_extraction` returns bounded previews and extraction notes
+- Spike doc captures fidelity gates and manual validation checklist
 Verification:
 ```bash
 cd src-tauri && cargo fmt --check
-cd src-tauri && cargo test
-npm test
-npm run lint
-npm run build
+cd src-tauri && cargo check
 ```
 
 ## Next
-1. **Ownership leases + doctor surfaces**
-   - runner/push consumer ownership locks and operator-readable health/runbooks
-2. **Rule extraction / "Make This a Rule" (P0.12)**
-   - rule object + rule applications + approval-gated creation
-3. **Webhook preset mappings + Slack/Teams channel strategy**
-   - safe event adapters and focused professional channel surfaces
+1. **Vault Core (Phase 1)**
+   - local file import, extraction persistence, true delete, local disclosure UI
+2. **`ReadVaultFile` primitive implementation (Phase 2)**
+   - bounded excerpt generation + runner integration + receipts/provenance
+3. **Document Review Against Standard workflow (wedge MVP)**
+   - PE-first paid workflow validation
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution
