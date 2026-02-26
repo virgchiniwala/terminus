@@ -9,7 +9,9 @@ import type {
   GmailPubSubStatusRecord,
   OAuthStartResponse,
   RemoteApprovalReadinessRecord,
+  RelayDeviceRecord,
   RelayApprovalSyncStatusRecord,
+  RelayRoutingPolicyRecord,
   RunnerControlRecord,
   TransportStatusRecord,
 } from "../types";
@@ -28,6 +30,14 @@ type Props = {
   remoteApprovalReadiness: RemoteApprovalReadinessRecord | null;
   relaySyncStatus: RelayApprovalSyncStatusRecord | null;
   relayPushStatus: RelayApprovalSyncStatusRecord | null;
+  relayDevices: RelayDeviceRecord[];
+  relayRoutingPolicy: RelayRoutingPolicyRecord | null;
+  relayFallbackPolicyInput: string;
+  setRelayFallbackPolicyInput: Dispatch<SetStateAction<string>>;
+  refreshRelayRouting: () => void;
+  setRelayDeviceStatus: (deviceId: string, status: string) => void;
+  setPreferredRelayDevice: (deviceId: string) => void;
+  saveRelayRoutingPolicy: () => void;
   relayCallbackSecretPreview: string | null;
   issueRelayCallbackSecret: () => void;
   clearRelayCallbackSecret: () => void;
@@ -103,6 +113,14 @@ export function ConnectionPanel(props: Props) {
     remoteApprovalReadiness,
     relaySyncStatus,
     relayPushStatus,
+    relayDevices,
+    relayRoutingPolicy,
+    relayFallbackPolicyInput,
+    setRelayFallbackPolicyInput,
+    refreshRelayRouting,
+    setRelayDeviceStatus,
+    setPreferredRelayDevice,
+    saveRelayRoutingPolicy,
     relayCallbackSecretPreview,
     issueRelayCallbackSecret,
     clearRelayCallbackSecret,
@@ -328,6 +346,87 @@ export function ConnectionPanel(props: Props) {
             <p className="transport-status-note">
               New callback secret (copy once into relay): {relayCallbackSecretPreview}
             </p>
+          )}
+          <div className="watcher-controls">
+            <label>
+              <span>Approval routing</span>
+              <input
+                readOnly
+                value={
+                  relayRoutingPolicy?.approvalTargetMode === "manual_target_only"
+                    ? "Manual target only"
+                    : "Preferred device only"
+                }
+              />
+            </label>
+            <label>
+              <span>Trigger routing</span>
+              <input
+                readOnly
+                value={
+                  relayRoutingPolicy?.triggerTargetMode === "manual_target_only"
+                    ? "Manual target only"
+                    : "Preferred device only"
+                }
+              />
+            </label>
+            <label>
+              <span>Offline fallback</span>
+              <select
+                value={relayFallbackPolicyInput}
+                onChange={(event) => setRelayFallbackPolicyInput(event.target.value)}
+              >
+                <option value="queue_until_online">Queue until online</option>
+                <option value="fallback_to_standby">Fallback to standby</option>
+              </select>
+            </label>
+            <label>
+              <span>&nbsp;</span>
+              <div className="transport-token-actions">
+                <button type="button" onClick={saveRelayRoutingPolicy}>Save Routing Policy</button>
+                <button type="button" onClick={refreshRelayRouting}>Refresh Devices</button>
+              </div>
+            </label>
+          </div>
+          {relayDevices.length > 0 && (
+            <div className="connection-list" role="list" aria-label="Relay devices">
+              {relayDevices.map((device) => (
+                <article key={device.deviceId} className="connection-card" role="listitem">
+                  <div className="connection-card-head">
+                    <div>
+                      <h3>{device.deviceLabel}</h3>
+                      <p>
+                        {device.deviceId}
+                        {device.isPreferredTarget ? " • preferred target" : ""}
+                      </p>
+                    </div>
+                    <span className={`connection-badge ${device.status === "active" ? "connected" : "disconnected"}`}>
+                      {device.status}
+                    </span>
+                  </div>
+                  <p className="connection-card-meta">
+                    {device.lastSeenAtMs
+                      ? `Last seen ${new Date(device.lastSeenAtMs).toLocaleString()}`
+                      : "No heartbeat yet"}
+                  </p>
+                  <div className="oauth-actions">
+                    <button type="button" onClick={() => setPreferredRelayDevice(device.deviceId)}>
+                      Set Preferred
+                    </button>
+                    <select
+                      value={device.status}
+                      onChange={(event) => setRelayDeviceStatus(device.deviceId, event.target.value)}
+                      aria-label={`Relay device status for ${device.deviceLabel}`}
+                    >
+                      <option value="active">Active</option>
+                      <option value="standby">Standby</option>
+                      <option value="offline">Offline</option>
+                      <option value="disabled">Disabled</option>
+                    </select>
+                  </div>
+                </article>
+              ))}
+            </div>
           )}
         </>
       )}

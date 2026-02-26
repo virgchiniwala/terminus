@@ -371,6 +371,42 @@ struct RelayApprovalSyncTickResponse {
     applied_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayDeviceRecord {
+    device_id: String,
+    device_label: String,
+    status: String,
+    last_seen_at_ms: Option<i64>,
+    capabilities_json: String,
+    is_preferred_target: bool,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayRoutingPolicyResponse {
+    approval_target_mode: String,
+    trigger_target_mode: String,
+    fallback_policy: String,
+    updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayDeviceStatusInput {
+    device_id: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayRoutingPolicyInput {
+    approval_target_mode: String,
+    trigger_target_mode: String,
+    fallback_policy: String,
+}
+
 fn open_connection(state: &tauri::State<AppState>) -> Result<rusqlite::Connection, String> {
     let db_path = state
         .db_path
@@ -423,8 +459,8 @@ fn get_remote_approval_readiness(
     let callback_ready = providers::keychain::get_relay_callback_secret()
         .map_err(|e| e.to_string())?
         .is_some_and(|v| !v.trim().is_empty());
-    let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
     let connection = open_connection(&state)?;
+    let device_id = ensure_local_relay_device_registered(&connection)?;
     let pending_approvals = RunnerEngine::list_pending_approvals(&connection)
         .map_err(|e| e.to_string())?
         .len();
@@ -457,6 +493,314 @@ fn clear_relay_callback_secret(
 ) -> Result<RemoteApprovalReadinessResponse, String> {
     providers::keychain::delete_relay_callback_secret().map_err(|e| e.to_string())?;
     get_remote_approval_readiness(state)
+}
+
+fn normalize_relay_device_status(input: &str) -> Result<String, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "active" | "standby" | "offline" | "disabled" => Ok(input.trim().to_ascii_lowercase()),
+        _ => Err("Relay device status must be Active, Standby, Offline, or Disabled.".to_string()),
+    }
+}
+
+fn normalize_relay_target_mode(input: &str) -> Result<String, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "preferred_only" | "manual_target_only" => Ok(input.trim().to_ascii_lowercase()),
+        _ => Err(
+            "Relay routing target mode must be Preferred Only or Manual Target Only.".to_string(),
+        ),
+    }
+}
+
+fn normalize_relay_fallback_policy(input: &str) -> Result<String, String> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "queue_until_online" | "fallback_to_standby" => Ok(input.trim().to_ascii_lowercase()),
+        _ => Err(
+            "Relay fallback policy must be Queue Until Online or Fallback To Standby.".to_string(),
+        ),
+    }
+}
+
+fn local_relay_device_label() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "This Mac".to_string())
+}
+
+fn upsert_relay_device(
+    connection: &rusqlite::Connection,
+    device_id: &str,
+    device_label: &str,
+    status: &str,
+    is_preferred_target: bool,
+    touch_last_seen: bool,
+) -> Result<(), String> {
+    let now = now_ms();
+    let existing_status: Option<String> = connection
+        .query_row(
+            "SELECT status FROM relay_devices WHERE device_id = ?1",
+            rusqlite::params![device_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read relay device: {e}"))?;
+    let status_to_write = existing_status.unwrap_or_else(|| status.to_string());
+    let last_seen = if touch_last_seen { Some(now) } else { None };
+    connection
+        .execute(
+            "INSERT INTO relay_devices (
+                device_id, device_label, status, last_seen_at_ms, capabilities_json, is_preferred_target, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(device_id) DO UPDATE SET
+                device_label = excluded.device_label,
+                status = COALESCE(relay_devices.status, excluded.status),
+                last_seen_at_ms = COALESCE(excluded.last_seen_at_ms, relay_devices.last_seen_at_ms),
+                capabilities_json = excluded.capabilities_json,
+                updated_at_ms = excluded.updated_at_ms",
+            rusqlite::params![
+                device_id,
+                device_label,
+                status_to_write,
+                last_seen,
+                r#"{"relayPush":true,"relayCallback":true}"#,
+                if is_preferred_target { 1 } else { 0 },
+                now
+            ],
+        )
+        .map_err(|e| format!("Could not upsert relay device: {e}"))?;
+    Ok(())
+}
+
+fn ensure_local_relay_device_registered(
+    connection: &rusqlite::Connection,
+) -> Result<String, String> {
+    let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
+    let existing_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM relay_devices", [], |row| row.get(0))
+        .map_err(|e| format!("Could not count relay devices: {e}"))?;
+    let existing_pref: Option<i64> = connection
+        .query_row(
+            "SELECT is_preferred_target FROM relay_devices WHERE device_id = ?1",
+            rusqlite::params![&device_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read relay device preference: {e}"))?;
+    upsert_relay_device(
+        connection,
+        &device_id,
+        &local_relay_device_label(),
+        "active",
+        existing_pref.unwrap_or(if existing_count == 0 { 1 } else { 0 }) != 0,
+        true,
+    )?;
+    Ok(device_id)
+}
+
+fn list_relay_devices_internal(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<RelayDeviceRecord>, String> {
+    let mut stmt = connection
+        .prepare(
+            "SELECT device_id, device_label, status, last_seen_at_ms, capabilities_json, is_preferred_target, updated_at_ms
+             FROM relay_devices
+             ORDER BY is_preferred_target DESC, updated_at_ms DESC, device_label ASC",
+        )
+        .map_err(|e| format!("Could not prepare relay devices query: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(RelayDeviceRecord {
+                device_id: row.get(0)?,
+                device_label: row.get(1)?,
+                status: row.get(2)?,
+                last_seen_at_ms: row.get(3)?,
+                capabilities_json: row.get(4)?,
+                is_preferred_target: row.get::<_, i64>(5)? != 0,
+                updated_at_ms: row.get(6)?,
+            })
+        })
+        .map_err(|e| format!("Could not read relay devices: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("Could not parse relay device row: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn get_relay_routing_policy_internal(
+    connection: &rusqlite::Connection,
+) -> Result<RelayRoutingPolicyResponse, String> {
+    connection
+        .query_row(
+            "SELECT approval_target_mode, trigger_target_mode, fallback_policy, updated_at_ms
+             FROM relay_routing_policy WHERE singleton_id = 1",
+            [],
+            |row| {
+                Ok(RelayRoutingPolicyResponse {
+                    approval_target_mode: row.get(0)?,
+                    trigger_target_mode: row.get(1)?,
+                    fallback_policy: row.get(2)?,
+                    updated_at_ms: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Could not read relay routing policy: {e}"))
+}
+
+fn relay_local_execution_allowed(
+    connection: &rusqlite::Connection,
+    local_device_id: &str,
+    channel: RelayDecisionSyncChannel,
+) -> Result<Option<String>, String> {
+    let policy = get_relay_routing_policy_internal(connection)?;
+    let mode = match channel {
+        RelayDecisionSyncChannel::Poll | RelayDecisionSyncChannel::Push => {
+            policy.approval_target_mode.as_str()
+        }
+    };
+    let local: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT status, is_preferred_target FROM relay_devices WHERE device_id = ?1",
+            rusqlite::params![local_device_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read local relay device status: {e}"))?;
+    let Some((status, preferred_flag)) = local else {
+        return Ok(Some("Relay device is not registered yet.".to_string()));
+    };
+    if status == "disabled" {
+        return Ok(Some(
+            "This device is disabled for relay routing. Re-enable it in Relay Devices.".to_string(),
+        ));
+    }
+    if status == "offline" {
+        return Ok(Some(
+            "This device is marked offline for relay routing. Set it to Active to receive relay decisions.".to_string(),
+        ));
+    }
+    if mode == "manual_target_only" {
+        return Ok(Some(
+            "Relay routing is set to manual target only. This device will not pull decisions automatically.".to_string(),
+        ));
+    }
+    if preferred_flag == 0 {
+        let preferred: Option<String> = connection
+            .query_row(
+                "SELECT device_label FROM relay_devices
+                 WHERE is_preferred_target = 1 AND status = 'active'
+                 ORDER BY updated_at_ms DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Could not read preferred relay device: {e}"))?;
+        if let Some(label) = preferred {
+            return Ok(Some(format!(
+                "This device is standby. Relay decisions are routed to preferred device {label}."
+            )));
+        }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+fn list_relay_devices(state: tauri::State<AppState>) -> Result<Vec<RelayDeviceRecord>, String> {
+    let connection = open_connection(&state)?;
+    let _ = ensure_local_relay_device_registered(&connection)?;
+    list_relay_devices_internal(&connection)
+}
+
+#[tauri::command]
+fn get_relay_routing_policy(
+    state: tauri::State<AppState>,
+) -> Result<RelayRoutingPolicyResponse, String> {
+    let connection = open_connection(&state)?;
+    let _ = ensure_local_relay_device_registered(&connection)?;
+    get_relay_routing_policy_internal(&connection)
+}
+
+#[tauri::command]
+fn set_relay_device_status(
+    state: tauri::State<AppState>,
+    input: RelayDeviceStatusInput,
+) -> Result<Vec<RelayDeviceRecord>, String> {
+    let connection = open_connection(&state)?;
+    let _ = ensure_local_relay_device_registered(&connection)?;
+    let status = normalize_relay_device_status(&input.status)?;
+    let now = now_ms();
+    let affected = connection
+        .execute(
+            "UPDATE relay_devices SET status = ?1, updated_at_ms = ?2 WHERE device_id = ?3",
+            rusqlite::params![status, now, input.device_id.trim()],
+        )
+        .map_err(|e| format!("Could not update relay device status: {e}"))?;
+    if affected == 0 {
+        return Err("Relay device was not found.".to_string());
+    }
+    list_relay_devices_internal(&connection)
+}
+
+#[tauri::command]
+fn set_preferred_relay_device(
+    state: tauri::State<AppState>,
+    device_id: String,
+) -> Result<Vec<RelayDeviceRecord>, String> {
+    let connection = open_connection(&state)?;
+    let _ = ensure_local_relay_device_registered(&connection)?;
+    let target = device_id.trim();
+    if target.is_empty() {
+        return Err("Relay device id is required.".to_string());
+    }
+    let exists: Option<String> = connection
+        .query_row(
+            "SELECT device_id FROM relay_devices WHERE device_id = ?1",
+            rusqlite::params![target],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Could not read relay device: {e}"))?;
+    if exists.is_none() {
+        return Err("Relay device was not found.".to_string());
+    }
+    connection
+        .execute("UPDATE relay_devices SET is_preferred_target = 0", [])
+        .map_err(|e| format!("Could not clear preferred relay device: {e}"))?;
+    connection.execute(
+        "UPDATE relay_devices SET is_preferred_target = 1, updated_at_ms = ?1 WHERE device_id = ?2",
+        rusqlite::params![now_ms(), target],
+    )
+    .map_err(|e| format!("Could not set preferred relay device: {e}"))?;
+    list_relay_devices_internal(&connection)
+}
+
+#[tauri::command]
+fn update_relay_routing_policy(
+    state: tauri::State<AppState>,
+    input: RelayRoutingPolicyInput,
+) -> Result<RelayRoutingPolicyResponse, String> {
+    let connection = open_connection(&state)?;
+    let _ = ensure_local_relay_device_registered(&connection)?;
+    let approval_target_mode = normalize_relay_target_mode(&input.approval_target_mode)?;
+    let trigger_target_mode = normalize_relay_target_mode(&input.trigger_target_mode)?;
+    let fallback_policy = normalize_relay_fallback_policy(&input.fallback_policy)?;
+    connection
+        .execute(
+            "UPDATE relay_routing_policy
+             SET approval_target_mode = ?1,
+                 trigger_target_mode = ?2,
+                 fallback_policy = ?3,
+                 updated_at_ms = ?4
+             WHERE singleton_id = 1",
+            rusqlite::params![
+                approval_target_mode,
+                trigger_target_mode,
+                fallback_policy,
+                now_ms()
+            ],
+        )
+        .map_err(|e| format!("Could not update relay routing policy: {e}"))?;
+    get_relay_routing_policy_internal(&connection)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -533,14 +877,17 @@ fn get_relay_sync_status_internal(
     let callback_ready = providers::keychain::get_relay_callback_secret()
         .map_err(|e| e.to_string())?
         .is_some_and(|v| !v.trim().is_empty());
-    let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
+    let device_id = ensure_local_relay_device_registered(connection)?;
     let state = load_relay_sync_state(connection, channel)?;
+    let routing_block_reason = relay_local_execution_allowed(connection, &device_id, channel)?;
     let enabled = relay_configured && callback_ready;
     let now = now_ms();
     let status = if !relay_configured {
         "relay_not_configured"
     } else if !callback_ready {
         "callback_not_ready"
+    } else if routing_block_reason.is_some() {
+        "device_not_target"
     } else if state.backoff_until_ms.is_some_and(|until| until > now) {
         "backoff"
     } else if state
@@ -566,7 +913,7 @@ fn get_relay_sync_status_internal(
         last_success_at_ms: state.last_success_at_ms,
         consecutive_failures: state.consecutive_failures,
         backoff_until_ms: state.backoff_until_ms,
-        last_error: state.last_error,
+        last_error: routing_block_reason.or(state.last_error),
         last_processed_count: state.last_processed_count,
         total_processed_count: state.total_processed_count,
     })
@@ -584,7 +931,7 @@ fn tick_relay_approval_sync_internal(
     let callback_secret = providers::keychain::get_relay_callback_secret()
         .map_err(|e| e.to_string())?
         .filter(|v| !v.trim().is_empty());
-    let device_id = ensure_relay_device_id().map_err(|e| e.to_string())?;
+    let device_id = ensure_local_relay_device_registered(connection)?;
     let mut sync_state = load_relay_sync_state(connection, channel)?;
     let now = now_ms();
 
@@ -601,6 +948,16 @@ fn tick_relay_approval_sync_internal(
         sync_state.last_error = Some(
             "Remote approvals are not ready yet. Generate a callback secret first.".to_string(),
         );
+        persist_relay_sync_state(connection, channel, &sync_state, now)?;
+        return Ok(RelayApprovalSyncTickResponse {
+            status: get_relay_sync_status_internal(connection, channel)?,
+            applied_count: 0,
+        });
+    }
+    if let Some(reason) = relay_local_execution_allowed(connection, &device_id, channel)? {
+        sync_state.last_error = Some(reason);
+        sync_state.last_processed_count = 0;
+        sync_state.backoff_until_ms = None;
         persist_relay_sync_state(connection, channel, &sync_state, now)?;
         return Ok(RelayApprovalSyncTickResponse {
             status: get_relay_sync_status_internal(connection, channel)?,
@@ -4147,6 +4504,47 @@ mod tests {
             .to_ascii_lowercase()
             .contains("gmail"));
     }
+
+    #[test]
+    fn relay_routing_blocks_standby_when_preferred_active() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("db");
+        db::bootstrap_schema(&mut conn).expect("bootstrap");
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO relay_devices (device_id, device_label, status, last_seen_at_ms, capabilities_json, is_preferred_target, updated_at_ms)
+             VALUES ('dev_a','Mac A','active',?1,'{}',1,?1), ('dev_b','Mac B','standby',?1,'{}',0,?1)",
+            rusqlite::params![now],
+        )
+        .expect("insert devices");
+
+        let reason = relay_local_execution_allowed(&conn, "dev_b", RelayDecisionSyncChannel::Poll)
+            .expect("routing check")
+            .expect("should block standby");
+        assert!(reason.contains("preferred device"));
+    }
+
+    #[test]
+    fn relay_routing_blocks_manual_target_mode() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("db");
+        db::bootstrap_schema(&mut conn).expect("bootstrap");
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO relay_devices (device_id, device_label, status, last_seen_at_ms, capabilities_json, is_preferred_target, updated_at_ms)
+             VALUES ('dev_a','Mac A','active',?1,'{}',1,?1)",
+            rusqlite::params![now],
+        )
+        .expect("insert device");
+        conn.execute(
+            "UPDATE relay_routing_policy SET approval_target_mode = 'manual_target_only', updated_at_ms = ?1 WHERE singleton_id = 1",
+            rusqlite::params![now],
+        )
+        .expect("update policy");
+
+        let reason = relay_local_execution_allowed(&conn, "dev_a", RelayDecisionSyncChannel::Push)
+            .expect("routing check")
+            .expect("manual target should block");
+        assert!(reason.to_ascii_lowercase().contains("manual target"));
+    }
 }
 
 fn main() {
@@ -4189,6 +4587,11 @@ fn main() {
             list_primary_outcomes,
             get_transport_status,
             get_remote_approval_readiness,
+            list_relay_devices,
+            get_relay_routing_policy,
+            set_relay_device_status,
+            set_preferred_relay_device,
+            update_relay_routing_policy,
             get_relay_sync_status,
             get_relay_push_status,
             tick_relay_approval_sync,
