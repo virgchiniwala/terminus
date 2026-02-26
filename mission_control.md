@@ -1,5 +1,5 @@
 # Mission Control — Terminus
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
 ## Fresh Session Note
 Read these in order before starting work:
@@ -10,8 +10,8 @@ Read these in order before starting work:
 
 ## Current State
 - Mode: Day
-- Branch: `codex/callapi-primitive-mvp`
-- Product shape: local-first, object-first Personal AI OS + personal agent harness
+- Branch: `codex/vault-viability-spike`
+- Product shape: local-first, object-first Personal AI workspace / agent harness (pivoting wedge to confidential document workflows)
 
 ## Strategic Guardrails
 - Home remains object-first (`Autopilots / Outcomes / Approvals / Activity`)
@@ -34,7 +34,7 @@ Read these in order before starting work:
 1. Website Monitor
 2. Inbox Triage (paste/forward + always-on watching)
 3. Daily Brief
-4. Custom (Dynamic Plan Generation — P0, current work)
+4. Custom (Dynamic Plan Generation — shipped; used for wedge workflows)
 
 ## Runtime Baseline (Shipped)
 - Persisted run state machine with tick execution
@@ -58,44 +58,39 @@ Read these in order before starting work:
 ## Test Coverage Baseline
 | Category | Status |
 |----------|--------|
-| Backend Rust (`cargo test`) | 91/91 passing |
+| Backend Rust (`cargo test`) | 91+/91+ passing (baseline before spike crate additions) |
 | Mission tests | 3/3 passing |
 | Frontend component tests | 2 (ConnectionHealthSummary only) |
 | Integration tests | 0 |
 | **Gaps** | App.tsx (1,253 lines, 0 tests), ApprovalPanel, IntentBar, RunnerStatus |
 
 ## Now
-### Gmail PubSub Trigger Path (Gmail-only, polling fallback preserved)
+### Phase 0 — Vault Extraction Viability Spike (document workflow wedge)
 Owner: active session
 Status: In progress
 Scope:
-- Add Gmail PubSub trigger state + event log tables (Gmail-only) and relay callback ingestion path
-- Reuse existing inbox watcher Gmail fetch/queue path (PubSub triggers fetch; no direct message processing)
-- Add trigger mode (`polling|gmail_pubsub|auto`) with polling fallback when PubSub is inactive/expired
-- Add minimal Connections UI for watch health, mode, config, and recent PubSub events
-- Update docs/handoff so trigger model and next phases stay aligned
+- Add extraction spike module and dev probe command for PDF/DOCX/XLSX/MD/TXT
+- Verify dependency compatibility for `pdf-extract`, `docx-rs`, `calamine`, `tauri-plugin-dialog`
+- Validate Tauri v2 capability/plugin wiring (`dialog:allow-open`)
+- Record fidelity checklist/results for real professional docs before Vault implementation
 Acceptance:
-- Valid PubSub callback enqueues Gmail fetch path (through existing inbox watcher path), not a parallel runner path
-- Duplicate PubSub callbacks do not create duplicate runs
-- Invalid/malformed callback payloads fail with human-readable event status
-- `auto` mode falls back to polling when PubSub is expired/error/disabled
-- `cargo test`, `npm test`, `npm run lint`, `npm run build` pass
+- `cargo check` passes with new extraction crates + dialog plugin
+- Tauri capability uses correct v2 permission (`dialog:allow-open`)
+- `probe_vault_extraction` returns bounded previews and extraction notes
+- Spike doc captures fidelity gates and manual validation checklist
 Verification:
 ```bash
 cd src-tauri && cargo fmt --check
-cd src-tauri && cargo test
-npm test
-npm run lint
-npm run build
+cd src-tauri && cargo check
 ```
 
 ## Next
-1. **Rule extraction / "Make This a Rule" (P0.12)**
-   - rule object + rule applications + approval-gated creation
-2. **Relay multi-device routing + device targeting foundations**
-   - explicit preferred target / queue-until-online semantics
-3. **Ownership leases + doctor surfaces**
-   - runner/push consumer ownership locks and operator-readable health/runbooks
+1. **Vault Core (Phase 1)**
+   - local file import, extraction persistence, true delete, local disclosure UI
+2. **`ReadVaultFile` primitive implementation (Phase 2)**
+   - bounded excerpt generation + runner integration + receipts/provenance
+3. **Document Review Against Standard workflow (wedge MVP)**
+   - PE-first paid workflow validation
 
 ## Non-goals (MVP)
 - Arbitrary end-user code execution

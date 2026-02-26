@@ -1,5 +1,5 @@
 # DOCS_INDEX.md
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
 ## Canonical Documentation Map
 
@@ -24,6 +24,7 @@ Last updated: 2026-02-25
 - `docs/PRIMITIVES.md` — action primitives catalog including Custom recipe + MCP direction (updated 2026-02-25)
 - `docs/RUNNER_STATE_MACHINE.md` — execution model
 - `docs/LEARNING_LAYER.md` — feedback loop design
+- `docs/VAULT_EXTRACTION_SPIKE.md` — Phase 0 crate viability + extraction fidelity gate for document workflows (updated 2026-02-26)
 
 ### Security and trust model
 - `docs/SECURITY_AND_CONTROL.md`

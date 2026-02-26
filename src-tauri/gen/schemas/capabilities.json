@@ -1,1 +1,1 @@
-{"main-window":{"identifier":"main-window","description":"Primary Terminus window capability boundary. Grants local app IPC and core APIs only to the main window.","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"main-window":{"identifier":"main-window","description":"Primary Terminus window capability boundary. Grants local app IPC and core APIs only to the main window.","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open"]}}

@@ -3,5 +3,5 @@
   "identifier": "main-window",
   "description": "Primary Terminus window capability boundary. Grants local app IPC and core APIs only to the main window.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

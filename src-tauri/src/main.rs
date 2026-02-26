@@ -11,6 +11,7 @@ mod providers;
 mod runner;
 mod schema;
 mod transport;
+mod vault_spike;
 mod web;
 mod webhook_triggers;
 
@@ -190,6 +191,13 @@ struct ApiKeyRefInput {
 #[serde(rename_all = "camelCase")]
 struct ApiKeyRefDeleteInput {
     ref_name: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultExtractionProbeInput {
+    path: String,
+    max_preview_chars: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -823,6 +831,13 @@ fn get_api_key_ref_status(ref_name: String) -> Result<ApiKeyRefStatus, String> {
         ref_name,
         configured,
     })
+}
+
+#[tauri::command]
+fn probe_vault_extraction(
+    input: VaultExtractionProbeInput,
+) -> Result<vault_spike::VaultExtractionProbe, String> {
+    vault_spike::probe_extraction(&input.path, input.max_preview_chars).map_err(|e| e.to_string())
 }
 
 fn codex_oauth_status_response() -> Result<CodexOauthStatusResponse, String> {
@@ -4137,6 +4152,7 @@ mod tests {
 fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let db_path = db::bootstrap_sqlite(app.handle())?;
             let state = app.state::<AppState>();
@@ -4184,6 +4200,7 @@ fn main() {
             set_api_key_ref,
             remove_api_key_ref,
             get_api_key_ref_status,
+            probe_vault_extraction,
             get_codex_oauth_status,
             import_codex_oauth_from_local_auth,
             remove_codex_oauth,
